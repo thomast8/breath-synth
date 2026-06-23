@@ -14,9 +14,10 @@ DerivedData/
 # Local assistant/runtime state
 .claude/
 
-# Generated breath assets + manifest (regenerate with `breath generate-assets`)
+# The breath palette in Assets/breaths (oneShot recordings + manifest.json) is the
+# canonical, committed asset set so renders work straight from a clone. Scratch WAV
+# renders dropped into the assets dir are still ignored.
 Assets/breaths/*.wav
-Assets/breaths/manifest.json
 
 # Local secrets — API keys come from the environment, never committed
 .env

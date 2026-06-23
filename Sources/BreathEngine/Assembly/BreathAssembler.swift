@@ -16,19 +16,9 @@ public struct BreathSourceClips: Sendable {
     }
 }
 
-public enum BreathAssemblyMode: String, Sendable, Equatable, CaseIterable {
-    /// Use start + loop + end clips with crossfaded joins.
-    case segmented
-    /// Use only the loop/sustain clip, shaped with smooth fades.
-    case sustainOnly
-    /// Use a full recorded breath as the envelope teacher and texture source.
-    case recordedShape
-}
-
 /// Tunables for assembly.
 public struct AssemblerSettings: Sendable {
     public var sampleRate: Double
-    public var assemblyMode: BreathAssemblyMode
     /// Cap on how much of the start clip (the onset) to use.
     public var startCapSec: Double
     /// Cap on how much of the end clip (the release tail) to use.
@@ -40,14 +30,12 @@ public struct AssemblerSettings: Sendable {
 
     public init(
         sampleRate: Double = AudioConstants.workingSampleRate,
-        assemblyMode: BreathAssemblyMode = .segmented,
         startCapSec: Double = 0.6,
         endCapSec: Double = 0.8,
         crossfadeSec: Double = 0.2,
         shortThresholdSec: Double = 1.5
     ) {
         self.sampleRate = sampleRate
-        self.assemblyMode = assemblyMode
         self.startCapSec = startCapSec
         self.endCapSec = endCapSec
         self.crossfadeSec = crossfadeSec
@@ -71,54 +59,14 @@ public enum BreathAssembler {
         let sr = settings.sampleRate
         let totalFrames = max(1, Segments.frames(seconds: durationSec, sampleRate: sr))
 
-        // Apply playback-rate variation to the loop texture only (keeps duration exact).
-        let loop = deltas.playbackRate == 1 ? clips.loop : Resample.byFactor(clips.loop, deltas.playbackRate)
-
-        if settings.assemblyMode == .recordedShape, let full = clips.oneShot, full.count > 1 {
-            var body = recordedShapeBranch(type: type, totalFrames: totalFrames, full: full, settings: settings)
-            let g = Float(deltas.gainScalar)
-            for i in 0..<totalFrames {
-                body[i] *= g
-            }
-            return body
+        guard let full = clips.oneShot, full.count > 1 else {
+            return [Float](repeating: 0, count: totalFrames)
         }
 
-        if settings.assemblyMode == .sustainOnly {
-            var body = sustainOnlyBranch(type: type, totalFrames: totalFrames, loop: loop, settings: settings)
-            let g = Float(deltas.gainScalar)
-            for i in 0..<totalFrames {
-                body[i] *= g
-            }
-            return body
-        }
-
-        let startCap = Segments.frames(seconds: settings.startCapSec, sampleRate: sr)
-        let endCap = Segments.frames(seconds: settings.endCapSec, sampleRate: sr)
-        let startUse = min(clips.start.count, startCap)
-        let endUse = min(clips.end.count, endCap)
-
-        let canNormal = startUse > 0 && endUse > 0 && loop.count > 1
-            && totalFrames >= startUse + endUse
-
-        var body: [Float]
-        if durationSec < settings.shortThresholdSec || !canNormal {
-            body = shortBranch(totalFrames: totalFrames, loop: loop, clips: clips)
-        } else {
-            body = normalBranch(
-                totalFrames: totalFrames,
-                startUse: startUse,
-                endUse: endUse,
-                loop: loop,
-                clips: clips,
-                settings: settings
-            )
-        }
-
-        // Macro contour + variation gain.
-        let env = Envelope.curve(for: type, frames: totalFrames, durationSec: durationSec)
+        var body = recordedShapeBranch(type: type, totalFrames: totalFrames, full: full, settings: settings)
         let g = Float(deltas.gainScalar)
         for i in 0..<totalFrames {
-            body[i] = body[i] * env[i] * g
+            body[i] *= g
         }
         return body
     }
@@ -150,7 +98,7 @@ public enum BreathAssembler {
                 direct = matchLocalEnergy(direct, targetEnvelope: shape, sampleRate: settings.sampleRate)
             }
             direct = enforceRenderedEnergyShape(direct, sampleRate: settings.sampleRate)
-            return normalizePeak(ensureZeroEndpoints(direct))
+            return normalizePeak(removeLowRumble(direct, sampleRate: settings.sampleRate))
         }
 
         let texture = flattenedTexture(from: source, envelope: envelope, type: type, sampleRate: settings.sampleRate)
@@ -165,7 +113,7 @@ public enum BreathAssembler {
             carrier = matchLocalEnergy(carrier, targetEnvelope: shape, sampleRate: settings.sampleRate)
         }
         carrier = enforceRenderedEnergyShape(carrier, sampleRate: settings.sampleRate)
-        return normalizePeak(ensureZeroEndpoints(carrier))
+        return normalizePeak(removeLowRumble(carrier, sampleRate: settings.sampleRate))
     }
 
     private static func trimOuterSilence(_ samples: [Float], sampleRate: Double) -> [Float] {
@@ -186,13 +134,36 @@ public enum BreathAssembler {
     private static func cleanRecordedSource(_ samples: [Float], sampleRate: Double) -> [Float] {
         guard samples.count > 1 else { return samples }
         var out = samples
-        // Remove recording-room rumble and headphone/mic handling noise while leaving
-        // the airy breath band intact.
-        var lowCut = Biquad(kind: .highpass, sampleRate: sampleRate, frequency: 120, q: 0.7)
-        lowCut.process(&out)
+        // Remove recording-room rumble and mic-handling noise *before* the energy
+        // flattening below, which would otherwise amplify that sub-band floor by
+        // ~20 dB during quiet passages. A real breath carries no useful energy below
+        // ~300 Hz, so a steep low-cut here is inaudible on the breath itself.
+        highpass4th(&out, sampleRate: sampleRate, frequency: 200)
         out[0] = 0
         out[out.count - 1] = 0
         return out
+    }
+
+    /// 4th-order Butterworth high-pass (two cascaded RBJ biquads with the standard
+    /// Butterworth section Qs, so the response is maximally flat with no resonant
+    /// bump at the corner that would re-introduce rumble).
+    private static func highpass4th(_ samples: inout [Float], sampleRate: Double, frequency: Double) {
+        var stage1 = Biquad(kind: .highpass, sampleRate: sampleRate, frequency: frequency, q: 0.541_196)
+        var stage2 = Biquad(kind: .highpass, sampleRate: sampleRate, frequency: frequency, q: 1.306_563)
+        stage1.process(&samples)
+        stage2.process(&samples)
+    }
+
+    /// Delivery-side guarantee that the finished breath carries no sub-band rumble,
+    /// regardless of what the energy-flattening stages did to the noise floor.
+    private static func removeLowRumble(_ samples: [Float], sampleRate: Double) -> [Float] {
+        guard samples.count > 1 else { return samples }
+        var out = samples
+        // Measured knee: a breath's lowest real energy sits at ~320 Hz, while the
+        // recorded floor below is constant room rumble. 260 Hz clears the audible
+        // rumble band yet leaves the 320 Hz+ breath warmth intact.
+        highpass4th(&out, sampleRate: sampleRate, frequency: 260)
+        return ensureZeroEndpoints(out)
     }
 
     private static func rmsEnvelope(_ samples: [Float], sampleRate: Double) -> [Float] {
@@ -446,135 +417,6 @@ public enum BreathAssembler {
         return samples.map { $0 * gain }
     }
 
-    private static func sustainOnlyBranch(
-        type: BreathType,
-        totalFrames: Int,
-        loop: [Float],
-        settings: AssemblerSettings
-    ) -> [Float] {
-        guard loop.count > 1 else { return [Float](repeating: 0, count: totalFrames) }
-        let sustainWindow = sustainLoopTexture(for: type, loop: loop, sampleRate: settings.sampleRate)
-        let sustainCrossfadeSec = max(settings.crossfadeSec, 0.45)
-        let requestedX = Segments.frames(seconds: sustainCrossfadeSec, sampleRate: settings.sampleRate)
-        let x = min(max(1, requestedX), max(1, sustainWindow.count - 1), max(1, totalFrames / 4))
-        var body = Crossfade.assembleLoopedMiddle(loop: sustainWindow, targetLen: totalFrames, crossfadeLen: x)
-        let curve = sustainEnvelope(for: type, frames: totalFrames, sampleRate: settings.sampleRate)
-        for i in body.indices {
-            body[i] *= curve[i]
-        }
-        if !body.isEmpty {
-            body[0] = 0
-            body[body.count - 1] = 0
-        }
-        return body
-    }
-
-    static func sustainLoopTexture(for type: BreathType, loop: [Float], sampleRate: Double) -> [Float] {
-        let window = sustainLoopWindow(for: type, loop: loop, sampleRate: sampleRate)
-        guard type == .inhale, window.count > 2 else { return window }
-        return window + Array(window.reversed())
-    }
-
-    static func sustainLoopWindow(for type: BreathType, loop: [Float], sampleRate: Double) -> [Float] {
-        guard loop.count > 1 else { return loop }
-        let targetSeconds: Double = type == .inhale ? 2.20 : 1.65
-        let minSeconds: Double = type == .inhale ? 1.25 : 1.10
-        let targetFrames = min(loop.count, max(1, Segments.frames(seconds: targetSeconds, sampleRate: sampleRate)))
-        let minFrames = min(loop.count, max(1, Segments.frames(seconds: minSeconds, sampleRate: sampleRate)))
-        guard loop.count > targetFrames else { return loop }
-
-        let analysisFrames = max(64, Segments.frames(seconds: 0.10, sampleRate: sampleRate))
-        let hop = max(1, analysisFrames / 2)
-        let maxEnergy = rms(loop, range: 0..<loop.count)
-        guard maxEnergy > 0 else { return loop }
-        let floor = maxEnergy * 0.28
-
-        if let window = bestSustainWindow(
-            loop: loop,
-            length: targetFrames,
-            hop: hop,
-            analysisFrames: analysisFrames,
-            floor: floor
-        ) {
-            return window
-        }
-        if minFrames < targetFrames,
-           let window = bestSustainWindow(
-            loop: loop,
-            length: minFrames,
-            hop: hop,
-            analysisFrames: analysisFrames,
-            floor: floor
-           ) {
-            return window
-        }
-
-        return Array(loop[0..<targetFrames])
-    }
-
-    private static func bestSustainWindow(
-        loop: [Float],
-        length: Int,
-        hop: Int,
-        analysisFrames: Int,
-        floor: Double
-    ) -> [Float]? {
-        guard length > 0, length <= loop.count else { return nil }
-        var bestStart = 0
-        var bestScore = -Double.infinity
-
-        let lastStart = loop.count - length
-        for start in stride(from: 0, through: lastStart, by: hop) {
-            let score = sustainWindowScore(loop: loop, start: start, length: length, analysisFrames: analysisFrames, floor: floor)
-            if score > bestScore {
-                bestScore = score
-                bestStart = start
-            }
-        }
-
-        if bestScore.isFinite {
-            return Array(loop[bestStart..<(bestStart + length)])
-        }
-        return nil
-    }
-
-    private static func sustainWindowScore(
-        loop: [Float],
-        start: Int,
-        length: Int,
-        analysisFrames: Int,
-        floor: Double
-    ) -> Double {
-        var values: [Double] = []
-        let end = start + length
-        var cursor = start
-        while cursor < end {
-            let next = min(end, cursor + analysisFrames)
-            let value = rms(loop, range: cursor..<next)
-            values.append(value)
-            cursor = next
-        }
-
-        guard !values.isEmpty else { return -Double.infinity }
-        let mean = values.reduce(0, +) / Double(values.count)
-        guard mean >= floor else { return -Double.infinity }
-        let minValue = values.min() ?? 0
-        guard minValue >= floor * 0.45 else { return -Double.infinity }
-
-        let variance = values.reduce(0) { partial, value in
-            let delta = value - mean
-            return partial + delta * delta
-        } / Double(values.count)
-        let coefficientOfVariation = sqrt(variance) / max(mean, 1e-9)
-
-        let edgeFrames = min(max(1, analysisFrames), length)
-        let head = rms(loop, range: start..<(start + edgeFrames))
-        let tail = rms(loop, range: (end - edgeFrames)..<end)
-        let edgeMismatch = abs(head - tail) / max(mean, 1e-9)
-
-        return mean - mean * 0.75 * coefficientOfVariation - mean * 0.35 * edgeMismatch
-    }
-
     private static func rms(_ samples: [Float], range: Range<Int>) -> Double {
         guard !range.isEmpty else { return 0 }
         var sum = 0.0
@@ -583,76 +425,5 @@ public enum BreathAssembler {
             sum += value * value
         }
         return sqrt(sum / Double(range.count))
-    }
-
-    private static func sustainEnvelope(for type: BreathType, frames: Int, sampleRate: Double) -> [Float] {
-        guard frames > 0 else { return [] }
-        if frames == 1 { return [0] }
-        var out = [Float](repeating: 1, count: frames)
-        let duration = Double(frames) / sampleRate
-        let fadeInSec: Double
-        let fadeOutSec: Double
-        switch type {
-        case .inhale:
-            fadeInSec = min(1.6, duration * 0.34)
-            fadeOutSec = min(2.4, duration * 0.46)
-        case .exhale:
-            fadeInSec = min(0.95, duration * 0.20)
-            fadeOutSec = min(3.4, duration * 0.62)
-        }
-        let fadeIn = min(frames, max(1, Segments.frames(seconds: fadeInSec, sampleRate: sampleRate)))
-        let fadeOut = min(frames, max(1, Segments.frames(seconds: fadeOutSec, sampleRate: sampleRate)))
-        for i in 0..<fadeIn {
-            let t = Float(i) / Float(max(1, fadeIn - 1))
-            out[i] *= 0.5 - 0.5 * cos(t * Float.pi)
-        }
-        for i in 0..<fadeOut {
-            let t = Float(i) / Float(max(1, fadeOut - 1))
-            out[frames - 1 - i] *= 0.5 - 0.5 * cos(t * Float.pi)
-        }
-        out[0] = 0
-        out[frames - 1] = 0
-        return out
-    }
-
-    private static func shortBranch(totalFrames: Int, loop: [Float], clips: BreathSourceClips) -> [Float] {
-        let source: [Float]
-        if let oneShot = clips.oneShot, oneShot.count > 1 {
-            source = oneShot
-        } else if loop.count > 1 {
-            source = loop
-        } else if clips.start.count > 1 {
-            source = clips.start
-        } else {
-            return [Float](repeating: 0, count: totalFrames)
-        }
-        return Resample.toFrames(source, totalFrames)
-    }
-
-    private static func normalBranch(
-        totalFrames: Int,
-        startUse: Int,
-        endUse: Int,
-        loop: [Float],
-        clips: BreathSourceClips,
-        settings: AssemblerSettings
-    ) -> [Float] {
-        let head = Array(clips.start[0..<startUse])
-        let tail = Array(clips.end[(clips.end.count - endUse)...])
-        let requestedX = Segments.frames(seconds: settings.crossfadeSec, sampleRate: settings.sampleRate)
-        let x = Segments.clampCrossfade(requestedX, loopLen: loop.count, startLen: startUse, endLen: endUse)
-
-        // total = startUse + middleLen - 2x + endUse  ⇒  middleLen = total - start - end + 2x
-        let middleLen = totalFrames - startUse - endUse + 2 * x
-        guard middleLen >= 1 else {
-            return shortBranch(totalFrames: totalFrames, loop: loop, clips: clips)
-        }
-
-        let middle = Crossfade.assembleLoopedMiddle(loop: loop, targetLen: middleLen, crossfadeLen: x)
-        var out = [Float](repeating: 0, count: totalFrames)
-        Crossfade.place(into: &out, segment: head, at: 0, headCrossfade: 0)
-        Crossfade.place(into: &out, segment: middle, at: startUse - x, headCrossfade: x)
-        Crossfade.place(into: &out, segment: tail, at: startUse + middleLen - 2 * x, headCrossfade: x)
-        return out
     }
 }

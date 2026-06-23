@@ -110,7 +110,6 @@ public enum BreathError: Error, CustomStringConvertible, Equatable {
     case missingStyle(BreathStyle, BreathType)
     case emptyRole(BreathStyle, BreathType, BreathRole)
     case assetNotFound(String)
-    case unsupportedProceduralStyle(BreathStyle)
     case audioFormatUnavailable
     case unsupportedManifestVersion(found: Int, supported: Int)
     case ioFailure(String)
@@ -118,17 +117,15 @@ public enum BreathError: Error, CustomStringConvertible, Equatable {
     public var description: String {
         switch self {
         case let .missingStyle(style, type):
-            return "No assets for style '\(style)' (\(type.rawValue)). Run `breath generate-assets` first."
+            return "No assets for style '\(style)' (\(type.rawValue)). Check the manifest in your assets directory."
         case let .emptyRole(style, type, role):
             return "Style '\(style)' (\(type.rawValue)) is missing the '\(role.rawValue)' clip."
         case let .assetNotFound(path):
             return "Asset file not found: \(path)"
-        case let .unsupportedProceduralStyle(style):
-            return "Procedural style '\(style)' is not supported. Use one of: calm, neutral."
         case .audioFormatUnavailable:
             return "Could not create the working audio format."
         case let .unsupportedManifestVersion(found, supported):
-            return "Manifest version \(found) is newer than supported (\(supported)). Update breath-synth or regenerate assets."
+            return "Manifest version \(found) is newer than supported (\(supported)). Update breath-synth or use a matching manifest."
         case let .ioFailure(message):
             return "Audio I/O failure: \(message)"
         }

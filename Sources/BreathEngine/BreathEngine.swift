@@ -1,12 +1,15 @@
 import AVFoundation
 import Foundation
 
-/// Top-level engine: renders exact-duration procedural or asset-backed breaths and
-/// plays them (single, cycle, or looping).
+/// Top-level engine: renders exact-duration asset-backed breaths and plays them
+/// (single, cycle, or looping).
 @MainActor
 public final class BreathEngine {
     public struct Config: Sendable {
-        public var source: BreathSource
+        /// Directory containing the breath assets referenced by `manifest`.
+        public var assetsDirectory: URL
+        /// The breath palette driving assembly.
+        public var manifest: BreathManifest
         /// Assembler tunables, including the working sample rate, the single source
         /// of truth for the rate (both decode-resampling and assembly read it here).
         public var settings: AssemblerSettings
@@ -21,20 +24,6 @@ public final class BreathEngine {
         public var sampleRate: Double { settings.sampleRate }
 
         public init(
-            source: BreathSource = .procedural(),
-            sampleRate: Double = AudioConstants.workingSampleRate,
-            masterGain: Double = 1.0,
-            headroomDb: Double = -1.0,
-            cacheLimit: Int = 32
-        ) {
-            self.source = source
-            self.settings = AssemblerSettings(sampleRate: sampleRate)
-            self.masterGain = masterGain
-            self.headroomDb = headroomDb
-            self.cacheLimit = cacheLimit
-        }
-
-        public init(
             assetsDirectory: URL,
             manifest: BreathManifest,
             sampleRate: Double = AudioConstants.workingSampleRate,
@@ -42,18 +31,17 @@ public final class BreathEngine {
             headroomDb: Double = -1.0,
             cacheLimit: Int = 32
         ) {
-            self.init(
-                source: .assets(directory: assetsDirectory, manifest: manifest),
-                sampleRate: sampleRate,
-                masterGain: masterGain,
-                headroomDb: headroomDb,
-                cacheLimit: cacheLimit
-            )
+            self.assetsDirectory = assetsDirectory
+            self.manifest = manifest
+            self.settings = AssemblerSettings(sampleRate: sampleRate)
+            self.masterGain = masterGain
+            self.headroomDb = headroomDb
+            self.cacheLimit = cacheLimit
         }
     }
 
     private let config: Config
-    private let library: AssetLibrary?
+    private let library: AssetLibrary
     private let format: AVAudioFormat
     private var player: BreathPlayer?
     private var cache: [String: AVAudioPCMBuffer] = [:]
@@ -70,16 +58,11 @@ public final class BreathEngine {
             throw BreathError.audioFormatUnavailable
         }
         self.format = format
-        switch config.source {
-        case .procedural:
-            self.library = nil
-        case let .assets(directory, manifest):
-            self.library = AssetLibrary(
-                baseURL: directory,
-                manifest: manifest,
-                sampleRate: config.sampleRate
-            )
-        }
+        self.library = AssetLibrary(
+            baseURL: config.assetsDirectory,
+            manifest: config.manifest,
+            sampleRate: config.sampleRate
+        )
     }
 
     /// Convenience: build an engine from a manifest.json file in `assetsDirectory`.
@@ -96,36 +79,14 @@ public final class BreathEngine {
         let seed = spec.seed ?? Variation.stableSeed(for: spec)
         var rng = SeededRNG(seed: seed)
         let deltas = Variation.draw(spec.variation, rng: &rng)
-        var samples: [Float]
-        switch config.source {
-        case let .procedural(proceduralConfig):
-            let resolvedSpec = BreathSpec(
-                type: spec.type,
-                durationSec: spec.durationSec,
-                style: spec.style,
-                seed: seed,
-                variation: spec.variation,
-                gain: spec.gain
-            )
-            samples = try ProceduralBreathSynth.render(
-                spec: resolvedSpec,
-                sampleRate: config.sampleRate,
-                config: proceduralConfig,
-                deltas: deltas
-            )
-        case .assets:
-            guard let library else {
-                throw BreathError.ioFailure("asset source is missing its library")
-            }
-            let clips = try library.sourceClips(style: spec.style, type: spec.type, rng: &rng)
-            samples = BreathAssembler.assemble(
-                type: spec.type,
-                durationSec: spec.clampedDurationSec,
-                clips: clips,
-                settings: config.settings,
-                deltas: deltas
-            )
-        }
+        let clips = try library.sourceClips(style: spec.style, type: spec.type, rng: &rng)
+        var samples = BreathAssembler.assemble(
+            type: spec.type,
+            durationSec: spec.clampedDurationSec,
+            clips: clips,
+            settings: config.settings,
+            deltas: deltas
+        )
         applyMasterGainAndClamp(&samples, extraGain: spec.gain)
         return samples
     }
@@ -249,14 +210,7 @@ public final class BreathEngine {
         return sourceCachePrefix + "|" + Variation.canonicalString(spec) + "|seed:\(seed)"
     }
 
-    private var sourceCachePrefix: String {
-        switch config.source {
-        case .procedural:
-            return "procedural"
-        case .assets:
-            return "assets"
-        }
-    }
+    private var sourceCachePrefix: String { "assets" }
 
     private func store(_ buffer: AVAudioPCMBuffer, for key: String) {
         cache[key] = buffer

@@ -6,7 +6,7 @@ enum BiquadKind {
     case bandpass
 }
 
-/// Small RBJ biquad filter used by the procedural breath synth.
+/// Small RBJ biquad filter used by the breath assembler's filtering stages.
 struct Biquad: Sendable {
     private var b0: Float
     private var b1: Float

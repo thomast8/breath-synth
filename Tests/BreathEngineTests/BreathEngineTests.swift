@@ -187,106 +187,6 @@ final class BiquadTests: XCTestCase {
     }
 }
 
-final class ProceduralBreathSynthTests: XCTestCase {
-    func testExactLengthFiniteNonSilentAndZeroEndpointsForAllProceduralGenerators() throws {
-        for generator in ProceduralGeneratorKind.allCases {
-            for type in BreathType.allCases {
-                for duration in [1.0, 4.0, 12.0] {
-                    let spec = BreathSpec(
-                        type: type,
-                        durationSec: duration,
-                        style: "calm",
-                        seed: 123,
-                        variation: .none
-                    )
-                    let out = try ProceduralBreathSynth.render(
-                        spec: spec,
-                        config: ProceduralBreathConfig(generator: generator)
-                    )
-                    XCTAssertEqual(out.count, Int((duration * AudioConstants.workingSampleRate).rounded()))
-                    XCTAssertEqual(out.first!, 0, accuracy: 1e-7)
-                    XCTAssertEqual(out.last!, 0, accuracy: 1e-7)
-                    XCTAssertTrue(out.allSatisfy(\.isFinite))
-                    XCTAssertGreaterThan(out.map { abs($0) }.max()!, 0.001)
-                    XCTAssertLessThanOrEqual(out.map { abs($0) }.max()!, 1.0)
-                }
-            }
-        }
-    }
-
-    func testDefaultGeneratorHandlesLongBreath() throws {
-        let duration = 30.0
-        let out = try ProceduralBreathSynth.render(
-            spec: BreathSpec(type: .exhale, durationSec: duration, style: "calm", seed: 123, variation: .none)
-        )
-        XCTAssertEqual(out.count, Int((duration * AudioConstants.workingSampleRate).rounded()))
-        XCTAssertEqual(out.first!, 0, accuracy: 1e-7)
-        XCTAssertEqual(out.last!, 0, accuracy: 1e-7)
-        XCTAssertTrue(out.allSatisfy(\.isFinite))
-        XCTAssertGreaterThan(out.map { abs($0) }.max()!, 0.001)
-        XCTAssertLessThanOrEqual(out.map { abs($0) }.max()!, 1.0)
-    }
-
-    func testDeterministicForSameSeedAndDifferentAcrossSeeds() throws {
-        let a = try ProceduralBreathSynth.render(spec: BreathSpec(type: .inhale, durationSec: 4, style: "calm", seed: 1))
-        let b = try ProceduralBreathSynth.render(spec: BreathSpec(type: .inhale, durationSec: 4, style: "calm", seed: 1))
-        let c = try ProceduralBreathSynth.render(spec: BreathSpec(type: .inhale, durationSec: 4, style: "calm", seed: 2))
-        XCTAssertEqual(a, b)
-        XCTAssertNotEqual(a, c)
-    }
-
-    func testShootoutGeneratorsProduceDifferentSignals() throws {
-        let spec = BreathSpec(type: .exhale, durationSec: 6, style: "calm", seed: 7, variation: .none)
-        let tract = try ProceduralBreathSynth.render(spec: spec, config: ProceduralBreathConfig(generator: .tract))
-        let klatt = try ProceduralBreathSynth.render(spec: spec, config: ProceduralBreathConfig(generator: .klatt))
-        let granular = try ProceduralBreathSynth.render(spec: spec, config: ProceduralBreathConfig(generator: .granular))
-        XCTAssertGreaterThan(meanAbsoluteDifference(tract, klatt), 0.001)
-        XCTAssertGreaterThan(meanAbsoluteDifference(tract, granular), 0.001)
-        XCTAssertGreaterThan(meanAbsoluteDifference(klatt, granular), 0.001)
-    }
-
-    func testLegacyCalmStyleIsSofterThanNeutral() throws {
-        let config = ProceduralBreathConfig(generator: .legacy)
-        let neutral = try ProceduralBreathSynth.render(
-            spec: BreathSpec(type: .exhale, durationSec: 6, style: "neutral", seed: 7, variation: .none),
-            config: config
-        )
-        let calm = try ProceduralBreathSynth.render(
-            spec: BreathSpec(type: .exhale, durationSec: 6, style: "calm", seed: 7, variation: .none),
-            config: config
-        )
-        XCTAssertLessThan(rms(calm), rms(neutral))
-        XCTAssertLessThan(highFrequencyEnergy(calm), highFrequencyEnergy(neutral))
-    }
-
-    func testUnsupportedProceduralStyleThrows() {
-        let spec = BreathSpec(type: .inhale, durationSec: 4, style: "unknown", seed: 1)
-        XCTAssertThrowsError(try ProceduralBreathSynth.render(spec: spec)) { error in
-            XCTAssertEqual(error as? BreathError, .unsupportedProceduralStyle("unknown"))
-        }
-    }
-
-    @MainActor
-    func testEngineDefaultRendersWithoutAssets() throws {
-        let engine = try BreathEngine(config: BreathEngine.Config())
-        let out = try engine.renderSamples(BreathSpec(type: .inhale, durationSec: 2, style: "calm", seed: 5))
-        XCTAssertEqual(out.count, Int((2 * AudioConstants.workingSampleRate).rounded()))
-        XCTAssertGreaterThan(out.map { abs($0) }.max()!, 0.001)
-    }
-
-    @MainActor
-    func testEngineRendersEachShootoutGenerator() throws {
-        for generator in [ProceduralGeneratorKind.tract, .klatt, .granular] {
-            let engine = try BreathEngine(config: BreathEngine.Config(
-                source: .procedural(ProceduralBreathConfig(generator: generator))
-            ))
-            let out = try engine.renderSamples(BreathSpec(type: .inhale, durationSec: 2, style: "calm", seed: 5))
-            XCTAssertEqual(out.count, Int((2 * AudioConstants.workingSampleRate).rounded()))
-            XCTAssertGreaterThan(out.map { abs($0) }.max()!, 0.001)
-        }
-    }
-}
-
 final class ManifestTests: XCTestCase {
     func testCodableRoundTrip() throws {
         var manifest = BreathManifest()
@@ -306,25 +206,6 @@ private func rms(_ samples: [Float]) -> Float {
     return sqrt(sum / Float(samples.count))
 }
 
-private func highFrequencyEnergy(_ samples: [Float]) -> Float {
-    guard samples.count > 1 else { return 0 }
-    var sum: Float = 0
-    for i in 1..<samples.count {
-        sum += abs(samples[i] - samples[i - 1])
-    }
-    return sum / Float(samples.count - 1)
-}
-
-private func meanAbsoluteDifference(_ a: [Float], _ b: [Float]) -> Float {
-    let count = min(a.count, b.count)
-    guard count > 0 else { return 0 }
-    var sum: Float = 0
-    for i in 0..<count {
-        sum += abs(a[i] - b[i])
-    }
-    return sum / Float(count)
-}
-
 final class AssemblerTests: XCTestCase {
     private func clips(sampleRate sr: Double) -> BreathSourceClips {
         BreathSourceClips(
@@ -333,48 +214,6 @@ final class AssemblerTests: XCTestCase {
             end: [Float](repeating: 0.5, count: Int(1.0 * sr)),
             oneShot: [Float](repeating: 0.5, count: Int(1.2 * sr))
         )
-    }
-
-    func testNormalBranchExactLengthAndZeroEndpoints() {
-        let settings = AssemblerSettings()
-        let sr = settings.sampleRate
-        let dur = 8.0
-        let out = BreathAssembler.assemble(
-            type: .inhale, durationSec: dur, clips: clips(sampleRate: sr), settings: settings
-        )
-        XCTAssertEqual(out.count, Int((dur * sr).rounded()))
-        XCTAssertEqual(out.first!, 0, accuracy: 1e-6)
-        XCTAssertEqual(out.last!, 0, accuracy: 1e-6)
-        XCTAssertLessThanOrEqual(out.map { abs($0) }.max()!, 1.0)
-        // Guard against a silent-but-correct-length regression.
-        XCTAssertGreaterThan(out.map { abs($0) }.max()!, 0.01)
-    }
-
-    func testShortBranchExactLength() {
-        let settings = AssemblerSettings()
-        let sr = settings.sampleRate
-        let dur = 1.0
-        let out = BreathAssembler.assemble(
-            type: .exhale, durationSec: dur, clips: clips(sampleRate: sr), settings: settings
-        )
-        XCTAssertEqual(out.count, Int((dur * sr).rounded()))
-        XCTAssertEqual(out.first!, 0, accuracy: 1e-6)
-        XCTAssertEqual(out.last!, 0, accuracy: 1e-6)
-        XCTAssertGreaterThan(out.map { abs($0) }.max()!, 0.01)
-    }
-
-    func testShortNormalBoundaryAt1Point5s() {
-        // Exactly 1.5s routes to the normal branch (strict `<` threshold).
-        let settings = AssemblerSettings()
-        let sr = settings.sampleRate
-        let dur = 1.5
-        let out = BreathAssembler.assemble(
-            type: .inhale, durationSec: dur, clips: clips(sampleRate: sr), settings: settings
-        )
-        XCTAssertEqual(out.count, Int((dur * sr).rounded()))
-        XCTAssertEqual(out.first!, 0, accuracy: 1e-6)
-        XCTAssertEqual(out.last!, 0, accuracy: 1e-6)
-        XCTAssertGreaterThan(out.map { abs($0) }.max()!, 0.01)
     }
 
     func testLongBreathExactLength() {
@@ -388,80 +227,9 @@ final class AssemblerTests: XCTestCase {
         XCTAssertGreaterThan(out.map { abs($0) }.max()!, 0.01)
     }
 
-    func testSustainOnlyExactLengthAndZeroEndpoints() {
-        let settings = AssemblerSettings(assemblyMode: .sustainOnly)
-        let sr = settings.sampleRate
-        let dur = 8.0
-        let out = BreathAssembler.assemble(
-            type: .exhale, durationSec: dur, clips: clips(sampleRate: sr), settings: settings
-        )
-        XCTAssertEqual(out.count, Int((dur * sr).rounded()))
-        XCTAssertEqual(out.first!, 0, accuracy: 1e-6)
-        XCTAssertEqual(out.last!, 0, accuracy: 1e-6)
-        XCTAssertGreaterThan(out.map { abs($0) }.max()!, 0.01)
-    }
-
-    func testSustainOnlyIgnoresStartAndEndClips() {
-        let settings = AssemblerSettings(assemblyMode: .sustainOnly)
-        let sr = settings.sampleRate
-        let loop = (0..<Int(2 * sr)).map { 0.25 * sin(Float($0) * 0.01) }
-        let clips = BreathSourceClips(
-            start: [Float](repeating: 50, count: Int(0.8 * sr)),
-            loop: loop,
-            end: [Float](repeating: -50, count: Int(0.8 * sr)),
-            oneShot: [Float](repeating: 50, count: Int(1.2 * sr))
-        )
-        let out = BreathAssembler.assemble(
-            type: .inhale, durationSec: 4, clips: clips, settings: settings
-        )
-        XCTAssertLessThan(out.map { abs($0) }.max()!, 0.4)
-    }
-
-    func testSustainLoopWindowRejectsQuietTail() {
-        let sr = 1_000.0
-        let loud = (0..<2_000).map { 0.6 * sin(Float($0) * 0.05) }
-        let quiet = (0..<3_000).map { 0.03 * sin(Float($0) * 0.05) }
-        let loop = loud + quiet
-
-        let window = BreathAssembler.sustainLoopWindow(for: .inhale, loop: loop, sampleRate: sr)
-
-        XCTAssertLessThan(window.count, loop.count)
-        XCTAssertGreaterThan(rms(window), 0.25)
-    }
-
-    func testInhaleSustainTexturePingPongsTheSelectedWindow() {
-        let sr = 1_000.0
-        let loud = (0..<2_500).map { 0.6 * sin(Float($0) * 0.05) }
-        let quiet = (0..<2_500).map { 0.03 * sin(Float($0) * 0.05) }
-        let loop = loud + quiet
-
-        let window = BreathAssembler.sustainLoopWindow(for: .inhale, loop: loop, sampleRate: sr)
-        let texture = BreathAssembler.sustainLoopTexture(for: .inhale, loop: loop, sampleRate: sr)
-        let exhaleTexture = BreathAssembler.sustainLoopTexture(for: .exhale, loop: loop, sampleRate: sr)
-
-        XCTAssertEqual(texture.count, window.count * 2)
-        XCTAssertEqual(texture.first!, window.first!)
-        XCTAssertEqual(texture.last!, window.first!)
-        XCTAssertLessThan(exhaleTexture.count, texture.count)
-    }
-
-    func testSustainOnlyDoesNotFollowSourceDropout() {
-        let sr = 1_000.0
-        let settings = AssemblerSettings(sampleRate: sr, assemblyMode: .sustainOnly, crossfadeSec: 0.1)
-        let loud = (0..<2_000).map { 0.6 * sin(Float($0) * 0.05) }
-        let quiet = (0..<3_000).map { 0.03 * sin(Float($0) * 0.05) }
-        let clips = BreathSourceClips(start: [], loop: loud + quiet, end: [], oneShot: nil)
-
-        let out = BreathAssembler.assemble(type: .inhale, durationSec: 6, clips: clips, settings: settings)
-        let early = rms(Array(out[2_000..<2_500]))
-        let mid = rms(Array(out[3_000..<3_500]))
-
-        XCTAssertGreaterThan(mid, early * 0.55)
-    }
-
     func testRecordedShapeModeRendersExactLengthFromFullBreath() {
         let sr = 1_000.0
-        let settings = AssemblerSettings(sampleRate: sr, assemblyMode: .recordedShape, crossfadeSec: 0.1)
+        let settings = AssemblerSettings(sampleRate: sr, crossfadeSec: 0.1)
         let full = shapedBreathFrames(sampleRate: sr, seconds: 10)
         let clips = BreathSourceClips(start: [], loop: [], end: [], oneShot: full)
 
@@ -475,7 +243,7 @@ final class AssemblerTests: XCTestCase {
 
     func testRecordedShapeModeCompressesEnvelopeForShortBreath() {
         let sr = 1_000.0
-        let settings = AssemblerSettings(sampleRate: sr, assemblyMode: .recordedShape, crossfadeSec: 0.1)
+        let settings = AssemblerSettings(sampleRate: sr, crossfadeSec: 0.1)
         let full = shapedBreathFrames(sampleRate: sr, seconds: 10)
         let clips = BreathSourceClips(start: [], loop: [], end: [], oneShot: full)
 
@@ -492,7 +260,7 @@ final class AssemblerTests: XCTestCase {
 
     func testRecordedShapeModeSmoothsAttackAndReleaseWobbles() {
         let sr = 1_000.0
-        let settings = AssemblerSettings(sampleRate: sr, assemblyMode: .recordedShape, crossfadeSec: 0.1)
+        let settings = AssemblerSettings(sampleRate: sr, crossfadeSec: 0.1)
         let full = wobblyShapedBreathFrames(sampleRate: sr, seconds: 10)
         let clips = BreathSourceClips(start: [], loop: [], end: [], oneShot: full)
 
@@ -508,7 +276,7 @@ final class AssemblerTests: XCTestCase {
 
     func testRecordedShapeNearLengthModeSmoothsDirectFadeWobbles() {
         let sr = 1_000.0
-        let settings = AssemblerSettings(sampleRate: sr, assemblyMode: .recordedShape, crossfadeSec: 0.1)
+        let settings = AssemblerSettings(sampleRate: sr, crossfadeSec: 0.1)
         let full = wobblyShapedBreathFrames(sampleRate: sr, seconds: 10)
         let clips = BreathSourceClips(start: [], loop: [], end: [], oneShot: full)
 
@@ -521,6 +289,78 @@ final class AssemblerTests: XCTestCase {
         XCTAssertTrue(isMostlyNondecreasing(attack, tolerance: 0.003), "attack RMS: \(attack)")
         XCTAssertTrue(isMostlyNonincreasing(release, tolerance: 0.003), "release RMS: \(release)")
     }
+
+    func testRecordedShapeRemovesLowFrequencyRumble() {
+        // A synthetic "recording": a breath-shaped mid-band texture (600/1100/1900 Hz)
+        // plus a strong 50 Hz room rumble. The recordedShape path's high-pass stages
+        // must strip the sub-band before delivery, so the rendered output should carry
+        // far less sub-120 Hz energy than its 300-3000 Hz mid-band energy.
+        let sr = 16_000.0
+        let settings = AssemblerSettings(sampleRate: sr, crossfadeSec: 0.1)
+        let full = rumblyBreathFrames(sampleRate: sr, seconds: 10)
+        let clips = BreathSourceClips(start: [], loop: [], end: [], oneShot: full)
+
+        let out = BreathAssembler.assemble(type: .inhale, durationSec: 6, clips: clips, settings: settings)
+
+        // Probe band energy on a central 1.0 s window where the breath plateaus.
+        // With exactly `sr` samples, integer-Hz probes land on DFT bin centres, so
+        // the naive single-bin Goertzel below stays numerically stable and free of
+        // spectral leakage.
+        let windowLen = Int(sr)
+        let windowStart = max(0, out.count / 2 - windowLen / 2)
+        let window = Array(out[windowStart..<min(out.count, windowStart + windowLen)])
+
+        let lowProbes: [Double] = [40, 50, 60, 100]
+        let midProbes: [Double] = [600, 1_100, 1_900]
+        let lowEnergy = lowProbes.map { goertzelMagnitude(window, sampleRate: sr, frequency: $0) }.reduce(0, +) / Double(lowProbes.count)
+        let midEnergy = midProbes.map { goertzelMagnitude(window, sampleRate: sr, frequency: $0) }.reduce(0, +) / Double(midProbes.count)
+
+        XCTAssertGreaterThan(midEnergy, 0, "mid-band energy should be present")
+        XCTAssertLessThan(lowEnergy / midEnergy, 0.5, "sub-120 Hz energy \(lowEnergy) vs mid \(midEnergy)")
+    }
+}
+
+/// Deterministic breath-shaped mid-band texture with a strong 50 Hz rumble added
+/// on top, used to verify the recordedShape path's low-cut filtering.
+private func rumblyBreathFrames(sampleRate: Double, seconds: Double) -> [Float] {
+    let count = Int((sampleRate * seconds).rounded())
+    return (0..<count).map { i in
+        let t = Double(i) / Double(max(1, count - 1))
+        let envelope: Double
+        if t < 0.25 {
+            envelope = t / 0.25
+        } else if t > 0.72 {
+            envelope = max(0, (1 - t) / 0.28)
+        } else {
+            envelope = 1
+        }
+        let phase = Double(i) / sampleRate
+        // Mid-band "breath" texture: a few partials between ~500 and ~2000 Hz.
+        let breath = sin(2 * Double.pi * 600 * phase)
+            + 0.8 * sin(2 * Double.pi * 1_100 * phase)
+            + 0.6 * sin(2 * Double.pi * 1_900 * phase)
+        // Strong low-frequency room rumble.
+        let rumble = 1.2 * sin(2 * Double.pi * 50 * phase)
+        return Float(envelope * (0.18 * breath + rumble))
+    }
+}
+
+/// Naive single-bin Goertzel magnitude at `frequency`, used to probe band energy
+/// without a full FFT dependency.
+private func goertzelMagnitude(_ samples: [Float], sampleRate: Double, frequency: Double) -> Double {
+    guard samples.count > 1 else { return 0 }
+    let omega = 2 * Double.pi * frequency / sampleRate
+    let coeff = 2 * cos(omega)
+    var s0 = 0.0
+    var s1 = 0.0
+    var s2 = 0.0
+    for sample in samples {
+        s0 = Double(sample) + coeff * s1 - s2
+        s2 = s1
+        s1 = s0
+    }
+    let power = s1 * s1 + s2 * s2 - coeff * s1 * s2
+    return sqrt(max(0, power)) / Double(samples.count)
 }
 
 private func shapedBreathFrames(sampleRate: Double, seconds: Double) -> [Float] {

@@ -5,7 +5,6 @@ import Foundation
 struct Cycle: AsyncParsableCommand {
     static let configuration = CommandConfiguration(abstract: "Play a breathing cycle: inhale, hold, exhale, hold.")
 
-    @OptionGroup var sourceOpt: SourceOption
     @OptionGroup var assetsOpt: AssetsOption
 
     @Option(help: "Inhale duration (s).")
@@ -21,7 +20,7 @@ struct Cycle: AsyncParsableCommand {
     var holdOut: Double = 0
 
     @Option(help: "Breath style.")
-    var style: String = "neutral"
+    var style: String = "calm"
 
     @Flag(name: .long, help: "Loop forever (Ctrl-C to stop).")
     var loop: Bool = false
@@ -38,12 +37,7 @@ struct Cycle: AsyncParsableCommand {
             loop: loop,
             cycles: cycles
         )
-        let engine = try await loadEngine(
-            source: sourceOpt.source,
-            generator: sourceOpt.generator,
-            assembly: sourceOpt.assembly,
-            assetsURL: assetsOpt.assetsURL
-        )
+        let engine = try await loadEngine(assetsURL: assetsOpt.assetsURL)
         let shape = "in \(inhale)s / hold \(holdIn)s / out \(exhale)s / hold \(holdOut)s"
         if loop {
             print("looping cycle (\(shape)) - Ctrl-C to stop")

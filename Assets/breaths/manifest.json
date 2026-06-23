@@ -1,0 +1,19 @@
+{
+  "version" : 1,
+  "styles" : {
+    "calm" : {
+      "inhale" : {
+        "start" : [],
+        "loop" : [],
+        "end" : [],
+        "oneShot" : [ { "file" : "inhale_good.aifc", "durationSec" : 13.408, "sampleRate" : 48000, "channels" : 1 } ]
+      },
+      "exhale" : {
+        "start" : [],
+        "loop" : [],
+        "end" : [],
+        "oneShot" : [ { "file" : "exhale_good.aifc", "durationSec" : 13.162667, "sampleRate" : 48000, "channels" : 1 } ]
+      }
+    }
+  }
+}

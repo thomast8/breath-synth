@@ -5,7 +5,6 @@ import Foundation
 struct Play: AsyncParsableCommand {
     static let configuration = CommandConfiguration(abstract: "Render and play one breath.")
 
-    @OptionGroup var sourceOpt: SourceOption
     @OptionGroup var assetsOpt: AssetsOption
 
     @Option(help: "inhale or exhale.")
@@ -15,7 +14,7 @@ struct Play: AsyncParsableCommand {
     var duration: Double = 4
 
     @Option(help: "Breath style.")
-    var style: String = "neutral"
+    var style: String = "calm"
 
     @Option(help: "Optional fixed seed for reproducible variation.")
     var seed: UInt64?
@@ -32,16 +31,8 @@ struct Play: AsyncParsableCommand {
             seed: seed,
             variation: variation ? .default : .none
         )
-        let engine = try await loadEngine(
-            source: sourceOpt.source,
-            generator: sourceOpt.generator,
-            assembly: sourceOpt.assembly,
-            assetsURL: assetsOpt.assetsURL
-        )
-        let sourceName = sourceOpt.source == .procedural
-            ? "\(sourceOpt.source.rawValue)/\(sourceOpt.generator.rawValue)"
-            : sourceOpt.source.rawValue
-        print("playing \(sourceName) \(breathType.rawValue) \(duration)s [\(style)] ...")
+        let engine = try await loadEngine(assetsURL: assetsOpt.assetsURL)
+        print("playing \(breathType.rawValue) \(duration)s [\(style)] ...")
         try await engine.play(spec)
         await engine.stop()
     }

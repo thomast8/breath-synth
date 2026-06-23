@@ -73,7 +73,8 @@ public struct StyleManifest: Codable, Sendable, Equatable {
     }
 }
 
-/// The on-disk manifest written by `breath generate-assets` and read by the engine.
+/// The on-disk manifest describing the breath palette (one `oneShot` recording per
+/// style and type), read by the engine.
 public struct BreathManifest: Codable, Sendable, Equatable {
     public var version: Int
     /// Keyed by style name.

@@ -5,7 +5,6 @@ import Foundation
 struct Render: AsyncParsableCommand {
     static let configuration = CommandConfiguration(abstract: "Render one breath to a WAV file (offline inspection).")
 
-    @OptionGroup var sourceOpt: SourceOption
     @OptionGroup var assetsOpt: AssetsOption
 
     @Option(help: "inhale or exhale.")
@@ -15,7 +14,7 @@ struct Render: AsyncParsableCommand {
     var duration: Double = 4
 
     @Option(help: "Breath style.")
-    var style: String = "neutral"
+    var style: String = "calm"
 
     @Option(help: "Optional fixed seed for reproducible variation.")
     var seed: UInt64?
@@ -36,12 +35,7 @@ struct Render: AsyncParsableCommand {
             variation: variation ? .default : .none
         )
         let url = URL(fileURLWithPath: out)
-        let engine = try await loadEngine(
-            source: sourceOpt.source,
-            generator: sourceOpt.generator,
-            assembly: sourceOpt.assembly,
-            assetsURL: assetsOpt.assetsURL
-        )
+        let engine = try await loadEngine(assetsURL: assetsOpt.assetsURL)
         try await engine.renderToWAV(spec, url: url)
         print("wrote \(url.path)")
     }
