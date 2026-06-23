@@ -3,8 +3,9 @@ import BreathEngine
 import Foundation
 
 struct Cycle: AsyncParsableCommand {
-    static let configuration = CommandConfiguration(abstract: "Play a breathing cycle: inhale → hold → exhale → hold.")
+    static let configuration = CommandConfiguration(abstract: "Play a breathing cycle: inhale, hold, exhale, hold.")
 
+    @OptionGroup var sourceOpt: SourceOption
     @OptionGroup var assetsOpt: AssetsOption
 
     @Option(help: "Inhale duration (s).")
@@ -37,16 +38,21 @@ struct Cycle: AsyncParsableCommand {
             loop: loop,
             cycles: cycles
         )
-        let engine = try await BreathEngine.load(assetsDirectory: assetsOpt.assetsURL)
+        let engine = try await loadEngine(
+            source: sourceOpt.source,
+            generator: sourceOpt.generator,
+            assembly: sourceOpt.assembly,
+            assetsURL: assetsOpt.assetsURL
+        )
         let shape = "in \(inhale)s / hold \(holdIn)s / out \(exhale)s / hold \(holdOut)s"
         if loop {
-            print("looping cycle (\(shape)) — Ctrl-C to stop")
+            print("looping cycle (\(shape)) - Ctrl-C to stop")
             try await engine.playCycle(cycle)
             while true {
                 try await Task.sleep(nanoseconds: 60 * 1_000_000_000)
             }
         } else {
-            print("playing \(cycles) cycles (\(shape)) …")
+            print("playing \(cycles) cycles (\(shape)) ...")
             try await engine.playCycle(cycle)
             await engine.stop()
         }

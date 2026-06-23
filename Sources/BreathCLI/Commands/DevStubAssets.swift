@@ -4,7 +4,7 @@ import Foundation
 
 /// Generates synthetic noise-based breath assets so the whole render/play/cycle
 /// pipeline can be exercised offline, without ElevenLabs or an API key. These are
-/// placeholder textures for development only — real assets come from `generate-assets`.
+/// placeholder textures for development only; real assets come from `generate-assets`.
 struct DevStubAssets: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "dev-stub-assets",

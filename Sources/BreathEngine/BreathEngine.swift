@@ -1,15 +1,13 @@
 import AVFoundation
 import Foundation
 
-/// Top-level engine: renders exact-duration breaths from an asset palette and plays
-/// them (single, cycle, or looping). Asset-driven only — if a requested style/role
-/// is missing it throws rather than producing silence.
+/// Top-level engine: renders exact-duration procedural or asset-backed breaths and
+/// plays them (single, cycle, or looping).
 @MainActor
 public final class BreathEngine {
     public struct Config: Sendable {
-        public var assetsDirectory: URL
-        public var manifest: BreathManifest
-        /// Assembler tunables, including the working sample rate — the single source
+        public var source: BreathSource
+        /// Assembler tunables, including the working sample rate, the single source
         /// of truth for the rate (both decode-resampling and assembly read it here).
         public var settings: AssemblerSettings
         /// Master gain applied after assembly.
@@ -23,6 +21,20 @@ public final class BreathEngine {
         public var sampleRate: Double { settings.sampleRate }
 
         public init(
+            source: BreathSource = .procedural(),
+            sampleRate: Double = AudioConstants.workingSampleRate,
+            masterGain: Double = 1.0,
+            headroomDb: Double = -1.0,
+            cacheLimit: Int = 32
+        ) {
+            self.source = source
+            self.settings = AssemblerSettings(sampleRate: sampleRate)
+            self.masterGain = masterGain
+            self.headroomDb = headroomDb
+            self.cacheLimit = cacheLimit
+        }
+
+        public init(
             assetsDirectory: URL,
             manifest: BreathManifest,
             sampleRate: Double = AudioConstants.workingSampleRate,
@@ -30,29 +42,44 @@ public final class BreathEngine {
             headroomDb: Double = -1.0,
             cacheLimit: Int = 32
         ) {
-            self.assetsDirectory = assetsDirectory
-            self.manifest = manifest
-            self.settings = AssemblerSettings(sampleRate: sampleRate)
-            self.masterGain = masterGain
-            self.headroomDb = headroomDb
-            self.cacheLimit = cacheLimit
+            self.init(
+                source: .assets(directory: assetsDirectory, manifest: manifest),
+                sampleRate: sampleRate,
+                masterGain: masterGain,
+                headroomDb: headroomDb,
+                cacheLimit: cacheLimit
+            )
         }
     }
 
     private let config: Config
-    private let library: AssetLibrary
-    private let player: BreathPlayer
+    private let library: AssetLibrary?
+    private let format: AVAudioFormat
+    private var player: BreathPlayer?
     private var cache: [String: AVAudioPCMBuffer] = [:]
     private var cacheOrder: [String] = []
 
     public init(config: Config) throws {
         self.config = config
-        self.library = AssetLibrary(
-            baseURL: config.assetsDirectory,
-            manifest: config.manifest,
-            sampleRate: config.sampleRate
-        )
-        self.player = try BreathPlayer(sampleRate: config.sampleRate)
+        guard let format = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: config.sampleRate,
+            channels: 1,
+            interleaved: false
+        ) else {
+            throw BreathError.audioFormatUnavailable
+        }
+        self.format = format
+        switch config.source {
+        case .procedural:
+            self.library = nil
+        case let .assets(directory, manifest):
+            self.library = AssetLibrary(
+                baseURL: directory,
+                manifest: manifest,
+                sampleRate: config.sampleRate
+            )
+        }
     }
 
     /// Convenience: build an engine from a manifest.json file in `assetsDirectory`.
@@ -68,15 +95,37 @@ public final class BreathEngine {
     public func renderSamples(_ spec: BreathSpec) throws -> [Float] {
         let seed = spec.seed ?? Variation.stableSeed(for: spec)
         var rng = SeededRNG(seed: seed)
-        let clips = try library.sourceClips(style: spec.style, type: spec.type, rng: &rng)
         let deltas = Variation.draw(spec.variation, rng: &rng)
-        var samples = BreathAssembler.assemble(
-            type: spec.type,
-            durationSec: spec.clampedDurationSec,
-            clips: clips,
-            settings: config.settings,
-            deltas: deltas
-        )
+        var samples: [Float]
+        switch config.source {
+        case let .procedural(proceduralConfig):
+            let resolvedSpec = BreathSpec(
+                type: spec.type,
+                durationSec: spec.durationSec,
+                style: spec.style,
+                seed: seed,
+                variation: spec.variation,
+                gain: spec.gain
+            )
+            samples = try ProceduralBreathSynth.render(
+                spec: resolvedSpec,
+                sampleRate: config.sampleRate,
+                config: proceduralConfig,
+                deltas: deltas
+            )
+        case .assets:
+            guard let library else {
+                throw BreathError.ioFailure("asset source is missing its library")
+            }
+            let clips = try library.sourceClips(style: spec.style, type: spec.type, rng: &rng)
+            samples = BreathAssembler.assemble(
+                type: spec.type,
+                durationSec: spec.clampedDurationSec,
+                clips: clips,
+                settings: config.settings,
+                deltas: deltas
+            )
+        }
         applyMasterGainAndClamp(&samples, extraGain: spec.gain)
         return samples
     }
@@ -104,11 +153,11 @@ public final class BreathEngine {
     // MARK: - Playback
 
     public func play(_ spec: BreathSpec) async throws {
-        try await player.playOnce(render(spec))
+        try await playerInstance().playOnce(render(spec))
     }
 
     public func play(_ buffer: AVAudioPCMBuffer) async throws {
-        try await player.playOnce(buffer)
+        try await playerInstance().playOnce(buffer)
     }
 
     /// Play a cycle. Loops forever (non-blocking) when `cycle.loop`, otherwise plays
@@ -116,14 +165,14 @@ public final class BreathEngine {
     public func playCycle(_ cycle: CycleSpec) async throws {
         let buffer = try renderCycle(cycle)
         if cycle.loop {
-            try player.loopForever(buffer)
+            try playerInstance().loopForever(buffer)
         } else {
-            try await player.play(buffer, times: max(1, cycle.cycles))
+            try await playerInstance().play(buffer, times: max(1, cycle.cycles))
         }
     }
 
     public func stop() {
-        player.stop()
+        player?.stop()
     }
 
     // MARK: - File output
@@ -131,6 +180,16 @@ public final class BreathEngine {
     /// Render a breath and write it to a 32-bit float WAV file.
     public func renderToWAV(_ spec: BreathSpec, url: URL) throws {
         let buffer = try render(spec)
+        try write(buffer, to: url)
+    }
+
+    /// Render a cycle and write it to a 32-bit float WAV file.
+    public func renderCycleToWAV(_ cycle: CycleSpec, url: URL) throws {
+        let buffer = try renderCycle(cycle)
+        try write(buffer, to: url)
+    }
+
+    private func write(_ buffer: AVAudioPCMBuffer, to url: URL) throws {
         let settings: [String: Any] = [
             AVFormatIDKey: kAudioFormatLinearPCM,
             AVSampleRateKey: config.sampleRate,
@@ -166,7 +225,7 @@ public final class BreathEngine {
 
     private func makeBuffer(_ samples: [Float]) throws -> AVAudioPCMBuffer {
         let frameCount = AVAudioFrameCount(max(1, samples.count))
-        guard let buffer = AVAudioPCMBuffer(pcmFormat: player.format, frameCapacity: frameCount) else {
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCount) else {
             throw BreathError.audioFormatUnavailable
         }
         buffer.frameLength = AVAudioFrameCount(samples.count)
@@ -178,9 +237,25 @@ public final class BreathEngine {
         return buffer
     }
 
+    private func playerInstance() throws -> BreathPlayer {
+        if let player { return player }
+        let created = try BreathPlayer(sampleRate: config.sampleRate)
+        player = created
+        return created
+    }
+
     private func cacheKey(_ spec: BreathSpec) -> String {
         let seed = spec.seed ?? Variation.stableSeed(for: spec)
-        return Variation.canonicalString(spec) + "|seed:\(seed)"
+        return sourceCachePrefix + "|" + Variation.canonicalString(spec) + "|seed:\(seed)"
+    }
+
+    private var sourceCachePrefix: String {
+        switch config.source {
+        case .procedural:
+            return "procedural"
+        case .assets:
+            return "assets"
+        }
     }
 
     private func store(_ buffer: AVAudioPCMBuffer, for key: String) {

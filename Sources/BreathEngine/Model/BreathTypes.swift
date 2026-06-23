@@ -110,6 +110,7 @@ public enum BreathError: Error, CustomStringConvertible, Equatable {
     case missingStyle(BreathStyle, BreathType)
     case emptyRole(BreathStyle, BreathType, BreathRole)
     case assetNotFound(String)
+    case unsupportedProceduralStyle(BreathStyle)
     case audioFormatUnavailable
     case unsupportedManifestVersion(found: Int, supported: Int)
     case ioFailure(String)
@@ -122,6 +123,8 @@ public enum BreathError: Error, CustomStringConvertible, Equatable {
             return "Style '\(style)' (\(type.rawValue)) is missing the '\(role.rawValue)' clip."
         case let .assetNotFound(path):
             return "Asset file not found: \(path)"
+        case let .unsupportedProceduralStyle(style):
+            return "Procedural style '\(style)' is not supported. Use one of: calm, neutral."
         case .audioFormatUnavailable:
             return "Could not create the working audio format."
         case let .unsupportedManifestVersion(found, supported):

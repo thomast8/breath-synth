@@ -26,13 +26,28 @@ public final class AssetLibrary {
         guard let palette = manifest.palette(style: style, type: type) else {
             throw BreathError.missingStyle(style, type)
         }
+        let oneShot = try loadOptional(palette.oneShot, style: style, type: type, role: .oneShot, rng: &rng)
+        if oneShot != nil, palette.start.isEmpty || palette.loop.isEmpty || palette.end.isEmpty {
+            let start = try loadOptional(palette.start, style: style, type: type, role: .start, rng: &rng) ?? []
+            let loop = try loadOptional(palette.loop, style: style, type: type, role: .loop, rng: &rng) ?? []
+            let end = try loadOptional(palette.end, style: style, type: type, role: .end, rng: &rng) ?? []
+            return BreathSourceClips(start: start, loop: loop, end: end, oneShot: oneShot)
+        }
         let start = try loadOne(palette.start, style: style, type: type, role: .start, rng: &rng)
         let loop = try loadOne(palette.loop, style: style, type: type, role: .loop, rng: &rng)
         let end = try loadOne(palette.end, style: style, type: type, role: .end, rng: &rng)
-        let oneShot = palette.oneShot.isEmpty
-            ? nil
-            : try? loadOne(palette.oneShot, style: style, type: type, role: .oneShot, rng: &rng)
         return BreathSourceClips(start: start, loop: loop, end: end, oneShot: oneShot)
+    }
+
+    private func loadOptional(
+        _ assets: [BreathAsset],
+        style: BreathStyle,
+        type: BreathType,
+        role: BreathRole,
+        rng: inout SeededRNG
+    ) throws -> [Float]? {
+        guard !assets.isEmpty else { return nil }
+        return try loadOne(assets, style: style, type: type, role: role, rng: &rng)
     }
 
     private func loadOne(

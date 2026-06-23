@@ -11,6 +11,9 @@ DerivedData/
 # macOS
 .DS_Store
 
+# Local assistant/runtime state
+.claude/
+
 # Generated breath assets + manifest (regenerate with `breath generate-assets`)
 Assets/breaths/*.wav
 Assets/breaths/manifest.json
