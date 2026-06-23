@@ -54,7 +54,8 @@ public enum BreathAssembler {
         durationSec: Double,
         clips: BreathSourceClips,
         settings: AssemblerSettings,
-        deltas: VariationDeltas = .identity
+        deltas: VariationDeltas = .identity,
+        seed: UInt64 = 0
     ) -> [Float] {
         let sr = settings.sampleRate
         let totalFrames = max(1, Segments.frames(seconds: durationSec, sampleRate: sr))
@@ -63,7 +64,15 @@ public enum BreathAssembler {
             return [Float](repeating: 0, count: totalFrames)
         }
 
-        var body = recordedShapeBranch(type: type, totalFrames: totalFrames, full: full, settings: settings)
+        var body = recordedShapeBranch(
+            type: type,
+            totalFrames: totalFrames,
+            durationSec: durationSec,
+            full: full,
+            settings: settings,
+            deltas: deltas,
+            seed: seed
+        )
         let g = Float(deltas.gainScalar)
         for i in 0..<totalFrames {
             body[i] *= g
@@ -71,13 +80,21 @@ public enum BreathAssembler {
         return body
     }
 
-    // MARK: - Branches
+    // MARK: - Render path
 
+    /// Single unified render path. Timbre comes from a flattened slice of the
+    /// recording; dynamics come from a *designed* envelope (`Envelope.curve`),
+    /// identical for every duration. Decoupling the two is what fixes the recording's
+    /// messy onsets (slow lead-in ramp, stepped exhale double-attack) and the hiss the
+    /// old energy-matching stages amplified in quiet regions.
     private static func recordedShapeBranch(
         type: BreathType,
         totalFrames: Int,
+        durationSec: Double,
         full: [Float],
-        settings: AssemblerSettings
+        settings: AssemblerSettings,
+        deltas: VariationDeltas,
+        seed: UInt64
     ) -> [Float] {
         let source = cleanRecordedSource(
             trimOuterSilence(full, sampleRate: settings.sampleRate),
@@ -85,35 +102,42 @@ public enum BreathAssembler {
         )
         guard source.count > 1 else { return [Float](repeating: 0, count: totalFrames) }
 
+        // Timbre only: the loud, steady, energy-flat sustain of the breath. The
+        // recording's own dynamics (quiet preamble, end-loaded ramp) are excluded by
+        // the threshold in `flattenedTexture`, so they never re-enter the breath.
         let envelope = rmsEnvelope(source, sampleRate: settings.sampleRate)
-        let shape = recordedShapeEnvelope(
-            envelope,
-            totalFrames: totalFrames,
-            sampleRate: settings.sampleRate
+        var texture = flattenedTexture(from: source, envelope: envelope, type: type, sampleRate: settings.sampleRate)
+
+        // Per-render pitch/length variation (previously computed but never applied).
+        // The loop below re-fills to the exact target length, so duration stays exact.
+        if deltas.playbackRate > 0, abs(deltas.playbackRate - 1) > 1e-6 {
+            texture = ensureZeroEndpoints(Resample.byFactor(texture, deltas.playbackRate))
+        }
+        guard texture.count > 1 else { return [Float](repeating: 0, count: totalFrames) }
+
+        // Build the body to the exact length from the timbre slice. When the breath is
+        // longer than the texture we fill it with grains pulled from spread-out offsets
+        // (see `assembleTexturedLoop`) so long breaths don't develop a periodic loop
+        // "wobble". Grains are a few seconds with a generous crossfade so timbre shifts
+        // between them stay smooth.
+        let grain = min(texture.count, Segments.frames(seconds: 2.5, sampleRate: settings.sampleRate))
+        let requestedX = Segments.frames(seconds: max(settings.crossfadeSec, 0.7), sampleRate: settings.sampleRate)
+        let x = min(max(1, requestedX), max(1, grain - 1), max(1, totalFrames / 4))
+        var grainRNG = SeededRNG(seed: seed)
+        var body = Crossfade.assembleTexturedLoop(
+            texture: texture, targetLen: totalFrames, grainLen: grain, crossfadeLen: x, rng: &grainRNG
         )
-        let ratio = Double(totalFrames) / Double(source.count)
-        if ratio >= 0.72 && ratio <= 1.18 {
-            var direct = Resample.toFrames(source, totalFrames)
-            for _ in 0..<3 {
-                direct = matchLocalEnergy(direct, targetEnvelope: shape, sampleRate: settings.sampleRate)
-            }
-            direct = enforceRenderedEnergyShape(direct, sampleRate: settings.sampleRate)
-            return normalizePeak(removeLowRumble(direct, sampleRate: settings.sampleRate))
+        body = flattenLocalEnergy(body, sampleRate: settings.sampleRate)
+
+        // Dynamics: the designed macro contour. Prompt onset, single clean attack.
+        let shape = Envelope.curve(for: type, frames: totalFrames, durationSec: durationSec)
+        for i in body.indices {
+            body[i] *= shape[i]
         }
 
-        let texture = flattenedTexture(from: source, envelope: envelope, type: type, sampleRate: settings.sampleRate)
-        let requestedX = Segments.frames(seconds: max(settings.crossfadeSec, 0.55), sampleRate: settings.sampleRate)
-        let x = min(max(1, requestedX), max(1, texture.count - 1), max(1, totalFrames / 4))
-        var carrier = Crossfade.assembleLoopedMiddle(loop: texture, targetLen: totalFrames, crossfadeLen: x)
-        carrier = flattenLocalEnergy(carrier, sampleRate: settings.sampleRate)
-        for i in carrier.indices {
-            carrier[i] *= shape[i]
-        }
-        for _ in 0..<3 {
-            carrier = matchLocalEnergy(carrier, targetEnvelope: shape, sampleRate: settings.sampleRate)
-        }
-        carrier = enforceRenderedEnergyShape(carrier, sampleRate: settings.sampleRate)
-        return normalizePeak(removeLowRumble(carrier, sampleRate: settings.sampleRate))
+        // Click-free, truly silent edges.
+        body = applyEdgeFades(body, sampleRate: settings.sampleRate)
+        return normalizePeak(body)
     }
 
     private static func trimOuterSilence(_ samples: [Float], sampleRate: Double) -> [Float] {
@@ -134,11 +158,13 @@ public enum BreathAssembler {
     private static func cleanRecordedSource(_ samples: [Float], sampleRate: Double) -> [Float] {
         guard samples.count > 1 else { return samples }
         var out = samples
-        // Remove recording-room rumble and mic-handling noise *before* the energy
-        // flattening below, which would otherwise amplify that sub-band floor by
-        // ~20 dB during quiet passages. A real breath carries no useful energy below
-        // ~300 Hz, so a steep low-cut here is inaudible on the breath itself.
-        highpass4th(&out, sampleRate: sampleRate, frequency: 200)
+        // The single low-cut for the whole path. Removing room rumble and mic-handling
+        // noise *before* the energy flattening below is essential - flattening would
+        // otherwise amplify that sub-band floor by ~20 dB during quiet passages. The
+        // measured knee is ~320 Hz (a breath's lowest real energy), so a 260 Hz 4th-
+        // order cut clears the audible rumble band yet leaves the breath's warmth
+        // intact, and is steep enough to stand as the delivery guarantee on its own.
+        highpass4th(&out, sampleRate: sampleRate, frequency: 260)
         out[0] = 0
         out[out.count - 1] = 0
         return out
@@ -154,15 +180,21 @@ public enum BreathAssembler {
         stage2.process(&samples)
     }
 
-    /// Delivery-side guarantee that the finished breath carries no sub-band rumble,
-    /// regardless of what the energy-flattening stages did to the noise floor.
-    private static func removeLowRumble(_ samples: [Float], sampleRate: Double) -> [Float] {
-        guard samples.count > 1 else { return samples }
+    /// Short raised-cosine fades into/out of true zero at both edges, so every breath
+    /// starts and ends silently and click-free regardless of where the looped body
+    /// happened to begin or end.
+    private static func applyEdgeFades(_ samples: [Float], sampleRate: Double) -> [Float] {
+        guard samples.count > 2 else { return ensureZeroEndpoints(samples) }
         var out = samples
-        // Measured knee: a breath's lowest real energy sits at ~320 Hz, while the
-        // recorded floor below is constant room rumble. 260 Hz clears the audible
-        // rumble band yet leaves the 320 Hz+ breath warmth intact.
-        highpass4th(&out, sampleRate: sampleRate, frequency: 260)
+        let fade = min(Segments.frames(seconds: 0.02, sampleRate: sampleRate), out.count / 2)
+        if fade > 1 {
+            let fadeIn = Crossfade.fadeIn(fade)
+            let fadeOut = Crossfade.fadeOut(fade)
+            for i in 0..<fade {
+                out[i] *= fadeIn[i]
+                out[out.count - fade + i] *= fadeOut[i]
+            }
+        }
         return ensureZeroEndpoints(out)
     }
 
@@ -218,15 +250,6 @@ public enum BreathAssembler {
         return out
     }
 
-    private static func recordedShapeEnvelope(_ envelope: [Float], totalFrames: Int, sampleRate: Double) -> [Float] {
-        guard totalFrames > 0 else { return [] }
-        var shape = Resample.toFrames(normalizeEnvelope(envelope), totalFrames)
-        let smoothing = Segments.frames(seconds: 0.28, sampleRate: sampleRate)
-        shape = smoothEnvelope(shape, radius: smoothing)
-        shape = enforceAttackAndReleaseAroundPeak(shape)
-        return ensureZeroEndpoints(shape)
-    }
-
     private static func smoothEnvelope(_ values: [Float], radius: Int) -> [Float] {
         guard values.count > 2, radius > 0 else { return values }
         var prefix = [Double](repeating: 0, count: values.count + 1)
@@ -240,36 +263,6 @@ public enum BreathAssembler {
             let hi = min(values.count - 1, i + radius)
             let sum = prefix[hi + 1] - prefix[lo]
             out[i] = Float(sum / Double(hi - lo + 1))
-        }
-        return out
-    }
-
-    private static func enforceAttackAndReleaseAroundPeak(_ values: [Float]) -> [Float] {
-        guard values.count > 1 else { return values }
-        var out = values
-        guard let peakIndex = out.indices.max(by: { out[$0] < out[$1] }) else {
-            return out
-        }
-        let peak = out[peakIndex]
-        guard peak > 0 else { return out }
-        let plateauFloor = peak * 0.96
-        let peakStart = out.firstIndex(where: { $0 >= plateauFloor }) ?? peakIndex
-        let peakEnd = out.lastIndex(where: { $0 >= plateauFloor }) ?? peakIndex
-
-        if peakStart <= peakEnd {
-            for i in peakStart...peakEnd {
-                out[i] = peak
-            }
-        }
-        if peakStart > 0 {
-            for i in stride(from: peakStart - 1, through: 0, by: -1) where out[i] > out[i + 1] {
-                out[i] = out[i + 1]
-            }
-        }
-        if peakEnd + 1 < out.count {
-            for i in (peakEnd + 1)..<out.count where out[i] > out[i - 1] {
-                out[i] = out[i - 1]
-            }
         }
         return out
     }
@@ -289,7 +282,14 @@ public enum BreathAssembler {
     ) -> [Float] {
         let normalized = normalizeEnvelope(envelope)
         guard let peak = normalized.max(), peak > 0 else { return source }
-        let threshold: Float = type == .inhale ? 0.32 : 0.25
+        // The texture is the longest contiguous stretch of breath above this fraction
+        // of peak energy. The exhale settles to a low (~0.2 of peak) but *steady*
+        // airflow it sustains for most of the breath; a higher threshold would clip the
+        // texture to a short ~4.5 s slice that then loops audibly (a periodic "wobble"),
+        // so the exhale threshold sits below that plateau to capture the full ~7 s of
+        // steady airflow - long and stationary enough to loop without a perceptible
+        // repeat. The inhale is a continuous draw that stays well above 0.32 throughout.
+        let threshold: Float = type == .inhale ? 0.32 : 0.16
         let selectedRange = largestRange(above: threshold, in: normalized)
             ?? 0..<source.count
 
@@ -317,51 +317,6 @@ public enum BreathAssembler {
         for i in out.indices {
             let divisor = max(energy[i], target * 0.35)
             out[i] *= target / divisor
-        }
-        return out
-    }
-
-    private static func matchLocalEnergy(
-        _ samples: [Float],
-        targetEnvelope: [Float],
-        sampleRate: Double
-    ) -> [Float] {
-        guard samples.count > 1, samples.count == targetEnvelope.count else { return samples }
-        var current = rmsEnvelope(samples, sampleRate: sampleRate)
-        current = smoothEnvelope(current, radius: Segments.frames(seconds: 0.05, sampleRate: sampleRate))
-        guard let currentPeak = current.max(), currentPeak > 0,
-              let targetPeak = targetEnvelope.max(), targetPeak > 0 else {
-            return samples
-        }
-
-        var out = samples
-        for i in out.indices {
-            let target = max(0, targetEnvelope[i] / targetPeak)
-            if target < 0.000_1 {
-                out[i] = 0
-                continue
-            }
-            let measured = max(current[i] / currentPeak, 0.04)
-            let scale = min(max(target / measured, 0), 8)
-            out[i] *= scale
-        }
-        return out
-    }
-
-    private static func enforceRenderedEnergyShape(_ samples: [Float], sampleRate: Double) -> [Float] {
-        guard samples.count > 1 else { return samples }
-        var current = rmsEnvelope(samples, sampleRate: sampleRate)
-        current = smoothEnvelope(current, radius: Segments.frames(seconds: 0.05, sampleRate: sampleRate))
-        let target = enforceAttackAndReleaseAroundPeak(current)
-
-        var out = samples
-        for i in out.indices {
-            guard current[i] > 0.000_001 else {
-                out[i] = 0
-                continue
-            }
-            let scale = min(max(target[i] / current[i], 0.25), 3.0)
-            out[i] *= scale
         }
         return out
     }

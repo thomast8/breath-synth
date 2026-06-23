@@ -85,7 +85,8 @@ public final class BreathEngine {
             durationSec: spec.clampedDurationSec,
             clips: clips,
             settings: config.settings,
-            deltas: deltas
+            deltas: deltas,
+            seed: seed
         )
         applyMasterGainAndClamp(&samples, extraGain: spec.gain)
         return samples

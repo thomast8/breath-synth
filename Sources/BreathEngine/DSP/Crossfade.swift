@@ -46,29 +46,42 @@ public enum Crossfade {
         }
     }
 
-    /// Build a looped sustain of exactly `targetLen` frames from a seamless `loop`
-    /// texture, using equal-power crossfades of `crossfadeLen` frames between copies.
-    /// When `targetLen <= loop.count` a single (trimmed) window is returned.
-    public static func assembleLoopedMiddle(loop: [Float], targetLen: Int, crossfadeLen: Int) -> [Float] {
-        guard !loop.isEmpty, targetLen > 0 else {
+    /// Build a sustain of exactly `targetLen` frames from a `texture` slice.
+    ///
+    /// When `targetLen <= texture.count` a single (trimmed) window is returned - no
+    /// looping, so short breaths are seam-free. Otherwise the body is filled with
+    /// overlapping grains of `grainLen` frames pulled from *random* offsets across the
+    /// texture (drawn from `rng`) and equal-power crossfaded. Random offsets mean the
+    /// output never settles into the fixed-period repeat that looping the whole texture
+    /// produces - the audible "wobble" on long breaths - while still drawing only on
+    /// the real recorded timbre. Seeded `rng` keeps renders reproducible.
+    public static func assembleTexturedLoop(
+        texture: [Float],
+        targetLen: Int,
+        grainLen: Int,
+        crossfadeLen: Int,
+        rng: inout SeededRNG
+    ) -> [Float] {
+        guard !texture.isEmpty, targetLen > 0 else {
             return [Float](repeating: 0, count: max(0, targetLen))
         }
-        let loopLen = loop.count
-        if targetLen <= loopLen {
-            return Array(loop[0..<targetLen])
+        if targetLen <= texture.count {
+            return Array(texture[0..<targetLen])
         }
-        let x = max(0, min(crossfadeLen, loopLen - 1))
-        let stride = max(1, loopLen - x)
-        let n = Segments.loopIterationCount(middleLen: targetLen, loopLen: loopLen, crossfadeLen: x)
-        let span = Segments.spannedFrames(iterations: n, loopLen: loopLen, crossfadeLen: x)
-        var out = [Float](repeating: 0, count: span)
-        for k in 0..<n {
-            place(into: &out, segment: loop, at: k * stride, headCrossfade: k == 0 ? 0 : x)
-        }
-        if out.count > targetLen {
-            out = Array(out[0..<targetLen])
-        } else if out.count < targetLen {
-            out += [Float](repeating: 0, count: targetLen - out.count)
+        let grain = max(2, min(grainLen, texture.count))
+        let x = max(0, min(crossfadeLen, grain - 1))
+        let stride = max(1, grain - x)
+        let maxOffset = texture.count - grain
+
+        var out = [Float](repeating: 0, count: targetLen)
+        var pos = 0
+        var k = 0
+        while pos < targetLen {
+            let offset = maxOffset > 0 ? Int.random(in: 0...maxOffset, using: &rng) : 0
+            let grainSamples = Array(texture[offset..<offset + grain])
+            place(into: &out, segment: grainSamples, at: pos, headCrossfade: k == 0 ? 0 : x)
+            pos += stride
+            k += 1
         }
         return out
     }

@@ -3,32 +3,48 @@ import Foundation
 /// Pure amplitude-envelope generation. The envelope gives the breath its macro
 /// contour and guarantees the first/last sample are exactly 0 (click-free starts,
 /// ends, and cycle joins). No AVFoundation.
+///
+/// The contour is *designed*, not derived from the recording: it is built from an
+/// **absolute** attack and release (in seconds) plus a proportional sustain shape.
+/// Absolute edges are what make a long breath start promptly - a 12 s inhale becomes
+/// audible within the attack window instead of ramping near-silent for over a second
+/// the way a recording-derived envelope did. Identical dynamics for every duration.
 public enum Envelope {
-    /// Normalized control points (t, gain), both in 0...1, sorted by t, starting at
-    /// (0, 0) and ending at (1, 0).
-    ///
-    /// Inhale: quiet start → rising → steady draw → slight taper.
-    /// Exhale: soft onset → fuller airflow → long decay → near silence.
-    public static func controlPoints(for type: BreathType) -> [(t: Double, gain: Double)] {
+    /// Per-type design parameters for the macro contour. Every field is taken from the
+    /// matching source recording's measured envelope, so inhale and exhale have
+    /// genuinely different attacks *and* fall-offs.
+    private struct Design {
+        /// Attack length in seconds (0 -> `attackLevel`), raised-cosine.
+        let attackSec: Double
+        /// Level reached at the end of the attack (the "prompt but soft" onset).
+        let attackLevel: Double
+        /// Fraction of the breath where amplitude hits its 1.0 peak.
+        let peakFrac: Double
+        /// How front-loaded the drop from the peak toward the floor is. 1.0 is a steady
+        /// decline; larger deflates faster right after the peak (the exhale "huff").
+        let decaySteepness: Double
+        /// Level the body settles to and holds before the final tail (0 = decay all the
+        /// way down, used by the inhale, which has no held airflow).
+        let sustainFloor: Double
+        /// Fraction of the whole breath spent fading the floor gently to true zero.
+        let tailFraction: Double
+    }
+
+    private static func design(for type: BreathType) -> Design {
+        // Peak locations and fall-off character are measured from the source recordings:
+        //  * inhale: a slow, gradual draw - broad peak ~60%, then a steady decline over
+        //    the back third that lands softly. No held airflow, so no floor/tail.
+        //  * exhale: a fast attack to an early peak (~13%), a quick deflation to a low
+        //    airflow it sustains (~0.3) through the middle, then a long fade at the end.
+        // The fall-off is proportional to duration (see `curve`), so a long breath
+        // decays slowly and naturally rather than cutting off.
         switch type {
         case .inhale:
-            return [
-                (0.00, 0.00),
-                (0.10, 0.40),
-                (0.40, 0.90),
-                (0.75, 0.92),
-                (0.95, 0.70),
-                (1.00, 0.00),
-            ]
+            return Design(attackSec: 0.30, attackLevel: 0.70, peakFrac: 0.62,
+                          decaySteepness: 1.3, sustainFloor: 0.0, tailFraction: 0.0)
         case .exhale:
-            return [
-                (0.00, 0.00),
-                (0.06, 0.60),
-                (0.18, 0.95),
-                (0.50, 0.60),
-                (0.85, 0.20),
-                (1.00, 0.00),
-            ]
+            return Design(attackSec: 0.15, attackLevel: 0.95, peakFrac: 0.13,
+                          decaySteepness: 2.5, sustainFloor: 0.30, tailFraction: 0.18)
         }
     }
 
@@ -41,31 +57,60 @@ public enum Envelope {
         return Float(1 - 0.4 * t)
     }
 
-    /// Sample the contour to `frames` samples, scaled for long breaths. First and
-    /// last samples are forced to exactly 0.
+    /// Sample the designed contour to `frames` samples, scaled for long breaths. First
+    /// and last samples are forced to exactly 0.
     public static func curve(for type: BreathType, frames: Int, durationSec: Double) -> [Float] {
         guard frames > 0 else { return [] }
-        let points = controlPoints(for: type)
-        let scale = longBreathGainScale(durationSec: durationSec)
         if frames == 1 { return [0] }
 
+        let d = design(for: type)
+        let dur = max(durationSec, 0.001)
+        let scale = longBreathGainScale(durationSec: durationSec)
+
+        // The attack is absolute (seconds), capped so it never crowds out the body on
+        // short breaths. The peak is clamped just past the attack. Everything after the
+        // peak is a single proportional fall-off, so the decay scales with duration.
+        let aFrac = min(d.attackSec / dur, 0.40)
+        let peakFrac = min(max(d.peakFrac, aFrac + 1e-4), 1 - 1e-4)
+
         var out = [Float](repeating: 0, count: frames)
-        var segment = 0
         for i in 0..<frames {
             let x = Double(i) / Double(frames - 1)
-            // Advance to the segment containing x.
-            while segment < points.count - 2, x > points[segment + 1].t {
-                segment += 1
+            let g: Double
+            if x < aFrac {
+                // Attack: 0 -> attackLevel.
+                g = d.attackLevel * raisedCosine(x / max(aFrac, 1e-9))
+            } else if x < peakFrac {
+                // Rise: attackLevel -> 1.0 (the swell into the peak).
+                let p = (x - aFrac) / max(peakFrac - aFrac, 1e-9)
+                g = d.attackLevel + (1 - d.attackLevel) * raisedCosine(p)
+            } else {
+                // Fall-off, proportional to duration. The body eases from the peak down
+                // to the sustain floor (front-loaded by `decaySteepness`), then the last
+                // `tailFraction` of the breath fades that floor gently to true zero.
+                // Inhale uses no floor/tail (a steady decline to a soft landing); exhale
+                // deflates to a low airflow it holds, then fades - each from its own
+                // recording. Spanning the whole region (not a fixed short release) is
+                // what reads as a natural, unhurried decay rather than an abrupt cutoff.
+                let bodyEnd = max(peakFrac + 1e-4, 1 - d.tailFraction)
+                if x < bodyEnd {
+                    let p = (x - peakFrac) / max(bodyEnd - peakFrac, 1e-9)
+                    g = d.sustainFloor + (1 - d.sustainFloor) * pow(1 - p, d.decaySteepness)
+                } else {
+                    let q = (x - bodyEnd) / max(1 - bodyEnd, 1e-9)
+                    g = d.sustainFloor * (0.5 + 0.5 * cos(q * Double.pi))
+                }
             }
-            let a = points[segment]
-            let b = points[segment + 1]
-            let span = b.t - a.t
-            let frac = span > 0 ? (x - a.t) / span : 0
-            let g = a.gain + (b.gain - a.gain) * frac
             out[i] = Float(g) * scale
         }
         out[0] = 0
         out[frames - 1] = 0
         return out
+    }
+
+    /// Smooth 0 -> 1 raised-cosine (half-cosine) ramp for `p` in 0...1.
+    private static func raisedCosine(_ p: Double) -> Double {
+        let clamped = min(1, max(0, p))
+        return 0.5 - 0.5 * cos(clamped * Double.pi)
     }
 }

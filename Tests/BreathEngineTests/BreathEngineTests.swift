@@ -13,20 +13,6 @@ final class SegmentsTests: XCTestCase {
         XCTAssertEqual(Segments.clampCrossfade(100, loopLen: 500, startLen: 800, endLen: 800), 100)
         XCTAssertEqual(Segments.clampCrossfade(0, loopLen: 500, startLen: 800, endLen: 800), 1)
     }
-
-    func testLoopIterationCountIsMinimalCovering() {
-        let loopLen = 1000, x = 200
-        let middleLen = 3000
-        let n = Segments.loopIterationCount(middleLen: middleLen, loopLen: loopLen, crossfadeLen: x)
-        let span = Segments.spannedFrames(iterations: n, loopLen: loopLen, crossfadeLen: x)
-        let prevSpan = Segments.spannedFrames(iterations: n - 1, loopLen: loopLen, crossfadeLen: x)
-        XCTAssertGreaterThanOrEqual(span, middleLen)
-        XCTAssertLessThan(prevSpan, middleLen)
-    }
-
-    func testSingleIterationWhenMiddleShorterThanLoop() {
-        XCTAssertEqual(Segments.loopIterationCount(middleLen: 400, loopLen: 1000, crossfadeLen: 200), 1)
-    }
 }
 
 final class CrossfadeTests: XCTestCase {
@@ -60,13 +46,40 @@ final class CrossfadeTests: XCTestCase {
         }
     }
 
-    func testAssembleLoopedMiddleExactLength() {
-        let loop = (0..<1000).map { sin(Float($0) * 0.01) }
-        let multi = Crossfade.assembleLoopedMiddle(loop: loop, targetLen: 3333, crossfadeLen: 200)
-        XCTAssertEqual(multi.count, 3333)
-        // The loop content must actually be written, not left as the pre-allocated zeros.
-        XCTAssertGreaterThan(multi.map { abs($0) }.max()!, 0.01)
-        XCTAssertEqual(Crossfade.assembleLoopedMiddle(loop: loop, targetLen: 400, crossfadeLen: 200).count, 400)
+    func testAssembleTexturedLoopExactLengthAndWindow() {
+        let texture = (0..<1000).map { sin(Float($0) * 0.01) }
+        var rng = SeededRNG(seed: 7)
+        let body = Crossfade.assembleTexturedLoop(texture: texture, targetLen: 3333, grainLen: 400, crossfadeLen: 100, rng: &rng)
+        XCTAssertEqual(body.count, 3333)
+        XCTAssertGreaterThan(body.map { abs($0) }.max()!, 0.01)
+        // Deterministic: the same seed reproduces the same output.
+        var rngA = SeededRNG(seed: 7)
+        var rngB = SeededRNG(seed: 7)
+        let a = Crossfade.assembleTexturedLoop(texture: texture, targetLen: 3333, grainLen: 400, crossfadeLen: 100, rng: &rngA)
+        let b = Crossfade.assembleTexturedLoop(texture: texture, targetLen: 3333, grainLen: 400, crossfadeLen: 100, rng: &rngB)
+        XCTAssertEqual(a, b)
+        // When the target fits the texture, a single seam-free window is returned.
+        var rngW = SeededRNG(seed: 1)
+        let window = Crossfade.assembleTexturedLoop(texture: texture, targetLen: 400, grainLen: 400, crossfadeLen: 100, rng: &rngW)
+        XCTAssertEqual(window, Array(texture[0..<400]))
+    }
+
+    func testAssembleTexturedLoopPullsFromMultipleOffsets() {
+        // Ramp texture: each sample's value encodes its own offset. Probing the clean
+        // (non-crossfade) region of successive grains therefore reveals which offset
+        // each grain came from. Whole-texture looping would replay offset 0 every time;
+        // random offset-hopping must source grains from several distinct offsets.
+        let n = 4000
+        let texture = (0..<n).map { Float($0) / Float(n - 1) }
+        let grain = 1000, x = 200, stride = 800
+        var rng = SeededRNG(seed: 3)
+        let body = Crossfade.assembleTexturedLoop(texture: texture, targetLen: 8000, grainLen: grain, crossfadeLen: x, rng: &rng)
+        var offsetsSeen = Set<Int>()
+        for k in 0..<6 {
+            let probe = k * stride + x + 10  // just past this grain's head-crossfade
+            if probe < body.count { offsetsSeen.insert(Int((body[probe] * 1000).rounded())) }
+        }
+        XCTAssertGreaterThan(offsetsSeen.count, 1, "grains should be pulled from multiple offsets")
     }
 }
 
@@ -288,6 +301,42 @@ final class AssemblerTests: XCTestCase {
 
         XCTAssertTrue(isMostlyNondecreasing(attack, tolerance: 0.003), "attack RMS: \(attack)")
         XCTAssertTrue(isMostlyNonincreasing(release, tolerance: 0.003), "release RMS: \(release)")
+    }
+
+    func testRecordedShapeInhaleOnsetIsPromptWithNoInteriorDip() {
+        // The designed envelope gives every duration the same prompt onset: a long
+        // inhale must become audible within the attack window (no multi-second
+        // near-silent lead-in), and the climb to the peak must not dip (guards the
+        // old recording-derived double-attack/notch regression).
+        let sr = 1_000.0
+        let settings = AssemblerSettings(sampleRate: sr, crossfadeSec: 0.1)
+        let full = shapedBreathFrames(sampleRate: sr, seconds: 10)
+        let clips = BreathSourceClips(start: [], loop: [], end: [], oneShot: full)
+
+        let out = BreathAssembler.assemble(type: .inhale, durationSec: 12, clips: clips, settings: settings)
+        XCTAssertEqual(out.count, 12_000)
+
+        // 0.1 s RMS chunks: chunk index == tenths of a second.
+        let envelope = chunkRMS(out, chunkSize: 100)
+        let peak = envelope.max()!
+        XCTAssertGreaterThan(peak, 0.02)
+
+        // RMS crosses 25% of peak well within the first 0.5 s (chunk 5).
+        let crossing = envelope.firstIndex(where: { $0 >= 0.25 * peak })!
+        XCTAssertLessThan(crossing, 5, "onset crossing chunk \(crossing)")
+
+        // No structural interior notch on the way up to the peak (guards the old
+        // double-attack regression, a ~50% drawdown). The granular texture body has a
+        // few percent of natural ripple, so we bound the worst drawdown from the
+        // running maximum rather than every adjacent step.
+        let peakIndex = envelope.indices.max(by: { envelope[$0] < envelope[$1] })!
+        var running = envelope[0]
+        var worstDrawdown: Float = 0
+        for i in 0...peakIndex {
+            running = max(running, envelope[i])
+            worstDrawdown = max(worstDrawdown, (running - envelope[i]) / peak)
+        }
+        XCTAssertLessThan(worstDrawdown, 0.15, "interior drawdown \(worstDrawdown) - attack RMS: \(envelope[0...peakIndex])")
     }
 
     func testRecordedShapeRemovesLowFrequencyRumble() {

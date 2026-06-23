@@ -14,6 +14,9 @@ DerivedData/
 # Local assistant/runtime state
 .claude/
 
+# Local scratch analysis scripts / scratch renders (not part of the package)
+scratchpad/
+
 # The breath palette in Assets/breaths (oneShot recordings + manifest.json) is the
 # canonical, committed asset set so renders work straight from a clone. Scratch WAV
 # renders dropped into the assets dir are still ignored.
