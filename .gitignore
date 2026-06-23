@@ -1,0 +1,20 @@
+# SwiftPM
+.build/
+.swiftpm/
+# Package.resolved is committed to pin the dependency graph (this package ships an executable).
+
+# Xcode
+*.xcodeproj
+*.xcworkspace
+DerivedData/
+
+# macOS
+.DS_Store
+
+# Generated breath assets + manifest (regenerate with `breath generate-assets`)
+Assets/breaths/*.wav
+Assets/breaths/manifest.json
+
+# Local secrets — API keys come from the environment, never committed
+.env
+*.local
