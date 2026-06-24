@@ -13,7 +13,7 @@ final class OneShotAssemblerTests: XCTestCase {
         for i in 0..<toneFrames {
             samples[i] = Float(0.5 * sin(2 * Double.pi * 1_000 * Double(i) / sr))
         }
-        return BreathSourceClips(start: [], loop: [], end: [], oneShot: samples)
+        return BreathSourceClips(oneShot: samples)
     }
 
     func testOneShotReturnsNaturalLengthNotRequestedDuration() {

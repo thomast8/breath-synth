@@ -4,7 +4,8 @@ import PackageDescription
 let package = Package(
     name: "breath-synth",
     platforms: [
-        .macOS(.v13)
+        .macOS("26.0"),
+        .iOS("26.0"),
     ],
     products: [
         .library(name: "BreathEngine", targets: ["BreathEngine"]),

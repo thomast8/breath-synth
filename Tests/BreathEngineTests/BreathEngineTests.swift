@@ -221,12 +221,7 @@ private func rms(_ samples: [Float]) -> Float {
 
 final class AssemblerTests: XCTestCase {
     private func clips(sampleRate sr: Double) -> BreathSourceClips {
-        BreathSourceClips(
-            start: [Float](repeating: 0.5, count: Int(0.8 * sr)),
-            loop: (0..<Int(4 * sr)).map { 0.5 * sin(Float($0) * 0.02) },
-            end: [Float](repeating: 0.5, count: Int(1.0 * sr)),
-            oneShot: [Float](repeating: 0.5, count: Int(1.2 * sr))
-        )
+        BreathSourceClips(oneShot: [Float](repeating: 0.5, count: Int(1.2 * sr)))
     }
 
     func testLongBreathExactLength() {
@@ -244,7 +239,7 @@ final class AssemblerTests: XCTestCase {
         let sr = 1_000.0
         let settings = AssemblerSettings(sampleRate: sr, crossfadeSec: 0.1)
         let full = shapedBreathFrames(sampleRate: sr, seconds: 10)
-        let clips = BreathSourceClips(start: [], loop: [], end: [], oneShot: full)
+        let clips = BreathSourceClips(oneShot: full)
 
         let out = BreathAssembler.assemble(type: .inhale, durationSec: 8, clips: clips, settings: settings)
 
@@ -258,7 +253,7 @@ final class AssemblerTests: XCTestCase {
         let sr = 1_000.0
         let settings = AssemblerSettings(sampleRate: sr, crossfadeSec: 0.1)
         let full = shapedBreathFrames(sampleRate: sr, seconds: 10)
-        let clips = BreathSourceClips(start: [], loop: [], end: [], oneShot: full)
+        let clips = BreathSourceClips(oneShot: full)
 
         let out = BreathAssembler.assemble(type: .inhale, durationSec: 4, clips: clips, settings: settings)
         let early = rms(Array(out[0..<500]))
@@ -275,7 +270,7 @@ final class AssemblerTests: XCTestCase {
         let sr = 1_000.0
         let settings = AssemblerSettings(sampleRate: sr, crossfadeSec: 0.1)
         let full = wobblyShapedBreathFrames(sampleRate: sr, seconds: 10)
-        let clips = BreathSourceClips(start: [], loop: [], end: [], oneShot: full)
+        let clips = BreathSourceClips(oneShot: full)
 
         let out = BreathAssembler.assemble(type: .inhale, durationSec: 4, clips: clips, settings: settings)
         let envelope = chunkRMS(out, chunkSize: 250)
@@ -291,7 +286,7 @@ final class AssemblerTests: XCTestCase {
         let sr = 1_000.0
         let settings = AssemblerSettings(sampleRate: sr, crossfadeSec: 0.1)
         let full = wobblyShapedBreathFrames(sampleRate: sr, seconds: 10)
-        let clips = BreathSourceClips(start: [], loop: [], end: [], oneShot: full)
+        let clips = BreathSourceClips(oneShot: full)
 
         let out = BreathAssembler.assemble(type: .exhale, durationSec: 8, clips: clips, settings: settings)
         let envelope = chunkRMS(out, chunkSize: 250)
@@ -311,7 +306,7 @@ final class AssemblerTests: XCTestCase {
         let sr = 1_000.0
         let settings = AssemblerSettings(sampleRate: sr, crossfadeSec: 0.1)
         let full = shapedBreathFrames(sampleRate: sr, seconds: 10)
-        let clips = BreathSourceClips(start: [], loop: [], end: [], oneShot: full)
+        let clips = BreathSourceClips(oneShot: full)
 
         let out = BreathAssembler.assemble(type: .inhale, durationSec: 12, clips: clips, settings: settings)
         XCTAssertEqual(out.count, 12_000)
@@ -347,7 +342,7 @@ final class AssemblerTests: XCTestCase {
         let sr = 16_000.0
         let settings = AssemblerSettings(sampleRate: sr, crossfadeSec: 0.1)
         let full = rumblyBreathFrames(sampleRate: sr, seconds: 10)
-        let clips = BreathSourceClips(start: [], loop: [], end: [], oneShot: full)
+        let clips = BreathSourceClips(oneShot: full)
 
         let out = BreathAssembler.assemble(type: .inhale, durationSec: 6, clips: clips, settings: settings)
 
@@ -374,7 +369,7 @@ final class AssemblerTests: XCTestCase {
         // enabled render byte-identical to the default-off render.
         let sr = 16_000.0
         let full = rumblyBreathFrames(sampleRate: sr, seconds: 10)
-        let clips = BreathSourceClips(start: [], loop: [], end: [], oneShot: full)
+        let clips = BreathSourceClips(oneShot: full)
 
         let off = BreathAssembler.assemble(
             type: .inhale, durationSec: 6, clips: clips,

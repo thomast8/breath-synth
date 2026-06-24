@@ -1,17 +1,13 @@
 import Foundation
 
-/// The source clips for one breath render, already decoded to mono Float at the
-/// working sample rate. `oneShot` is optional.
+/// The decoded one-shot breath recording for one render, mono Float at the working
+/// sample rate. The engine renders every breath from this single recording; the earlier
+/// per-role attack/sustain/release clips (`start`/`loop`/`end`) were never consumed by
+/// `BreathAssembler` and were removed.
 public struct BreathSourceClips: Sendable {
-    public let start: [Float]
-    public let loop: [Float]
-    public let end: [Float]
     public let oneShot: [Float]?
 
-    public init(start: [Float], loop: [Float], end: [Float], oneShot: [Float]? = nil) {
-        self.start = start
-        self.loop = loop
-        self.end = end
+    public init(oneShot: [Float]? = nil) {
         self.oneShot = oneShot
     }
 }
@@ -19,14 +15,8 @@ public struct BreathSourceClips: Sendable {
 /// Tunables for assembly.
 public struct AssemblerSettings: Sendable {
     public var sampleRate: Double
-    /// Cap on how much of the start clip (the onset) to use.
-    public var startCapSec: Double
-    /// Cap on how much of the end clip (the release tail) to use.
-    public var endCapSec: Double
     /// Crossfade length used at every join.
     public var crossfadeSec: Double
-    /// Below this duration we use the one-shot / resampled-loop short branch.
-    public var shortThresholdSec: Double
     /// Spectral noise-profile subtraction on the source before texture extraction. Off by
     /// default: Stage 1 already stopped the energy flattening from amplifying the hiss, so the
     /// audible upside is modest and over-subtraction can introduce musical noise. Validate by
@@ -39,19 +29,13 @@ public struct AssemblerSettings: Sendable {
 
     public init(
         sampleRate: Double = AudioConstants.workingSampleRate,
-        startCapSec: Double = 0.6,
-        endCapSec: Double = 0.8,
         crossfadeSec: Double = 0.2,
-        shortThresholdSec: Double = 1.5,
         enableSpectralDenoise: Bool = true,
         denoiseOverSubtraction: Float = 1.75,
         denoiseFloorGain: Float = 0.05
     ) {
         self.sampleRate = sampleRate
-        self.startCapSec = startCapSec
-        self.endCapSec = endCapSec
         self.crossfadeSec = crossfadeSec
-        self.shortThresholdSec = shortThresholdSec
         self.enableSpectralDenoise = enableSpectralDenoise
         self.denoiseOverSubtraction = denoiseOverSubtraction
         self.denoiseFloorGain = denoiseFloorGain
