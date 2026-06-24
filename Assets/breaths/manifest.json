@@ -6,13 +6,96 @@
         "start" : [],
         "loop" : [],
         "end" : [],
-        "oneShot" : [ { "file" : "inhale_good.aifc", "durationSec" : 13.408, "sampleRate" : 48000, "channels" : 1 } ]
+        "oneShot" : [ { "file" : "calm_inhale.aifc", "durationSec" : 7.317333, "sampleRate" : 48000, "channels" : 1 } ]
       },
       "exhale" : {
         "start" : [],
         "loop" : [],
         "end" : [],
-        "oneShot" : [ { "file" : "exhale_good.aifc", "durationSec" : 13.162667, "sampleRate" : 48000, "channels" : 1 } ]
+        "oneShot" : [ { "file" : "calm_exhale.aifc", "durationSec" : 7.850667, "sampleRate" : 48000, "channels" : 1 } ]
+      }
+    },
+    "full" : {
+      "inhale" : {
+        "start" : [],
+        "loop" : [],
+        "end" : [],
+        "oneShot" : [
+          { "file" : "full_steady.aifc", "durationSec" : 7.893333, "sampleRate" : 48000, "channels" : 1 },
+          { "file" : "full_real_1.aifc", "durationSec" : 10.762667, "sampleRate" : 48000, "channels" : 1 },
+          { "file" : "full_real_2.aifc", "durationSec" : 9.322667, "sampleRate" : 48000, "channels" : 1 }
+        ]
+      },
+      "exhale" : {
+        "start" : [],
+        "loop" : [],
+        "end" : [],
+        "oneShot" : []
+      }
+    },
+    "frc" : {
+      "inhale" : {
+        "start" : [],
+        "loop" : [],
+        "end" : [],
+        "oneShot" : []
+      },
+      "exhale" : {
+        "start" : [],
+        "loop" : [],
+        "end" : [],
+        "oneShot" : [
+          { "file" : "frc_1.aifc", "durationSec" : 3.413333, "sampleRate" : 48000, "channels" : 1 },
+          { "file" : "frc_2.aifc", "durationSec" : 3.829333, "sampleRate" : 48000, "channels" : 1 },
+          { "file" : "frc_3.aifc", "durationSec" : 4.0, "sampleRate" : 48000, "channels" : 1 },
+          { "file" : "frc_4.aifc", "durationSec" : 3.893333, "sampleRate" : 48000, "channels" : 1 },
+          { "file" : "frc_5.aifc", "durationSec" : 3.573333, "sampleRate" : 48000, "channels" : 1 },
+          { "file" : "frc_6.aifc", "durationSec" : 3.872, "sampleRate" : 48000, "channels" : 1 },
+          { "file" : "frc_7.aifc", "durationSec" : 4.106667, "sampleRate" : 48000, "channels" : 1 },
+          { "file" : "frc_8.aifc", "durationSec" : 4.096, "sampleRate" : 48000, "channels" : 1 }
+        ]
+      }
+    },
+    "rv" : {
+      "inhale" : {
+        "start" : [],
+        "loop" : [],
+        "end" : [],
+        "oneShot" : []
+      },
+      "exhale" : {
+        "start" : [],
+        "loop" : [],
+        "end" : [],
+        "oneShot" : [ { "file" : "rv.aifc", "durationSec" : 8.8, "sampleRate" : 48000, "channels" : 1 } ]
+      }
+    },
+    "recovery" : {
+      "inhale" : {
+        "start" : [],
+        "loop" : [],
+        "end" : [],
+        "oneShot" : [ { "file" : "recovery.aifc", "durationSec" : 8.138667, "sampleRate" : 48000, "channels" : 1 } ]
+      },
+      "exhale" : {
+        "start" : [],
+        "loop" : [],
+        "end" : [],
+        "oneShot" : []
+      }
+    },
+    "hyperventilation" : {
+      "inhale" : {
+        "start" : [],
+        "loop" : [],
+        "end" : [],
+        "oneShot" : [ { "file" : "hyperventilation.aifc", "durationSec" : 6.933333, "sampleRate" : 48000, "channels" : 1 } ]
+      },
+      "exhale" : {
+        "start" : [],
+        "loop" : [],
+        "end" : [],
+        "oneShot" : [ { "file" : "hyperventilation.aifc", "durationSec" : 6.933333, "sampleRate" : 48000, "channels" : 1 } ]
       }
     }
   }
