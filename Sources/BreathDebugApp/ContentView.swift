@@ -105,7 +105,14 @@ struct ContentView: View {
                 .onChange(of: model.singleStyle) { _, _ in model.onSingleStyleChanged() }
             styleBadge(model.singleStyle)
             directionPicker(selection: $model.singleType, options: model.directions(for: model.singleStyle))
-            sliderRow("Duration", $model.singleDuration, 1...30, step: 0.5, unit: "s")
+            if model.info(for: model.singleStyle)?.mode == .oneShot {
+                sliderRow("Duration", $model.singleDuration, 1...30, step: 0.5, unit: "s")
+                    .disabled(true).opacity(0.5)
+                Text("one-shot: natural length (duration ignored)")
+                    .font(.caption2).foregroundStyle(.tertiary)
+            } else {
+                sliderRow("Duration", $model.singleDuration, 1...30, step: 0.5, unit: "s")
+            }
             seedField("Seed", text: $model.singleSeedText)
             Toggle("Variation", isOn: $model.singleVariationEnabled).toggleStyle(.switch)
             sliderRow("Gain wobble", $model.singleVarGainDb, 0...6, step: 0.5, unit: "dB")
@@ -185,7 +192,7 @@ struct ContentView: View {
     private var outputPane: some View {
         VStack(alignment: .leading, spacing: 12) {
             statusLine
-            WaveformView(peaks: model.waveform, boundaries: model.boundaries)
+            waveform
                 .frame(height: 200)
             if let stats = model.stats { statsView(stats) }
             Divider()
@@ -193,6 +200,19 @@ struct ContentView: View {
         }
         .padding()
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    /// The waveform, animated with a live playhead only while audio is running. Gating the
+    /// `TimelineView` on phase means no redraw ticks (zero CPU) when idle, and no retained timer.
+    @ViewBuilder private var waveform: some View {
+        switch model.phase {
+        case .playing, .looping:
+            TimelineView(.animation) { _ in
+                WaveformView(peaks: model.waveform, boundaries: model.boundaries, progress: model.playheadProgress)
+            }
+        default:
+            WaveformView(peaks: model.waveform, boundaries: model.boundaries, progress: nil)
+        }
     }
 
     @ViewBuilder private var statusLine: some View {

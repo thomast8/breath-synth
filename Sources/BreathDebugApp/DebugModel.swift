@@ -137,6 +137,39 @@ final class DebugModel {
     var logPath: String { logger.url.path }
     var streamURL: String { "http://127.0.0.1:\(logger.server.port)/" }
 
+    /// Live playhead position as a fraction [0,1] of the *displayed* waveform, or nil when there is no
+    /// playhead (idle / rendering / error / before audio starts / past the end). Read straight from the
+    /// engine's player each call — drive redraws with a TimelineView, not `@Observable` tracking.
+    ///
+    /// `currentSampleTime` is the total frames played since playback started (monotonic, never wraps),
+    /// while `stats.frames` is one displayed unit, so `played % frames` sweeps once per displayed unit:
+    /// once for single/counted/sequence, once per cycle for cycle mode (the waveform shows one cycle).
+    /// It's the render position, so it leads the speaker by the output latency (~5-20 ms) — sub-pixel
+    /// here, not worth correcting for a debug tool.
+    var playheadProgress: Double? {
+        switch phase {
+        case .playing, .looping: break
+        default: return nil
+        }
+        guard let frames = stats?.frames, frames > 0,
+              let sampleTime = engine?.currentSampleTime else { return nil }
+        let total = AVAudioFramePosition(frames)
+        let played = max(0, sampleTime)        // clamp the negative/zero pre-roll
+        switch task {
+        case .single, .counted:
+            let fraction = Double(played) / Double(total)
+            return fraction >= 1 ? nil : fraction
+        case .cycle:
+            if cycleLoop { return Double(played % total) / Double(total) }
+            if played >= total * AVAudioFramePosition(max(1, cycleCount)) { return nil }
+            return Double(played % total) / Double(total)
+        case .sequence:
+            if seqLoop { return Double(played % total) / Double(total) }
+            let fraction = Double(played) / Double(total)
+            return fraction >= 1 ? nil : fraction
+        }
+    }
+
     // MARK: Palette subsets for the pickers
 
     var nonCountedStyles: [StyleInfo] { styles.filter { $0.mode != .counted } }

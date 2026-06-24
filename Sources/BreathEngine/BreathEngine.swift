@@ -288,6 +288,13 @@ public final class BreathEngine {
         player?.stop()
     }
 
+    /// Current playback position in frames since playback started, or nil when nothing is playing.
+    /// Used by debug tooling to drive a playhead; see `BreathPlayer.currentSampleTime` for semantics
+    /// (monotonic, does not wrap on loop — the caller modulos by the displayed buffer length).
+    public var currentSampleTime: AVAudioFramePosition? {
+        player?.currentSampleTime
+    }
+
     // MARK: - File output
 
     /// Render a breath and write it to a 32-bit float WAV file.

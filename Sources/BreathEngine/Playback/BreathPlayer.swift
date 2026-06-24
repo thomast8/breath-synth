@@ -80,4 +80,15 @@ public final class BreathPlayer {
             started = false
         }
     }
+
+    /// The player node's current render position in frames since playback started, or nil when not
+    /// playing / before the render clock is valid. Monotonic and continuous across back-to-back
+    /// `play(_:times:)` buffers and `loopForever` (it does NOT wrap at the buffer boundary), so a
+    /// caller wanting a within-buffer position must modulo by the buffer length itself.
+    public var currentSampleTime: AVAudioFramePosition? {
+        guard started, player.isPlaying,
+              let nodeTime = player.lastRenderTime,
+              let playerTime = player.playerTime(forNodeTime: nodeTime) else { return nil }
+        return playerTime.sampleTime
+    }
 }

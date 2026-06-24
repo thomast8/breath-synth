@@ -11,6 +11,8 @@ struct WavePeak: Equatable {
 struct WaveformView: View {
     let peaks: [WavePeak]
     var boundaries: [Double] = []
+    /// Playhead position as a fraction 0...1 of the width, or nil for no playhead.
+    var progress: Double? = nil
 
     var body: some View {
         Canvas { context, size in
@@ -41,6 +43,15 @@ struct WaveformView: View {
                 wave.addLine(to: CGPoint(x: x, y: bottom))
             }
             context.stroke(wave, with: .color(.accentColor), lineWidth: max(0.75, columnWidth * 0.9))
+
+            // Playhead — drawn last so it sits on top of the wave.
+            if let progress {
+                let x = size.width * CGFloat(min(max(progress, 0), 1))
+                var head = Path()
+                head.move(to: CGPoint(x: x, y: 0))
+                head.addLine(to: CGPoint(x: x, y: size.height))
+                context.stroke(head, with: .color(.red.opacity(0.9)), lineWidth: 1.5)
+            }
         }
         .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
         .overlay {
