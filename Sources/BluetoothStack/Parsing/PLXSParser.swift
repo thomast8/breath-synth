@@ -30,8 +30,8 @@ public struct PLXSParser: MeasurementParser {
     private func parseContinuous(_ data: Data) -> PulseOxMeasurement? {
         guard data.count >= 5 else { return nil }
         let flags = data[data.startIndex]
-        let spo2 = SFLOAT.decode(data, at: 1)
-        let pr = SFLOAT.decode(data, at: 3)
+        var spo2 = Self.noReadingToNil(SFLOAT.decode(data, at: 1))
+        var pr = Self.noReadingToNil(SFLOAT.decode(data, at: 3))
 
         var offset = 5
         if flags & 0x01 != 0 { offset += 4 } // SpO2PR-Fast (SpO2 + PR SFLOATs)
@@ -48,6 +48,12 @@ public struct PLXSParser: MeasurementParser {
             (finger, quality) = Self.interpretDeviceStatus(status, spo2: spo2)
         }
 
+        // Finger out: suppress any stale/zero numbers so we never report a bogus 0% SpO2.
+        if !finger {
+            spo2 = nil
+            pr = nil
+        }
+
         return PulseOxMeasurement(
             spo2: spo2,
             pulseRate: pr,
@@ -60,8 +66,8 @@ public struct PLXSParser: MeasurementParser {
     // 0x2A5E: flags(1) | SpO2 SFLOAT(2) | PR SFLOAT(2) | [timestamp | status | ...].
     private func parseSpotCheck(_ data: Data) -> PulseOxMeasurement? {
         guard data.count >= 5 else { return nil }
-        let spo2 = SFLOAT.decode(data, at: 1)
-        let pr = SFLOAT.decode(data, at: 3)
+        let spo2 = Self.noReadingToNil(SFLOAT.decode(data, at: 1))
+        let pr = Self.noReadingToNil(SFLOAT.decode(data, at: 3))
         return PulseOxMeasurement(
             spo2: spo2,
             pulseRate: pr,
@@ -69,6 +75,14 @@ public struct PLXSParser: MeasurementParser {
             quality: spo2 == nil ? .searching : .good,
             raw: data
         )
+    }
+
+    /// Several oximeters (e.g. the ChoiceMMed MD300C208S that Medisana rebadges as the PM100) signal
+    /// "no reading" with a literal `0` rather than the spec's NaN SFLOAT. A SpO2 or pulse rate of 0 is
+    /// non-physiological, so treat any value at or below 0 as absent.
+    static func noReadingToNil(_ value: Double?) -> Double? {
+        guard let value, value > 0 else { return nil }
+        return value
     }
 
     /// Map the PLX Device and Sensor Status bitfield to (fingerDetected, quality).
