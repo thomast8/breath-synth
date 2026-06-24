@@ -60,6 +60,7 @@ struct Breath: AsyncParsableCommand {
             Cycle.self,
             SequenceCommand.self,
             Render.self,
+            Sensor.self,
         ]
     )
 }

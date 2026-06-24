@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>com.breathsynth.breath</string>
+    <key>CFBundleName</key>
+    <string>breath</string>
+    <key>CFBundleExecutable</key>
+    <string>breath</string>
+    <key>NSBluetoothAlwaysUsageDescription</key>
+    <string>breath connects to a Bluetooth pulse oximeter to read SpO2 and pulse rate.</string>
+</dict>
+</plist>
