@@ -58,15 +58,32 @@ public struct RolePalette: Codable, Sendable, Equatable {
     }
 }
 
+/// How a style's source is rendered into an output buffer.
+public enum RenderMode: String, Codable, Sendable {
+    case textured
+    case oneShot
+    case counted
+}
+
 /// Inhale + exhale palettes for a single style.
 public struct StyleManifest: Codable, Sendable, Equatable {
     public var inhale: RolePalette
     public var exhale: RolePalette
+    /// Optional render override; a missing JSON key decodes to `nil` (→ `.textured`).
+    public var render: RenderMode?
 
-    public init(inhale: RolePalette = RolePalette(), exhale: RolePalette = RolePalette()) {
+    public init(
+        inhale: RolePalette = RolePalette(),
+        exhale: RolePalette = RolePalette(),
+        render: RenderMode? = nil
+    ) {
         self.inhale = inhale
         self.exhale = exhale
+        self.render = render
     }
+
+    /// The render mode to use, defaulting to `.textured` when unset.
+    public var effectiveRender: RenderMode { render ?? .textured }
 
     public func palette(for type: BreathType) -> RolePalette {
         type == .inhale ? inhale : exhale
@@ -79,12 +96,19 @@ public struct BreathManifest: Codable, Sendable, Equatable {
     public var version: Int
     /// Keyed by style name.
     public var styles: [String: StyleManifest]
+    /// Optional filename of a room-tone recording used as a denoise profile.
+    public var noiseProfile: String?
 
     public static let currentVersion = 1
 
-    public init(version: Int = BreathManifest.currentVersion, styles: [String: StyleManifest] = [:]) {
+    public init(
+        version: Int = BreathManifest.currentVersion,
+        styles: [String: StyleManifest] = [:],
+        noiseProfile: String? = nil
+    ) {
         self.version = version
         self.styles = styles
+        self.noiseProfile = noiseProfile
     }
 
     public func palette(style: BreathStyle, type: BreathType) -> RolePalette? {

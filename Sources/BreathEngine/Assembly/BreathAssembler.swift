@@ -43,7 +43,7 @@ public struct AssemblerSettings: Sendable {
         endCapSec: Double = 0.8,
         crossfadeSec: Double = 0.2,
         shortThresholdSec: Double = 1.5,
-        enableSpectralDenoise: Bool = false,
+        enableSpectralDenoise: Bool = true,
         denoiseOverSubtraction: Float = 1.75,
         denoiseFloorGain: Float = 0.05
     ) {
@@ -70,7 +70,10 @@ public enum BreathAssembler {
         clips: BreathSourceClips,
         settings: AssemblerSettings,
         deltas: VariationDeltas = .identity,
-        seed: UInt64 = 0
+        seed: UInt64 = 0,
+        mode: RenderMode = .textured,
+        style: BreathStyle = "neutral",
+        noiseProfile: [Float]? = nil
     ) -> [Float] {
         let sr = settings.sampleRate
         let totalFrames = max(1, Segments.frames(seconds: durationSec, sampleRate: sr))
@@ -79,20 +82,98 @@ public enum BreathAssembler {
             return [Float](repeating: 0, count: totalFrames)
         }
 
-        var body = recordedShapeBranch(
-            type: type,
-            totalFrames: totalFrames,
-            durationSec: durationSec,
-            full: full,
-            settings: settings,
-            deltas: deltas,
-            seed: seed
-        )
+        var body: [Float]
+        switch mode {
+        case .textured:
+            body = recordedShapeBranch(
+                type: type,
+                totalFrames: totalFrames,
+                durationSec: durationSec,
+                full: full,
+                settings: settings,
+                deltas: deltas,
+                seed: seed,
+                style: style,
+                noiseProfile: noiseProfile
+            )
+        case .oneShot, .counted:
+            // `.counted` is assembled at the engine layer; falling through to the
+            // natural-length one-shot here keeps `assemble` safe if it is ever called
+            // with `.counted` directly.
+            body = oneShotBranch(
+                type: type,
+                totalFrames: totalFrames,
+                durationSec: durationSec,
+                full: full,
+                settings: settings,
+                deltas: deltas,
+                seed: seed,
+                noiseProfile: noiseProfile
+            )
+        }
         let g = Float(deltas.gainScalar)
-        for i in 0..<totalFrames {
+        for i in body.indices {
             body[i] *= g
         }
         return body
+    }
+
+    /// Lay down `count` events by cycling through the recording's real `units` (each an adjacent
+    /// slice carrying its event + natural gap). For `count <= units.count` the output is the
+    /// recorded sequence truncated to N — a seamless slice of the real recording (natural sound,
+    /// spacing, and variation). When more are requested than recorded, the wrap-around join (last
+    /// recorded unit → first) is the only discontinuity, so it gets a short fade to stay click-free.
+    public static func assembleCounted(
+        units: [[Float]],
+        count: Int,
+        settings: AssemblerSettings
+    ) -> [Float] {
+        guard !units.isEmpty else { return [] }
+        let n = max(1, count)
+        let fade = max(1, Int(0.006 * settings.sampleRate))
+        var out = [Float]()
+        out.reserveCapacity(units.map(\.count).reduce(0, +) / units.count * n + 1)
+        for i in 0..<n {
+            var seg = units[i % units.count]
+            // A wrap (cycled back to the first unit) joins non-adjacent audio; fade the seam.
+            if i > 0, i % units.count == 0, out.count >= fade, seg.count >= fade {
+                for k in 0..<fade {
+                    let g = Float(k) / Float(fade)
+                    out[out.count - fade + k] *= 1 - g
+                    seg[k] *= g
+                }
+            }
+            out.append(contentsOf: seg)
+        }
+        return normalizePeak(applyEdgeFades(out, sampleRate: settings.sampleRate))
+    }
+
+    /// Hybrid counted render: place `count` event `cores` (clean, declicked exemplars sampled at
+    /// random — seeded — from one take) at the inter-onset `gaps` of another take's natural rhythm.
+    /// Used for packing: random single packs from the deliberately-separated take, collated at the
+    /// natural-rhythm take's cadence. `--seed` selects the random pack sequence (reproducible).
+    public static func assembleHybrid(
+        cores: [[Float]],
+        gaps: [Int],
+        count: Int,
+        settings: AssemblerSettings,
+        seed: UInt64
+    ) -> [Float] {
+        guard !cores.isEmpty else { return [] }
+        let n = max(1, count)
+        var rng = SeededRNG(seed: seed)
+        var out = [Float]()
+        for i in 0..<n {
+            let core = cores[Int.random(in: 0..<cores.count, using: &rng)]
+            // Each core occupies one rhythm slot; pad with silence to the slot length (never shorter
+            // than the core, so a tight gap can't truncate a pack).
+            let slot = gaps.isEmpty ? core.count : max(core.count, gaps[i % gaps.count])
+            out.append(contentsOf: core)
+            if slot > core.count {
+                out.append(contentsOf: [Float](repeating: 0, count: slot - core.count))
+            }
+        }
+        return normalizePeak(applyEdgeFades(out, sampleRate: settings.sampleRate))
     }
 
     // MARK: - Render path
@@ -109,32 +190,25 @@ public enum BreathAssembler {
         full: [Float],
         settings: AssemblerSettings,
         deltas: VariationDeltas,
-        seed: UInt64
+        seed: UInt64,
+        style: BreathStyle,
+        noiseProfile: [Float]?
     ) -> [Float] {
-        var source = cleanRecordedSource(
-            trimOuterSilence(full, sampleRate: settings.sampleRate),
-            sampleRate: settings.sampleRate
-        )
+        let source = prepareSource(full, settings: settings, noiseProfile: noiseProfile)
         guard source.count > 1 else { return [Float](repeating: 0, count: totalFrames) }
-
-        // Optional spectral noise-profile subtraction. Runs once per source, before the
-        // envelope/texture extraction so both see the cleaned signal. The high-pass above only
-        // clears sub-260 Hz rumble; this gates the steady broadband hiss the recording carries
-        // above that, pushing quiet stretches toward true silence.
-        if settings.enableSpectralDenoise {
-            source = SpectralDenoise.denoise(
-                source,
-                sampleRate: settings.sampleRate,
-                overSubtraction: settings.denoiseOverSubtraction,
-                floorGain: settings.denoiseFloorGain
-            )
-        }
 
         // Timbre only: the loud, steady, energy-flat sustain of the breath. The
         // recording's own dynamics (quiet preamble, end-loaded ramp) are excluded by
         // the threshold in `flattenedTexture`, so they never re-enter the breath.
         let envelope = rmsEnvelope(source, sampleRate: settings.sampleRate)
         var texture = flattenedTexture(from: source, envelope: envelope, type: type, sampleRate: settings.sampleRate)
+
+        // A forceful exhale opens with a glottal onset ("ungh") that, once looped, recurs and
+        // sounds wrong. Skip the leading attack so the looped texture is the sustained airflow only.
+        if style == "hyperventilation", type == .exhale {
+            let skip = min(texture.count / 3, Segments.frames(seconds: 0.22, sampleRate: settings.sampleRate))
+            if texture.count - skip > 1 { texture = ensureZeroEndpoints(Array(texture[skip...])) }
+        }
 
         // Per-render pitch/length variation (previously computed but never applied).
         // The loop below re-fills to the exact target length, so duration stays exact.
@@ -157,8 +231,15 @@ public enum BreathAssembler {
         )
         body = flattenLocalEnergy(body, sampleRate: settings.sampleRate)
 
+        // A forceful exhale's airflow naturally sags as the lungs empty; even after the standard
+        // flatten the looped body still wobbles audibly. A stronger leveling pass (lower floor,
+        // wider window) holds the power steady so it reads as sustained, not pulsing.
+        if style == "hyperventilation", type == .exhale {
+            body = levelize(body, sampleRate: settings.sampleRate)
+        }
+
         // Dynamics: the designed macro contour. Prompt onset, single clean attack.
-        let shape = Envelope.curve(for: type, frames: totalFrames, durationSec: durationSec)
+        let shape = Envelope.curve(for: type, style: style, frames: totalFrames, durationSec: durationSec)
         for i in body.indices {
             body[i] *= shape[i]
         }
@@ -166,6 +247,103 @@ public enum BreathAssembler {
         // Click-free, truly silent edges.
         body = applyEdgeFades(body, sampleRate: settings.sampleRate)
         return normalizePeak(body)
+    }
+
+    /// Natural-length one-shot render (frc, rv). The source is prepped exactly like the
+    /// textured path (trim → clean → optional denoise) but then returned at its own
+    /// natural length: no texture extraction, no loop, no designed envelope and no
+    /// `flattenLocalEnergy`. The maneuver's duration is intrinsic to the recording, so
+    /// the requested `durationSec` / `totalFrames` are deliberately ignored. Per-render
+    /// `deltas.gainScalar` is applied by `assemble` afterwards, not here.
+    private static func oneShotBranch(
+        type: BreathType,
+        totalFrames: Int,
+        durationSec: Double,
+        full: [Float],
+        settings: AssemblerSettings,
+        deltas: VariationDeltas,
+        seed: UInt64,
+        noiseProfile: [Float]?
+    ) -> [Float] {
+        let prepared = prepareSource(full, settings: settings, noiseProfile: noiseProfile)
+        guard prepared.count > 1 else { return [Float](repeating: 0, count: totalFrames) }
+        // Tighten the tail to the breath body. `trimOuterSilence` keeps anything above its loose
+        // threshold, so a recording's trailing dead air + a late stop-knock can survive past the
+        // exhale. Keep only the longest contiguous above-threshold region (the exhale) plus a short
+        // decay pad, dropping the silent gap and any late transient before normalisation.
+        let body = trimToMainBody(prepared, sampleRate: settings.sampleRate)
+        return normalizePeak(applyEdgeFades(body, sampleRate: settings.sampleRate))
+    }
+
+    /// Trim a one-shot breath to its main energetic body, dropping trailing dead air and — crucially
+    /// — any isolated transient that follows a short gap (a stop-knock, a vocalised "t"/"ptuh" at the
+    /// end of a forced exhale, a lip smack). Uses a fine, unsmoothed energy envelope so a ~100 ms
+    /// gap between the breath and a trailing plosive is resolved (the engine's broad RMS envelope
+    /// would bridge it); the breath is the longest contiguous above-threshold run, the plosive a
+    /// separate shorter run that is excluded.
+    private static func trimToMainBody(_ samples: [Float], sampleRate: Double) -> [Float] {
+        guard samples.count > 1 else { return samples }
+        let win = max(1, Int(0.015 * sampleRate))
+        let hop = max(1, Int(0.005 * sampleRate))
+        var hopStart = [Int]()
+        var hopRMS = [Float]()
+        var s = 0
+        while s < samples.count {
+            let e = min(samples.count, s + win)
+            var acc: Float = 0
+            for j in s..<e { acc += samples[j] * samples[j] }
+            hopStart.append(s)
+            hopRMS.append((acc / Float(e - s)).squareRoot())
+            s += hop
+        }
+        guard let peak = hopRMS.max(), peak > 0 else { return samples }
+        let threshold = peak * 0.05
+        // Longest contiguous run of hops above threshold = the breath body.
+        var runStart = -1, bestStart = 0, bestEnd = 0
+        for idx in hopRMS.indices {
+            if hopRMS[idx] >= threshold {
+                if runStart < 0 { runStart = idx }
+                if idx - runStart > bestEnd - bestStart { bestStart = runStart; bestEnd = idx }
+            } else {
+                runStart = -1
+            }
+        }
+        let pad = Int(0.05 * sampleRate)
+        let end = min(samples.count, hopStart[bestEnd] + win + pad)
+        // Keep from the onset (prepareSource already trimmed the head) through the body + short pad.
+        return Array(samples[0..<end])
+    }
+
+    /// Shared source prep for every render mode: trim the outer silence, run the single
+    /// low-cut clean-up, then optionally subtract the spectral noise profile. Factored
+    /// out of `recordedShapeBranch` so the one-shot and counted paths see an identically
+    /// cleaned signal. Internal (not private) so the engine's counted path can reuse it.
+    static func prepareSource(
+        _ full: [Float],
+        settings: AssemblerSettings,
+        noiseProfile: [Float]?
+    ) -> [Float] {
+        var source = cleanRecordedSource(
+            trimOuterSilence(full, sampleRate: settings.sampleRate),
+            sampleRate: settings.sampleRate
+        )
+        guard source.count > 1 else { return source }
+
+        // Optional spectral noise-profile subtraction. Runs once per source, before any
+        // envelope/texture extraction so every mode sees the cleaned signal. The high-pass
+        // in `cleanRecordedSource` only clears sub-260 Hz rumble; this gates the steady
+        // broadband hiss the recording carries above that, pushing quiet stretches toward
+        // true silence.
+        if settings.enableSpectralDenoise {
+            source = SpectralDenoise.denoise(
+                source,
+                sampleRate: settings.sampleRate,
+                overSubtraction: settings.denoiseOverSubtraction,
+                floorGain: settings.denoiseFloorGain,
+                noiseProfile: noiseProfile
+            )
+        }
+        return source
     }
 
     private static func trimOuterSilence(_ samples: [Float], sampleRate: Double) -> [Float] {
@@ -344,6 +522,27 @@ public enum BreathAssembler {
         var out = samples
         for i in out.indices {
             let divisor = max(energy[i], target * 0.35)
+            out[i] *= target / divisor
+        }
+        return out
+    }
+
+    /// A stronger energy flatten (wider window, lower floor) that holds the power near-constant.
+    /// Used for the forceful exhale, whose airflow sags as the lungs empty: the standard flatten
+    /// leaves an audible wobble, this evens it out. The lower floor is safe here because a forceful
+    /// breath stays well above the noise floor throughout, so boosting the quieter stretches does
+    /// not amplify hiss.
+    private static func levelize(_ samples: [Float], sampleRate: Double) -> [Float] {
+        guard samples.count > 1 else { return samples }
+        var energy = rmsEnvelope(samples, sampleRate: sampleRate)
+        energy = smoothEnvelope(energy, radius: Segments.frames(seconds: 0.18, sampleRate: sampleRate))
+        let audible = energy.filter { $0 > 0.000_001 }
+        guard !audible.isEmpty else { return samples }
+        let target = audible.reduce(0, +) / Float(audible.count)
+
+        var out = samples
+        for i in out.indices {
+            let divisor = max(energy[i], target * 0.15)
             out[i] *= target / divisor
         }
         return out

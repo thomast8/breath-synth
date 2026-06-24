@@ -113,6 +113,8 @@ public enum BreathError: Error, CustomStringConvertible, Equatable {
     case audioFormatUnavailable
     case unsupportedManifestVersion(found: Int, supported: Int)
     case ioFailure(String)
+    /// A counted style (e.g. recovery, packing) was asked for via a duration-based render.
+    case styleRequiresCount(BreathStyle)
 
     public var description: String {
         switch self {
@@ -128,6 +130,8 @@ public enum BreathError: Error, CustomStringConvertible, Equatable {
             return "Manifest version \(found) is newer than supported (\(supported)). Update breath-synth or use a matching manifest."
         case let .ioFailure(message):
             return "Audio I/O failure: \(message)"
+        case let .styleRequiresCount(style):
+            return "Style '\(style)' is counted: render it with renderCounted(style:type:count:) — a duration-based render, cycle, or sequence can't express it."
         }
     }
 }

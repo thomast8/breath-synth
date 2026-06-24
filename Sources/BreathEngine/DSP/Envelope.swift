@@ -30,7 +30,24 @@ public enum Envelope {
         let tailFraction: Double
     }
 
-    private static func design(for type: BreathType) -> Design {
+    private static func design(for type: BreathType, style: BreathStyle) -> Design {
+        // Forceful, fast breathing holds near full intensity rather than swelling and
+        // decaying like a relaxed breath: quick attack, early peak, a high sustain floor so
+        // the level stays strong across the whole breath, and only a short end fade. Without
+        // this, the default contour's back-half decay reads as the level "dropping".
+        if style == "hyperventilation" {
+            switch type {
+            case .inhale:
+                return Design(attackSec: 0.18, attackLevel: 0.85, peakFrac: 0.22,
+                              decaySteepness: 0.7, sustainFloor: 0.82, tailFraction: 0.10)
+            case .exhale:
+                // Forceful and fairly even: a longer, gentler attack ramps up over the take's
+                // glottal onset ("ungh") instead of a hard hit, then holds high (~0.72) with only a
+                // gentle decline so the power doesn't visibly sag, ending with a short tail fade.
+                return Design(attackSec: 0.28, attackLevel: 0.45, peakFrac: 0.20,
+                              decaySteepness: 0.6, sustainFloor: 0.88, tailFraction: 0.12)
+            }
+        }
         // Peak locations and fall-off character are measured from the source recordings:
         //  * inhale: a slow, gradual draw - broad peak ~60%, then a steady decline over
         //    the back third that lands softly. No held airflow, so no floor/tail.
@@ -59,11 +76,11 @@ public enum Envelope {
 
     /// Sample the designed contour to `frames` samples, scaled for long breaths. First
     /// and last samples are forced to exactly 0.
-    public static func curve(for type: BreathType, frames: Int, durationSec: Double) -> [Float] {
+    public static func curve(for type: BreathType, style: BreathStyle = "neutral", frames: Int, durationSec: Double) -> [Float] {
         guard frames > 0 else { return [] }
         if frames == 1 { return [0] }
 
-        let d = design(for: type)
+        let d = design(for: type, style: style)
         let dur = max(durationSec, 0.001)
         let scale = longBreathGainScale(durationSec: durationSec)
 

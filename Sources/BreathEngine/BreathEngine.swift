@@ -43,6 +43,10 @@ public final class BreathEngine {
     private let config: Config
     private let library: AssetLibrary
     private let format: AVAudioFormat
+    /// Per-bin room-tone magnitude profile loaded from `manifest.noiseProfile`, passed
+    /// to every render so the denoiser subtracts the measured floor instead of estimating
+    /// one. `nil` when no profile is configured or it failed to load (denoiser falls back).
+    private let noiseProfile: [Float]?
     private var player: BreathPlayer?
     private var cache: [String: AVAudioPCMBuffer] = [:]
     private var cacheOrder: [String] = []
@@ -63,6 +67,17 @@ public final class BreathEngine {
             manifest: config.manifest,
             sampleRate: config.sampleRate
         )
+        // Load the room-tone denoise profile once, if the manifest names one. A missing or
+        // unreadable file leaves `noiseProfile` nil so the denoiser estimates its own floor.
+        if let name = config.manifest.noiseProfile {
+            if let s = try? library.samples(for: name) {
+                noiseProfile = SpectralDenoise.magnitudeProfile(from: s, sampleRate: config.sampleRate)
+            } else {
+                noiseProfile = nil
+            }
+        } else {
+            noiseProfile = nil
+        }
     }
 
     /// Convenience: build an engine from a manifest.json file in `assetsDirectory`.
@@ -80,6 +95,10 @@ public final class BreathEngine {
 
     /// Render the breath to mono samples (no caching).
     public func renderSamples(_ spec: BreathSpec) throws -> [Float] {
+        let mode = config.manifest.styles[spec.style]?.effectiveRender ?? .textured
+        // Counted styles have no duration; `BreathSpec` can't express a count, so fail loudly
+        // rather than silently degrading to one one-shot copy (via render/cycle/sequence).
+        guard mode != .counted else { throw BreathError.styleRequiresCount(spec.style) }
         let seed = spec.seed ?? Variation.stableSeed(for: spec)
         var rng = SeededRNG(seed: seed)
         let deltas = Variation.draw(spec.variation, rng: &rng)
@@ -90,7 +109,10 @@ public final class BreathEngine {
             clips: clips,
             settings: config.settings,
             deltas: deltas,
-            seed: seed
+            seed: seed,
+            mode: mode,
+            style: spec.style,
+            noiseProfile: noiseProfile
         )
         applyMasterGainAndClamp(&samples, extraGain: spec.gain)
         return samples
@@ -134,6 +156,100 @@ public final class BreathEngine {
     /// Render a planned sequence into a single buffer.
     public func renderSequence(_ plan: SequencePlan) throws -> AVAudioPCMBuffer {
         try makeBuffer(renderSequenceSamples(plan))
+    }
+
+    // MARK: - Counted render
+
+    /// Render `count` counted events (recovery breaths, packing gulps) to mono samples.
+    ///
+    /// With a single source take the recording is cleaned/denoised, split into its real events, and
+    /// the first `count` are concatenated (cycling for higher counts) — a seamless slice of the real
+    /// recording. With two source takes the render is HYBRID: clean event cores are sampled (seeded)
+    /// from the first take and laid out at the second take's natural rhythm (used for packing —
+    /// random single packs from the separated take, at the natural-rhythm take's cadence). When
+    /// `count` is nil the detected event count is used.
+    public func renderCountedSamples(
+        style: BreathStyle,
+        type: BreathType,
+        count: Int?,
+        seed: UInt64? = nil
+    ) throws -> [Float] {
+        let resolvedSeed = seed ?? countedStableSeed(style: style, type: type, count: count)
+        guard let palette = config.manifest.palette(style: style, type: type), !palette.oneShot.isEmpty else {
+            throw BreathError.emptyRole(style, type, .oneShot)
+        }
+        let sr = config.sampleRate
+        var body: [Float]
+
+        if palette.oneShot.count >= 2 {
+            // Hybrid: cores from take 0 (separated packs), rhythm from take 1 (natural cadence).
+            let coreSrc = BreathAssembler.prepareSource(
+                try library.samples(for: palette.oneShot[0].file), settings: config.settings, noiseProfile: noiseProfile)
+            let rhythmSrc = BreathAssembler.prepareSource(
+                try library.samples(for: palette.oneShot[1].file), settings: config.settings, noiseProfile: noiseProfile)
+            let cores = UnitExtractor.gulpCores(from: coreSrc, sampleRate: sr)
+            let gaps = UnitExtractor.rhythmGaps(from: rhythmSrc, sampleRate: sr)
+            let n = count ?? (gaps.count + 1)
+            body = BreathAssembler.assembleHybrid(cores: cores, gaps: gaps, count: n, settings: config.settings, seed: resolvedSeed)
+        } else {
+            let prepared = BreathAssembler.prepareSource(
+                try library.samples(for: palette.oneShot[0].file), settings: config.settings, noiseProfile: noiseProfile)
+            let (units, detected) = UnitExtractor.extract(from: prepared, sampleRate: sr)
+            body = BreathAssembler.assembleCounted(units: units, count: count ?? detected, settings: config.settings)
+        }
+        applyMasterGainAndClamp(&body, extraGain: 1.0)
+        return body
+    }
+
+    /// Render a counted breath into a single buffer.
+    public func renderCounted(
+        style: BreathStyle,
+        type: BreathType,
+        count: Int?,
+        seed: UInt64? = nil
+    ) throws -> AVAudioPCMBuffer {
+        try makeBuffer(renderCountedSamples(style: style, type: type, count: count, seed: seed))
+    }
+
+    /// Render a counted breath and write it to a 32-bit float WAV file.
+    public func renderCountedToWAV(
+        style: BreathStyle,
+        type: BreathType,
+        count: Int?,
+        seed: UInt64? = nil,
+        url: URL
+    ) throws {
+        try write(renderCounted(style: style, type: type, count: count, seed: seed), to: url)
+    }
+
+    /// Play a counted breath once and return when done.
+    public func playCounted(
+        style: BreathStyle,
+        type: BreathType,
+        count: Int?,
+        seed: UInt64? = nil
+    ) async throws {
+        try await playerInstance().playOnce(renderCounted(style: style, type: type, count: count, seed: seed))
+    }
+
+    // MARK: - Manifest accessors
+
+    /// Style names declared in the manifest, sorted for stable presentation.
+    public func styleNames() -> [String] {
+        config.manifest.styles.keys.sorted()
+    }
+
+    /// The render mode configured for `style`, defaulting to `.textured` when unset/unknown.
+    public func renderMode(for style: BreathStyle) -> RenderMode {
+        config.manifest.styles[style]?.effectiveRender ?? .textured
+    }
+
+    /// The breath directions `style` actually carries a non-empty `oneShot` clip for,
+    /// ordered inhale then exhale. Used by the UI to gate the direction picker.
+    public func supportedDirections(for style: BreathStyle) -> [BreathType] {
+        [BreathType.inhale, .exhale].filter { type in
+            !(config.manifest.palette(style: style, type: type)?.oneShot.isEmpty ?? true)
+        }
     }
 
     // MARK: - Playback
@@ -227,6 +343,13 @@ public final class BreathEngine {
         let base = Variation.stableSeed(for: spec) &+ (pattern.seed ?? 0)
         spec.seed = base &+ UInt64(cycleIndex) &* 0x9E37_79B9_7F4A_7C15
         return spec
+    }
+
+    /// A stable seed for a counted render, so a given (style, type, count) always varies the
+    /// same way when the caller doesn't pin a seed. Mirrors `Variation.stableSeed`'s FNV hash.
+    private func countedStableSeed(style: BreathStyle, type: BreathType, count: Int?) -> UInt64 {
+        let key = "counted|\(style)|\(type.rawValue)|\(count.map(String.init) ?? "auto")"
+        return Variation.fnv1a(key)
     }
 
     private func applyMasterGainAndClamp(_ samples: inout [Float], extraGain: Double) {
