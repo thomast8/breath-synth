@@ -106,6 +106,37 @@ Common options:
 - `--seed <n>` (`play`, `render`, `sequence`) / `--no-variation` (`play` and `render` only): control the subtle per-render variation. For `sequence`, `--seed` pins the whole run.
 - `--denoise` / `--no-denoise` (default on): FFT noise-profile subtraction using `room_silence.aifc` as the profile. Tune with `--denoise-oversub` / `--denoise-floor`; pass `--no-denoise` to disable.
 
+## Debug app
+
+`breath-debug` is a SwiftUI app for exercising the whole engine by hand: pick a style
+and parameters, render any of the four paths, *see* the rendered waveform (with
+phase/cycle markers) and stats (duration, peak/RMS dBFS, render time), then play /
+loop / save it.
+
+```sh
+swift run breath-debug        # reads Assets/breaths relative to the package root
+```
+
+For a proper Dock app that bundles the palette (so it runs with no working directory):
+
+```sh
+bash scripts/make-debug-app.sh   # builds + ad-hoc-signs .build/BreathDebug.app
+open .build/BreathDebug.app
+```
+
+Four modes, each with its own style/direction pickers (filtered to what the palette
+actually supports):
+
+- **Single** — one exact-duration breath (textured / one-shot styles): duration, seed, variation, gain.
+- **Counted** — `recovery` / `packing`, with a unit count (blank = auto-detect) and seed.
+- **Cycle** — inhale → hold → exhale → hold; inhale and exhale can use different styles (e.g. `full` in, `frc` out).
+- **Sequence** — fill a total with a whole number of cycles, with a live fit preview and a `--closest` toggle.
+
+Every action is also fanned out to a loopback SSE stream (`curl -N http://127.0.0.1:8789/`)
+and a JSONL file (`~/Library/Logs/BreathDebug/session.jsonl`), so a session is
+observable live without reading the GUI. Override the port / path with
+`BREATH_DEBUG_PORT` / `BREATH_DEBUG_LOG`.
+
 ## How it works
 
 The engine renders mono Float32 audio at 44.1 kHz. For each breath it loads the
@@ -131,4 +162,5 @@ Rendered breaths play through `AVAudioEngine`.
 - `Sources/BreathEngine/Sequence/`: fits a breath pattern into a target duration (`SequencePlanner`).
 - `Sources/BreathEngine/Playback/`: AVFoundation playback.
 - `Sources/BreathCLI/`: CLI harness.
+- `Sources/BreathDebugApp/`: SwiftUI debug front-end (`breath-debug`) over the engine.
 - `Assets/breaths/`: the bundled breath palettes and their `manifest.json`.
