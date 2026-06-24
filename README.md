@@ -61,6 +61,7 @@ Common options:
 - `--assets <dir>`: directory containing the breath assets and `manifest.json` (default `Assets/breaths`).
 - `--style <name>`: breath style; the bundled palette provides `calm`.
 - `--seed <n>` / `--no-variation` (`play` and `render` only): control the subtle per-render variation.
+- `--denoise` / `--no-denoise` (default off): optional FFT noise-profile subtraction on the recorded source to suppress steady hiss. Tune with `--denoise-oversub` / `--denoise-floor`. Off by default (modest benefit on the current pipeline).
 
 ## How it works
 
@@ -71,6 +72,7 @@ assembler:
 ```text
 generateBreath(type, duration):
   trim outer silence and low-cut the recorded source (removes room rumble)
+  optionally spectral-subtract the steady noise floor (--denoise; off by default)
   measure the recording's RMS energy envelope
   reshape that envelope to the requested duration with smooth attack/release
   re-render the breath texture to follow the reshaped envelope

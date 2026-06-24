@@ -7,6 +7,8 @@ struct Cycle: AsyncParsableCommand {
 
     @OptionGroup var assetsOpt: AssetsOption
 
+    @OptionGroup var denoiseOpt: DenoiseOption
+
     @Option(help: "Inhale duration (s).")
     var inhale: Double = 4
 
@@ -37,7 +39,10 @@ struct Cycle: AsyncParsableCommand {
             loop: loop,
             cycles: cycles
         )
-        let engine = try await loadEngine(assetsURL: assetsOpt.assetsURL)
+        let engine = try await loadEngine(
+            assetsURL: assetsOpt.assetsURL,
+            denoise: denoiseOpt.denoise, oversub: denoiseOpt.oversub, floor: denoiseOpt.floor
+        )
         let shape = "in \(inhale)s / hold \(holdIn)s / out \(exhale)s / hold \(holdOut)s"
         if loop {
             print("looping cycle (\(shape)) - Ctrl-C to stop")

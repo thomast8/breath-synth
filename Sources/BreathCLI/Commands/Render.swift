@@ -7,6 +7,8 @@ struct Render: AsyncParsableCommand {
 
     @OptionGroup var assetsOpt: AssetsOption
 
+    @OptionGroup var denoiseOpt: DenoiseOption
+
     @Option(help: "inhale or exhale.")
     var type: String = "inhale"
 
@@ -35,7 +37,10 @@ struct Render: AsyncParsableCommand {
             variation: variation ? .default : .none
         )
         let url = URL(fileURLWithPath: out)
-        let engine = try await loadEngine(assetsURL: assetsOpt.assetsURL)
+        let engine = try await loadEngine(
+            assetsURL: assetsOpt.assetsURL,
+            denoise: denoiseOpt.denoise, oversub: denoiseOpt.oversub, floor: denoiseOpt.floor
+        )
         try await engine.renderToWAV(spec, url: url)
         print("wrote \(url.path)")
     }
