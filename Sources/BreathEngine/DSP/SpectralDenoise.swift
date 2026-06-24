@@ -27,12 +27,17 @@ public enum SpectralDenoise {
     ///   - floorGain: per-bin residual floor as a fraction of the original magnitude
     ///     (~0.03-0.1). Keeping a little of the original suppresses the warbly musical noise
     ///     that hard gating produces. Clamped to `[0, 1]`.
+    ///   - noiseProfile: an optional externally supplied per-bin noise magnitude (length
+    ///     `frameSize/2 + 1`, i.e. bins `0...half`). When supplied with the matching length it
+    ///     replaces the internal minimum-statistics estimate (e.g. a room-tone profile measured
+    ///     from a separate silence recording); otherwise the internal estimate is used. Deterministic.
     /// - Returns: the denoised signal, same length as the input.
     public static func denoise(
         _ samples: [Float],
         sampleRate: Double,
         overSubtraction: Float,
-        floorGain: Float
+        floorGain: Float,
+        noiseProfile: [Float]? = nil
     ) -> [Float] {
         let n = frameSize
         guard samples.count > n else { return samples }
@@ -46,10 +51,7 @@ public enum SpectralDenoise {
         // Periodic Hann, used for both analysis and synthesis (WOLA). The exact shape is not
         // load-bearing: resynthesis divides by the accumulated per-sample window-overlap sum,
         // so reconstruction is unity-gain for any window/hop by construction.
-        var window = [Float](repeating: 0, count: n)
-        for i in 0..<n {
-            window[i] = 0.5 - 0.5 * cos(2.0 * Float.pi * Float(i) / Float(n))
-        }
+        let window = hannWindow(n)
 
         // Frames hop across the whole signal; the trailing frame is zero-filled past the end.
         let frameCount = (samples.count - 1) / hop + 1
@@ -82,15 +84,23 @@ public enum SpectralDenoise {
             mags.append(frameMag)
         }
 
-        // Noise profile = per-bin minimum of a short time-average of the magnitude. Averaging
-        // over a window before taking the minimum keeps the estimate near the true steady-state
-        // floor; a raw minimum would chase the deep frame-to-frame dips of a fluctuating
-        // spectrum and badly under-estimate the hiss. The source's genuine quiet stretches still
-        // let the minimum land on noise rather than breath. Smoothed across bins so a single
-        // quiet bin can't carve a notch into the breath.
-        let temporalWindow = max(1, Int(0.15 * sampleRate / Double(hop)))
-        var noise = noiseProfile(mags: mags, bins: half + 1, temporalWindow: temporalWindow)
-        noise = smoothedAcrossBins(noise)
+        // When a matching-length external profile is supplied (e.g. a room-tone recording), use
+        // it directly instead of estimating the floor from this signal; still smoothed across bins
+        // for safety against single-bin notches.
+        var noise: [Float]
+        if let supplied = noiseProfile, supplied.count == half + 1 {
+            noise = smoothedAcrossBins(supplied)
+        } else {
+            // Noise profile = per-bin minimum of a short time-average of the magnitude. Averaging
+            // over a window before taking the minimum keeps the estimate near the true steady-state
+            // floor; a raw minimum would chase the deep frame-to-frame dips of a fluctuating
+            // spectrum and badly under-estimate the hiss. The source's genuine quiet stretches still
+            // let the minimum land on noise rather than breath. Smoothed across bins so a single
+            // quiet bin can't carve a notch into the breath.
+            let temporalWindow = max(1, Int(0.15 * sampleRate / Double(hop)))
+            noise = self.noiseProfile(mags: mags, bins: half + 1, temporalWindow: temporalWindow)
+            noise = smoothedAcrossBins(noise)
+        }
 
         // Pass 2: subtract the noise profile per bin (real gain preserves phase and Hermitian
         // symmetry, so the inverse stays real), inverse-FFT, and overlap-add with the synthesis
@@ -133,6 +143,58 @@ public enum SpectralDenoise {
             result[i] = w > 1e-6 ? out[i] / w : 0
         }
         return result
+    }
+
+    /// Per-bin average magnitude spectrum of `samples`, suitable as a `noiseProfile` for
+    /// `denoise(...)`. Runs the same STFT geometry (frame size, hop, periodic Hann window) as
+    /// `denoise`, averages each bin's magnitude across all frames, then smooths across bins.
+    ///
+    /// Use this on a separate room-tone / silence recording to measure the steady noise floor,
+    /// then pass the result back into `denoise(_:sampleRate:overSubtraction:floorGain:noiseProfile:)`.
+    ///
+    /// - Returns: the per-bin average magnitude, length `frameSize/2 + 1` (bins `0...half`).
+    ///   Empty if `samples` is too short to form a frame.
+    public static func magnitudeProfile(from samples: [Float], sampleRate _: Double) -> [Float] {
+        let n = frameSize
+        let half = n / 2
+        guard samples.count > n else { return [] }
+        guard let setup = vDSP_create_fftsetup(log2n, FFTRadix(kFFTRadix2)) else { return [] }
+        defer { vDSP_destroy_fftsetup(setup) }
+
+        let window = hannWindow(n)
+        let frameCount = (samples.count - 1) / hop + 1
+
+        // Accumulate each bin's magnitude across all frames, then divide for the average.
+        var sumMag = [Float](repeating: 0, count: half + 1)
+        var windowed = [Float](repeating: 0, count: n)
+        for f in 0..<frameCount {
+            let start = f * hop
+            for i in 0..<n {
+                let idx = start + i
+                windowed[i] = (idx < samples.count ? samples[idx] : 0) * window[i]
+            }
+            var realp = windowed
+            var imagp = [Float](repeating: 0, count: n)
+            transform(setup, &realp, &imagp, direction: FFTDirection(kFFTDirection_Forward))
+            for k in 0...half {
+                sumMag[k] += (realp[k] * realp[k] + imagp[k] * imagp[k]).squareRoot()
+            }
+        }
+
+        var avg = [Float](repeating: 0, count: half + 1)
+        for k in 0...half {
+            avg[k] = sumMag[k] / Float(frameCount)
+        }
+        return smoothedAcrossBins(avg)
+    }
+
+    /// Periodic Hann window of length `n`, shared by the analysis/synthesis paths.
+    private static func hannWindow(_ n: Int) -> [Float] {
+        var window = [Float](repeating: 0, count: n)
+        for i in 0..<n {
+            window[i] = 0.5 - 0.5 * cos(2.0 * Float.pi * Float(i) / Float(n))
+        }
+        return window
     }
 
     /// In-place complex FFT on split-complex arrays backed by `realp`/`imagp`.

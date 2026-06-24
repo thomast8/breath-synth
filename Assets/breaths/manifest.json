@@ -34,6 +34,7 @@
       }
     },
     "frc" : {
+      "render" : "oneShot",
       "inhale" : {
         "start" : [],
         "loop" : [],
@@ -57,6 +58,7 @@
       }
     },
     "rv" : {
+      "render" : "oneShot",
       "inhale" : {
         "start" : [],
         "loop" : [],
@@ -71,6 +73,7 @@
       }
     },
     "recovery" : {
+      "render" : "counted",
       "inhale" : {
         "start" : [],
         "loop" : [],
@@ -84,19 +87,38 @@
         "oneShot" : []
       }
     },
-    "hyperventilation" : {
+    "packing" : {
+      "render" : "counted",
       "inhale" : {
         "start" : [],
         "loop" : [],
         "end" : [],
-        "oneShot" : [ { "file" : "hyperventilation.aifc", "durationSec" : 6.933333, "sampleRate" : 48000, "channels" : 1 } ]
+        "oneShot" : [
+          { "file" : "packing_1.aifc", "durationSec" : 15.221333, "sampleRate" : 48000, "channels" : 1 },
+          { "file" : "packing_2.aifc", "durationSec" : 19.061333, "sampleRate" : 48000, "channels" : 1 }
+        ]
       },
       "exhale" : {
         "start" : [],
         "loop" : [],
         "end" : [],
-        "oneShot" : [ { "file" : "hyperventilation.aifc", "durationSec" : 6.933333, "sampleRate" : 48000, "channels" : 1 } ]
+        "oneShot" : []
+      }
+    },
+    "hyperventilation" : {
+      "inhale" : {
+        "start" : [],
+        "loop" : [],
+        "end" : [],
+        "oneShot" : [ { "file" : "hyperventilation_in.aifc", "durationSec" : 3.082667, "sampleRate" : 48000, "channels" : 1 } ]
+      },
+      "exhale" : {
+        "start" : [],
+        "loop" : [],
+        "end" : [],
+        "oneShot" : [ { "file" : "hyperventilation_out.aifc", "durationSec" : 4.309333, "sampleRate" : 48000, "channels" : 1 } ]
       }
     }
-  }
+  },
+  "noiseProfile" : "room_silence.aifc"
 }

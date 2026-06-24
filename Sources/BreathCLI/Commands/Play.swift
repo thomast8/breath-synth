@@ -18,6 +18,9 @@ struct Play: AsyncParsableCommand {
     @Option(help: "Breath style.")
     var style: String = "calm"
 
+    @Option(help: "Unit count for counted styles (recovery/packing); default = detected.")
+    var count: Int?
+
     @Option(help: "Optional fixed seed for reproducible variation.")
     var seed: UInt64?
 
@@ -37,8 +40,14 @@ struct Play: AsyncParsableCommand {
             assetsURL: assetsOpt.assetsURL,
             denoise: denoiseOpt.denoise, oversub: denoiseOpt.oversub, floor: denoiseOpt.floor
         )
-        print("playing \(breathType.rawValue) \(duration)s [\(style)] ...")
-        try await engine.play(spec)
+        switch await engine.renderMode(for: style) {
+        case .counted:
+            print("playing counted [\(style)] count=\(count.map(String.init) ?? "detected") ...")
+            try await engine.playCounted(style: style, type: breathType, count: count, seed: seed)
+        case .textured, .oneShot:
+            print("playing \(breathType.rawValue) \(duration)s [\(style)] ...")
+            try await engine.play(spec)
+        }
         await engine.stop()
     }
 }

@@ -378,7 +378,8 @@ final class AssemblerTests: XCTestCase {
 
         let off = BreathAssembler.assemble(
             type: .inhale, durationSec: 6, clips: clips,
-            settings: AssemblerSettings(sampleRate: sr, crossfadeSec: 0.1)
+            // Explicit off: spectral denoise now defaults to ON, so the baseline must opt out.
+            settings: AssemblerSettings(sampleRate: sr, crossfadeSec: 0.1, enableSpectralDenoise: false)
         )
         let on = BreathAssembler.assemble(
             type: .inhale, durationSec: 6, clips: clips,

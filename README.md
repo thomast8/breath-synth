@@ -77,13 +77,17 @@ imposes the inhale/exhale shape with its designed envelope.
 | `frc` | exhale | passive exhale to functional residual capacity |
 | `rv` | exhale | forced exhale to residual volume |
 | `recovery` | inhale | post-hold recovery / hook breaths |
+| `packing` | inhale | glossopharyngeal insufflation (packing gulps) |
 | `hyperventilation` | inhale, exhale | fast, forceful, turbulent breathing |
 
 Each style only carries the direction(s) it is meant for; requesting the other
-direction raises an error. A `packing` (glossopharyngeal insufflation) recording
-ships in `Assets/breaths` but is not yet wired into the manifest: its staccato
-gulp-train would be smeared by the current flatten-and-loop path, so it awaits a
-structure-preserving generator.
+direction raises an error.
+
+Render mode depends on the style. `frc` and `rv` render their natural-length single
+exhale, so `--duration` is ignored for them. `recovery` and `packing` are *counted*:
+they repeat one extracted unit N times via `--count` (default auto-detected from the
+recording; `packing` is now wired in). Denoise is on by default, using
+`room_silence.aifc` as the noise profile; pass `--no-denoise` to disable it.
 
 ## CLI reference
 
@@ -97,9 +101,10 @@ structure-preserving generator.
 Common options:
 
 - `--assets <dir>`: directory containing the breath assets and `manifest.json` (default `Assets/breaths`).
-- `--style <name>`: breath style; the bundled palette provides `calm`, `full`, `frc`, `rv`, `recovery`, and `hyperventilation` (see [Breath styles](#breath-styles)).
+- `--style <name>`: breath style; the bundled palette provides `calm`, `full`, `frc`, `rv`, `recovery`, `packing`, and `hyperventilation` (see [Breath styles](#breath-styles)).
+- `--count <n>` (`render`, `play`): number of events for *counted* styles (`recovery`, `packing`); defaults to the count detected in the recording. Ignored for other styles.
 - `--seed <n>` (`play`, `render`, `sequence`) / `--no-variation` (`play` and `render` only): control the subtle per-render variation. For `sequence`, `--seed` pins the whole run.
-- `--denoise` / `--no-denoise` (default off): optional FFT noise-profile subtraction on the recorded source to suppress steady hiss. Tune with `--denoise-oversub` / `--denoise-floor`. Off by default (modest benefit on the current pipeline).
+- `--denoise` / `--no-denoise` (default on): FFT noise-profile subtraction using `room_silence.aifc` as the profile. Tune with `--denoise-oversub` / `--denoise-floor`; pass `--no-denoise` to disable.
 
 ## How it works
 
@@ -110,7 +115,7 @@ assembler:
 ```text
 generateBreath(type, duration):
   trim outer silence and low-cut the recorded source (removes room rumble)
-  optionally spectral-subtract the steady noise floor (--denoise; off by default)
+  spectral-subtract the steady noise floor against the room-tone profile (on by default; --no-denoise to skip)
   measure the recording's RMS energy envelope
   reshape that envelope to the requested duration with smooth attack/release
   re-render the breath texture to follow the reshaped envelope

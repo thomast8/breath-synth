@@ -12,11 +12,11 @@ struct AssetsOption: ParsableArguments {
     }
 }
 
-/// Shared option group: spectral-denoise A/B controls (Stage 2). Off by default; `--denoise`
-/// turns it on, and the over-subtraction / floor knobs tune it by ear without a recompile.
+/// Shared option group: spectral-denoise A/B controls (Stage 2). On by default; `--no-denoise`
+/// turns it off, and the over-subtraction / floor knobs tune it by ear without a recompile.
 struct DenoiseOption: ParsableArguments {
     @Flag(name: .long, inversion: .prefixedNo, help: "Spectral noise-profile subtraction on the breath source.")
-    var denoise: Bool = false
+    var denoise: Bool = true
 
     @Option(name: .customLong("denoise-oversub"), help: "Denoise over-subtraction factor (~1.5-2.0; ignored unless --denoise). (default: 1.75)")
     var oversub: Float?

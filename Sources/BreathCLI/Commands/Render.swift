@@ -18,6 +18,9 @@ struct Render: AsyncParsableCommand {
     @Option(help: "Breath style.")
     var style: String = "calm"
 
+    @Option(help: "Unit count for counted styles (recovery/packing); default = detected.")
+    var count: Int?
+
     @Option(help: "Optional fixed seed for reproducible variation.")
     var seed: UInt64?
 
@@ -41,7 +44,13 @@ struct Render: AsyncParsableCommand {
             assetsURL: assetsOpt.assetsURL,
             denoise: denoiseOpt.denoise, oversub: denoiseOpt.oversub, floor: denoiseOpt.floor
         )
-        try await engine.renderToWAV(spec, url: url)
+        switch await engine.renderMode(for: style) {
+        case .counted:
+            print("mode: counted [\(style)] count=\(count.map(String.init) ?? "detected")")
+            try await engine.renderCountedToWAV(style: style, type: breathType, count: count, seed: seed, url: url)
+        case .textured, .oneShot:
+            try await engine.renderToWAV(spec, url: url)
+        }
         print("wrote \(url.path)")
     }
 }
