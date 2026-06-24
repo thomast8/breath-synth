@@ -47,15 +47,6 @@ public struct RolePalette: Codable, Sendable, Equatable {
         self.end = end
         self.oneShot = oneShot
     }
-
-    public func assets(for role: BreathRole) -> [BreathAsset] {
-        switch role {
-        case .start: return start
-        case .loop: return loop
-        case .end: return end
-        case .oneShot: return oneShot
-        }
-    }
 }
 
 /// How a style's source is rendered into an output buffer.

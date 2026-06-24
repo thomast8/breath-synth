@@ -30,7 +30,6 @@ public struct VariationDeltas: Sendable, Equatable {
 
 public enum Variation {
     public static func dbToGain(_ db: Double) -> Double { pow(10, db / 20) }
-    public static func gainToDb(_ gain: Double) -> Double { 20 * log10(max(gain, 1e-9)) }
 
     /// Draw concrete deltas from `options` using `rng`.
     public static func draw(_ options: VariationOptions, rng: inout SeededRNG) -> VariationDeltas {
