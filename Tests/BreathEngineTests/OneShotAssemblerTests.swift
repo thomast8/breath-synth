@@ -34,6 +34,40 @@ final class OneShotAssemblerTests: XCTestCase {
         XCTAssertGreaterThan(rms(out), 0.01, "the tone should be audible")
     }
 
+    /// One-shot trimming crops the quiet leading preamble (the head) but keeps the recording's quiet
+    /// natural-decay tail. Same low level at both ends, treated asymmetrically: head dropped, tail kept.
+    func testOneShotCropsLeadingSilenceAndKeepsDecayTail() {
+        let settings = AssemblerSettings(sampleRate: sr, enableSpectralDenoise: false)
+        func tone(_ amp: Double, _ i: Int) -> Float { Float(amp * sin(2 * Double.pi * 1_000 * Double(i) / sr)) }
+        // preamble + loud body + quiet decay tail (preamble & tail both ~4% of peak: above the 2.5%
+        // outer-silence gate, below the 5% main-body threshold).
+        let pre = Int(0.4 * sr), body = Int(0.5 * sr), tail = Int(0.3 * sr), silence = Int(0.2 * sr)
+        var samples = [Float](repeating: 0, count: pre + body + tail + silence)
+        for i in 0..<pre { samples[i] = tone(0.02, i) }
+        for i in 0..<body { samples[pre + i] = tone(0.5, i) }
+        for i in 0..<tail { samples[pre + body + i] = tone(0.02, i) }
+
+        let out = BreathAssembler.assemble(
+            type: .exhale, durationSec: 3,
+            clips: BreathSourceClips(oneShot: samples), settings: settings, mode: .oneShot
+        )
+
+        // Head cropped: the loud onset sits near the start, not 0.4 s of quiet preamble in.
+        let a0 = Int(0.06 * sr), a1 = Int(0.12 * sr)
+        XCTAssertLessThan(a1, out.count)
+        XCTAssertGreaterThan(rms(Array(out[a0..<a1])), 0.1, "leading preamble should be cropped, loud onset near the start")
+
+        // Decay tail kept: a window just past the loud body is low-but-nonzero (the quiet decay),
+        // not the loud body (which would mean the head wasn't cropped) and not silence (tail cut).
+        let bodyEnd = Int(0.55 * sr)
+        XCTAssertLessThan(bodyEnd, out.count)
+        let tailWindow = Array(out[bodyEnd..<min(out.count, bodyEnd + Int(0.25 * sr))])
+        let tailRMS = rms(tailWindow)
+        XCTAssertGreaterThan(tailRMS, 0.003, "natural decay tail should be retained past the body")
+        XCTAssertLessThan(tailRMS, 0.1, "that region is the quiet decay, not the loud body (head was cropped)")
+        XCTAssertEqual(out.last, 0, "endpoint stays click-free")
+    }
+
     func testTexturedFillsRequestedDuration() {
         let settings = AssemblerSettings(sampleRate: sr, enableSpectralDenoise: false)
         let out = BreathAssembler.assemble(

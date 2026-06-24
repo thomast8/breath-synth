@@ -292,10 +292,22 @@ public enum BreathAssembler {
                 runStart = -1
             }
         }
-        let pad = Int(0.05 * sampleRate)
-        let end = min(samples.count, hopStart[bestEnd] + win + pad)
-        // Keep from the onset (prepareSource already trimmed the head) through the body + short pad.
-        return Array(samples[0..<end])
+        // Crop the quiet preamble that trimOuterSilence's loose 2.5% gate left in, keeping a short
+        // pre-roll so the onset transient isn't clipped. (The head was previously never cropped —
+        // `bestStart` was computed but unused — which left a long flat lead-in on frc/rv renders.)
+        let preRoll = Int(0.03 * sampleRate)
+        let start = max(0, hopStart[bestStart] - preRoll)
+        // Extend past the 5%-run end to keep the breath's natural decay, down to a low tail threshold
+        // (matching trimOuterSilence), so the one-shot tapers off as recorded instead of cutting at
+        // the main-body end. The walk stops at the silent gap, so a trailing plosive after the gap is
+        // still excluded.
+        let tailThreshold = peak * 0.025
+        var tailHop = bestEnd
+        while tailHop + 1 < hopRMS.count, hopRMS[tailHop + 1] >= tailThreshold { tailHop += 1 }
+        let tailPad = Int(0.08 * sampleRate)
+        let end = min(samples.count, hopStart[tailHop] + win + tailPad)
+        guard start < end else { return Array(samples[0..<end]) }
+        return Array(samples[start..<end])
     }
 
     /// Shared source prep for every render mode: trim the outer silence, run the single
