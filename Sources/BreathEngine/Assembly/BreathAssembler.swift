@@ -27,19 +27,34 @@ public struct AssemblerSettings: Sendable {
     public var crossfadeSec: Double
     /// Below this duration we use the one-shot / resampled-loop short branch.
     public var shortThresholdSec: Double
+    /// Spectral noise-profile subtraction on the source before texture extraction. Off by
+    /// default: Stage 1 already stopped the energy flattening from amplifying the hiss, so the
+    /// audible upside is modest and over-subtraction can introduce musical noise. Validate by
+    /// ear before turning on.
+    public var enableSpectralDenoise: Bool
+    /// Over-subtraction factor for the denoiser (~1.5-2.0). See `SpectralDenoise.denoise`.
+    public var denoiseOverSubtraction: Float
+    /// Per-bin residual floor for the denoiser (~0.03-0.1). See `SpectralDenoise.denoise`.
+    public var denoiseFloorGain: Float
 
     public init(
         sampleRate: Double = AudioConstants.workingSampleRate,
         startCapSec: Double = 0.6,
         endCapSec: Double = 0.8,
         crossfadeSec: Double = 0.2,
-        shortThresholdSec: Double = 1.5
+        shortThresholdSec: Double = 1.5,
+        enableSpectralDenoise: Bool = false,
+        denoiseOverSubtraction: Float = 1.75,
+        denoiseFloorGain: Float = 0.05
     ) {
         self.sampleRate = sampleRate
         self.startCapSec = startCapSec
         self.endCapSec = endCapSec
         self.crossfadeSec = crossfadeSec
         self.shortThresholdSec = shortThresholdSec
+        self.enableSpectralDenoise = enableSpectralDenoise
+        self.denoiseOverSubtraction = denoiseOverSubtraction
+        self.denoiseFloorGain = denoiseFloorGain
     }
 }
 
@@ -96,11 +111,24 @@ public enum BreathAssembler {
         deltas: VariationDeltas,
         seed: UInt64
     ) -> [Float] {
-        let source = cleanRecordedSource(
+        var source = cleanRecordedSource(
             trimOuterSilence(full, sampleRate: settings.sampleRate),
             sampleRate: settings.sampleRate
         )
         guard source.count > 1 else { return [Float](repeating: 0, count: totalFrames) }
+
+        // Optional spectral noise-profile subtraction. Runs once per source, before the
+        // envelope/texture extraction so both see the cleaned signal. The high-pass above only
+        // clears sub-260 Hz rumble; this gates the steady broadband hiss the recording carries
+        // above that, pushing quiet stretches toward true silence.
+        if settings.enableSpectralDenoise {
+            source = SpectralDenoise.denoise(
+                source,
+                sampleRate: settings.sampleRate,
+                overSubtraction: settings.denoiseOverSubtraction,
+                floorGain: settings.denoiseFloorGain
+            )
+        }
 
         // Timbre only: the loud, steady, energy-flat sustain of the breath. The
         // recording's own dynamics (quiet preamble, end-loaded ramp) are excluded by

@@ -26,14 +26,14 @@ public final class BreathEngine {
         public init(
             assetsDirectory: URL,
             manifest: BreathManifest,
-            sampleRate: Double = AudioConstants.workingSampleRate,
+            settings: AssemblerSettings = AssemblerSettings(),
             masterGain: Double = 1.0,
             headroomDb: Double = -1.0,
             cacheLimit: Int = 32
         ) {
             self.assetsDirectory = assetsDirectory
             self.manifest = manifest
-            self.settings = AssemblerSettings(sampleRate: sampleRate)
+            self.settings = settings
             self.masterGain = masterGain
             self.headroomDb = headroomDb
             self.cacheLimit = cacheLimit
@@ -66,10 +66,14 @@ public final class BreathEngine {
     }
 
     /// Convenience: build an engine from a manifest.json file in `assetsDirectory`.
-    public static func load(assetsDirectory: URL) throws -> BreathEngine {
+    /// Pass `settings` to tune assembly (sample rate, spectral denoise, etc.).
+    public static func load(
+        assetsDirectory: URL,
+        settings: AssemblerSettings = AssemblerSettings()
+    ) throws -> BreathEngine {
         let manifestURL = assetsDirectory.appendingPathComponent("manifest.json")
         let manifest = try BreathManifest.load(from: manifestURL)
-        return try BreathEngine(config: Config(assetsDirectory: assetsDirectory, manifest: manifest))
+        return try BreathEngine(config: Config(assetsDirectory: assetsDirectory, manifest: manifest, settings: settings))
     }
 
     // MARK: - Rendering

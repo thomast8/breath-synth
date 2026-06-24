@@ -7,6 +7,8 @@ struct Play: AsyncParsableCommand {
 
     @OptionGroup var assetsOpt: AssetsOption
 
+    @OptionGroup var denoiseOpt: DenoiseOption
+
     @Option(help: "inhale or exhale.")
     var type: String = "inhale"
 
@@ -31,7 +33,10 @@ struct Play: AsyncParsableCommand {
             seed: seed,
             variation: variation ? .default : .none
         )
-        let engine = try await loadEngine(assetsURL: assetsOpt.assetsURL)
+        let engine = try await loadEngine(
+            assetsURL: assetsOpt.assetsURL,
+            denoise: denoiseOpt.denoise, oversub: denoiseOpt.oversub, floor: denoiseOpt.floor
+        )
         print("playing \(breathType.rawValue) \(duration)s [\(style)] ...")
         try await engine.play(spec)
         await engine.stop()

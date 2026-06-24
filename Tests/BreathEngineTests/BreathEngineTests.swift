@@ -367,6 +367,119 @@ final class AssemblerTests: XCTestCase {
         XCTAssertGreaterThan(midEnergy, 0, "mid-band energy should be present")
         XCTAssertLessThan(lowEnergy / midEnergy, 0.5, "sub-120 Hz energy \(lowEnergy) vs mid \(midEnergy)")
     }
+
+    func testRecordedShapeSpectralDenoiseChangesSourceWhenEnabled() {
+        // The `enableSpectralDenoise` branch in recordedShapeBranch must actually run and feed a
+        // cleaned source into texture extraction: a skipped or no-op branch would make the
+        // enabled render byte-identical to the default-off render.
+        let sr = 16_000.0
+        let full = rumblyBreathFrames(sampleRate: sr, seconds: 10)
+        let clips = BreathSourceClips(start: [], loop: [], end: [], oneShot: full)
+
+        let off = BreathAssembler.assemble(
+            type: .inhale, durationSec: 6, clips: clips,
+            settings: AssemblerSettings(sampleRate: sr, crossfadeSec: 0.1)
+        )
+        let on = BreathAssembler.assemble(
+            type: .inhale, durationSec: 6, clips: clips,
+            settings: AssemblerSettings(sampleRate: sr, crossfadeSec: 0.1, enableSpectralDenoise: true)
+        )
+
+        XCTAssertEqual(on.count, 6 * Int(sr))
+        XCTAssertEqual(on.count, off.count)
+        XCTAssertTrue(on.allSatisfy { $0.isFinite }, "denoised output must stay finite")
+        XCTAssertGreaterThan(rms(on), 0, "denoised breath should still be audible")
+        XCTAssertNotEqual(on, off, "enabling denoise must change the rendered output")
+    }
+}
+
+final class SpectralDenoiseTests: XCTestCase {
+    func testUnityGainReconstruction() {
+        // With overSubtraction 0 the per-bin gain is max(mag, floorGain*mag) = mag, so denoise
+        // is the identity transform. This isolates the STFT/overlap-add machinery: the interior
+        // (away from the window-overlap ramp at the edges) must reconstruct the input exactly.
+        let sr = 16_000.0
+        let n = 8_192
+        let signal = zip(
+            (0..<n).map { Float(0.3 * sin(2 * Double.pi * 1_000 * Double($0) / sr)) },
+            seededNoise(count: n, seed: 99, amplitude: 0.05)
+        ).map(+)
+
+        let out = SpectralDenoise.denoise(signal, sampleRate: sr, overSubtraction: 0, floorGain: 0)
+        XCTAssertEqual(out.count, signal.count)
+
+        let pad = 1_024 // skip the first/last frame where the window overlap is still ramping
+        var maxErr: Float = 0
+        for i in pad..<(n - pad) {
+            maxErr = max(maxErr, abs(out[i] - signal[i]))
+        }
+        XCTAssertLessThan(maxErr, 1e-3, "interior reconstruction error \(maxErr)")
+    }
+
+    func testSuppressesSteadyNoisePreservesTone() {
+        // A 1200 Hz tone present only in a central window (so the per-bin minimum statistics
+        // capture the noise floor, not the tone) over steady broadband noise spanning the whole
+        // signal. Denoise should crush the noise-only band while leaving the tone intact.
+        let sr = 16_000.0
+        let n = 64_000 // 4 s
+        let toneStart = Int(1.5 * sr)
+        let toneEnd = Int(3.0 * sr)
+        var signal = seededNoise(count: n, seed: 123, amplitude: 0.04)
+        for i in toneStart..<toneEnd {
+            signal[i] += Float(0.3 * sin(2 * Double.pi * 1_200 * Double(i) / sr))
+        }
+
+        // 1.0 s probe windows (== sr samples) so integer-Hz probes land on DFT bin centres.
+        let noiseWin = 3_200..<(3_200 + Int(sr)) // inside the leading noise-only stretch
+        let toneWin = 28_800..<(28_800 + Int(sr)) // inside the tone stretch
+        // Probe both the high hiss band and an in-band (800 Hz) noise-only frequency, to confirm
+        // the denoiser reduces quiet-moment energy inside the breath band too, not just up high.
+        let noiseProbes: [Double] = [800, 2_500, 3_500, 5_000]
+        func noiseEnergy(_ x: [Float]) -> Double {
+            noiseProbes.map { goertzelMagnitude(Array(x[noiseWin]), sampleRate: sr, frequency: $0) }.reduce(0, +)
+        }
+        func toneEnergy(_ x: [Float]) -> Double {
+            goertzelMagnitude(Array(x[toneWin]), sampleRate: sr, frequency: 1_200)
+        }
+
+        let noiseBefore = noiseEnergy(signal)
+        let toneBefore = toneEnergy(signal)
+        let out = SpectralDenoise.denoise(signal, sampleRate: sr, overSubtraction: 2.0, floorGain: 0.05)
+        let noiseAfter = noiseEnergy(out)
+        let toneAfter = toneEnergy(out)
+
+        XCTAssertGreaterThan(noiseBefore, 0)
+        XCTAssertGreaterThan(toneBefore, 0)
+        XCTAssertLessThan(noiseAfter / noiseBefore, 0.5, "noise band \(noiseAfter) vs \(noiseBefore)")
+        XCTAssertGreaterThan(toneAfter / toneBefore, 0.7, "tone \(toneAfter) vs \(toneBefore)")
+    }
+
+    func testDeterministic() {
+        let sr = 16_000.0
+        let n = 4_096
+        let signal = zip(
+            (0..<n).map { Float(0.2 * sin(2 * Double.pi * 800 * Double($0) / sr)) },
+            seededNoise(count: n, seed: 7, amplitude: 0.05)
+        ).map(+)
+        let a = SpectralDenoise.denoise(signal, sampleRate: sr, overSubtraction: 1.8, floorGain: 0.05)
+        let b = SpectralDenoise.denoise(signal, sampleRate: sr, overSubtraction: 1.8, floorGain: 0.05)
+        XCTAssertEqual(a, b)
+    }
+
+    func testShortInputReturnedUnchanged() {
+        // Inputs no longer than one analysis frame (1024) can't be denoised; pass them through
+        // untouched rather than crash.
+        let short = (0..<1_024).map { Float(0.1 * sin(2 * Double.pi * 500 * Double($0) / 16_000.0)) }
+        let out = SpectralDenoise.denoise(short, sampleRate: 16_000, overSubtraction: 2.0, floorGain: 0.05)
+        XCTAssertEqual(out, short)
+    }
+
+    func testAllSilenceStaysSilentAndFinite() {
+        let silence = [Float](repeating: 0, count: 8_192)
+        let out = SpectralDenoise.denoise(silence, sampleRate: 16_000, overSubtraction: 2.0, floorGain: 0.05)
+        XCTAssertEqual(out.count, silence.count)
+        XCTAssertTrue(out.allSatisfy { $0 == 0 }, "silence in, silence out (no NaN / denormal blowup)")
+    }
 }
 
 /// Deterministic breath-shaped mid-band texture with a strong 50 Hz rumble added
@@ -468,4 +581,14 @@ private func isMostlyNonincreasing(_ values: [Float], tolerance: Float) -> Bool 
         return false
     }
     return true
+}
+
+/// Deterministic broadband noise in [-amplitude, amplitude] from the engine's seeded RNG, so
+/// the denoise tests stay reproducible run to run.
+private func seededNoise(count: Int, seed: UInt64, amplitude: Float) -> [Float] {
+    var rng = SeededRNG(seed: seed)
+    return (0..<count).map { _ in
+        let unit = Double(rng.next()) / Double(UInt64.max) // [0, 1]
+        return Float(unit * 2 - 1) * amplitude
+    }
 }
