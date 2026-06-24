@@ -116,6 +116,26 @@ public final class BreathEngine {
         return try makeBuffer(samples)
     }
 
+    /// Render a planned sequence (a whole number of pattern cycles) to mono samples.
+    /// Each cycle is re-seeded so the run doesn't sound like one identical loop repeated,
+    /// while staying fully reproducible (seed the pattern to pin the whole sequence).
+    public func renderSequenceSamples(_ plan: SequencePlan) throws -> [Float] {
+        let pattern = plan.pattern
+        var samples: [Float] = []
+        for cycleIndex in 0..<plan.cycles {
+            samples += try renderSamples(breathSpec(for: pattern, type: .inhale, cycleIndex: cycleIndex))
+            samples += silence(seconds: pattern.holdInSec)
+            samples += try renderSamples(breathSpec(for: pattern, type: .exhale, cycleIndex: cycleIndex))
+            samples += silence(seconds: pattern.holdOutSec)
+        }
+        return samples
+    }
+
+    /// Render a planned sequence into a single buffer.
+    public func renderSequence(_ plan: SequencePlan) throws -> AVAudioPCMBuffer {
+        try makeBuffer(renderSequenceSamples(plan))
+    }
+
     // MARK: - Playback
 
     public func play(_ spec: BreathSpec) async throws {
@@ -137,6 +157,17 @@ public final class BreathEngine {
         }
     }
 
+    /// Play a planned sequence as one buffer. Loops the whole sequence forever
+    /// (non-blocking) when `loop`, otherwise plays it once and returns when done.
+    public func playSequence(_ plan: SequencePlan, loop: Bool = false) async throws {
+        let buffer = try renderSequence(plan)
+        if loop {
+            try playerInstance().loopForever(buffer)
+        } else {
+            try await playerInstance().playOnce(buffer)
+        }
+    }
+
     public func stop() {
         player?.stop()
     }
@@ -153,6 +184,11 @@ public final class BreathEngine {
     public func renderCycleToWAV(_ cycle: CycleSpec, url: URL) throws {
         let buffer = try renderCycle(cycle)
         try write(buffer, to: url)
+    }
+
+    /// Render a planned sequence and write it to a 32-bit float WAV file.
+    public func renderSequenceToWAV(_ plan: SequencePlan, url: URL) throws {
+        try write(renderSequence(plan), to: url)
     }
 
     private func write(_ buffer: AVAudioPCMBuffer, to url: URL) throws {
@@ -178,6 +214,19 @@ public final class BreathEngine {
     private func silence(seconds: Double) -> [Float] {
         let frames = Segments.frames(seconds: max(0, seconds), sampleRate: config.sampleRate)
         return [Float](repeating: 0, count: frames)
+    }
+
+    /// Build the breath spec for one phase of one cycle in a sequence, deriving a
+    /// per-cycle, per-phase seed so consecutive cycles differ yet stay reproducible.
+    private func breathSpec(for pattern: BreathPattern, type: BreathType, cycleIndex: Int) -> BreathSpec {
+        let durationSec = type == .inhale ? pattern.inhaleSec : pattern.exhaleSec
+        var spec = BreathSpec(type: type, durationSec: durationSec, style: pattern.style)
+        // Start from the per-spec stable seed (already distinct by type/duration/style),
+        // offset by any caller seed so a `--seed` still varies inhale and exhale apart,
+        // and stride by cycle with the golden-ratio constant so consecutive cycles decorrelate.
+        let base = Variation.stableSeed(for: spec) &+ (pattern.seed ?? 0)
+        spec.seed = base &+ UInt64(cycleIndex) &* 0x9E37_79B9_7F4A_7C15
+        return spec
     }
 
     private func applyMasterGainAndClamp(_ samples: inout [Float], extraGain: Double) {

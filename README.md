@@ -46,6 +46,21 @@ swift run breath cycle --inhale 4 --hold-in 1 --exhale 6 --hold-out 1 --style ca
 
 Press Ctrl-C to stop a looping cycle.
 
+Fill a target duration with a whole number of cycles:
+
+```sh
+swift run breath sequence --total 30 --inhale 5 --exhale 5            # 3 cycles = 30s, plays
+swift run breath sequence --total 30 --inhale 3 --exhale 6            # error: 9s cycle doesn't tile 30s; proposes 27s / 36s
+swift run breath sequence --total 30 --inhale 3 --exhale 6 --closest  # renders the nearest fit (27s)
+swift run breath sequence --total 30 --inhale 3 --exhale 6 --closest --out /tmp/seq.wav
+```
+
+Breath durations are kept exact, so the total flexes to the nearest whole-cycle
+length. By default a pattern that doesn't tile `--total` evenly fails and proposes
+the nearest totals; `--closest` renders the nearest one instead. Each cycle is
+re-seeded so the run doesn't sound like one identical loop repeated. Omit `--out`
+to play (add `--loop` to repeat the whole sequence).
+
 All commands read the breath palette from `--assets Assets/breaths` by default.
 
 ## CLI reference
@@ -55,12 +70,13 @@ All commands read the breath palette from `--assets Assets/breaths` by default.
 | `render --type inhale --duration 12 --style calm --out out.wav` | Render a breath to WAV. |
 | `play --type exhale --duration 6 --style calm` | Render and play one breath. |
 | `cycle --inhale 4 --hold-in 1 --exhale 6 --hold-out 1 --style calm --loop` | Play a repeating cycle. |
+| `sequence --total 30 --inhale 5 --exhale 5 [--closest] [--out out.wav]` | Fill a total duration with whole cycles (exact durations, nearest total). |
 
 Common options:
 
 - `--assets <dir>`: directory containing the breath assets and `manifest.json` (default `Assets/breaths`).
 - `--style <name>`: breath style; the bundled palette provides `calm`.
-- `--seed <n>` / `--no-variation` (`play` and `render` only): control the subtle per-render variation.
+- `--seed <n>` (`play`, `render`, `sequence`) / `--no-variation` (`play` and `render` only): control the subtle per-render variation. For `sequence`, `--seed` pins the whole run.
 - `--denoise` / `--no-denoise` (default off): optional FFT noise-profile subtraction on the recorded source to suppress steady hiss. Tune with `--denoise-oversub` / `--denoise-floor`. Off by default (modest benefit on the current pipeline).
 
 ## How it works
@@ -85,6 +101,7 @@ Rendered breaths play through `AVAudioEngine`.
 
 - `Sources/BreathEngine/DSP/`: pure DSP primitives (filters, crossfades, resampling, envelopes).
 - `Sources/BreathEngine/Assembly/`: asset loading and the `recordedShape` assembler.
+- `Sources/BreathEngine/Sequence/`: fits a breath pattern into a target duration (`SequencePlanner`).
 - `Sources/BreathEngine/Playback/`: AVFoundation playback.
 - `Sources/BreathCLI/`: CLI harness.
 - `Assets/breaths/`: the bundled `calm` palette and its `manifest.json`.

@@ -58,6 +58,7 @@ struct Breath: AsyncParsableCommand {
         subcommands: [
             Play.self,
             Cycle.self,
+            SequenceCommand.self,
             Render.self,
         ]
     )
