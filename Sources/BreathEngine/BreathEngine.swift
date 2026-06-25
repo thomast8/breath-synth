@@ -292,9 +292,14 @@ public final class BreathEngine {
     public func pause() { player?.pause() }
     public func resume() { player?.resume() }
 
-    /// Play `buffer` once from a frame offset (a seek). See `BreathPlayer.play(_:fromFrame:)`.
-    public func play(_ buffer: AVAudioPCMBuffer, fromFrame startFrame: AVAudioFramePosition) async throws {
-        try await playerInstance().play(buffer, fromFrame: startFrame)
+    /// Seek then continue playback from a frame offset. See `BreathPlayer.play(_:fromFrame:repeats:loop:)`.
+    public func play(
+        _ buffer: AVAudioPCMBuffer,
+        fromFrame startFrame: AVAudioFramePosition,
+        repeats: Int,
+        loop: Bool
+    ) async throws {
+        try await playerInstance().play(buffer, fromFrame: startFrame, repeats: repeats, loop: loop)
     }
 
     /// Current playback position in frames since playback started, or nil when nothing is playing.

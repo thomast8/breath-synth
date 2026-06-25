@@ -78,8 +78,6 @@ final class DebugModel {
     private var pausedSampleTime: AVAudioFramePosition?
     /// Phase to return to when resuming from pause.
     private var resumePhase: Phase = .playing
-    /// True while the current playback is a seeked once-through (sweeps offset→end, ignores loop).
-    private var seeking = false
 
     // MARK: Engine config (a change here rebuilds the engine on the next render)
 
@@ -169,18 +167,15 @@ final class DebugModel {
     var playheadProgress: Double? {
         let sampleTime: AVAudioFramePosition?
         switch phase {
-        case .playing, .looping: sampleTime = engine?.currentSampleTime
+        // During play/loop, treat a momentarily-unavailable clock (pre-roll, or the brief stop+restart
+        // of a seek) as 0 so the head parks at the start/seek offset instead of vanishing or jumping.
+        case .playing, .looping: sampleTime = engine?.currentSampleTime ?? 0
         case .paused: sampleTime = pausedSampleTime          // the player clock stops once paused
         default: return nil
         }
         guard let frames = stats?.frames, frames > 0, let s = sampleTime else { return nil }
         let total = AVAudioFramePosition(frames)
         let played = max(0, playbackStartFrame + s)           // absolute position incl. any seek offset
-        // A seek plays a plain once-through from the offset, regardless of the task's loop settings.
-        if seeking {
-            let fraction = Double(played) / Double(total)
-            return fraction >= 1 ? nil : fraction
-        }
         switch task {
         case .single, .counted:
             let fraction = Double(played) / Double(total)
@@ -308,7 +303,6 @@ final class DebugModel {
     func play() {
         run { engine in
             self.playbackStartFrame = 0
-            self.seeking = false
             self.pausedSampleTime = nil
             let buffer = try self.renderActive(engine)
             switch self.task {
@@ -338,7 +332,6 @@ final class DebugModel {
         playTask = nil
         engine?.stop()
         phase = .idle
-        seeking = false
         pausedSampleTime = nil
         playbackStartFrame = 0
         scrubFraction = nil
@@ -365,22 +358,35 @@ final class DebugModel {
         }
     }
 
-    /// Seek to a fraction of the displayed buffer (the playhead was dragged) and play once from there.
+    /// Seek to a fraction of the displayed buffer (the playhead was dragged) and continue playing from
+    /// there with the task's configured repetition — so a cycle keeps playing its cycles, a loop keeps
+    /// looping, rather than stopping after the seeked buffer.
     func seek(toFraction fraction: Double) {
         guard let buffer = currentBuffer else { scrubFraction = nil; return }
         scrubFraction = nil
         let clamped = min(max(fraction, 0), 1)
         let frame = AVAudioFramePosition(Double(buffer.frameLength) * clamped)
+
+        let loop: Bool
+        let repeats: Int
+        switch task {
+        case .single, .counted: loop = false; repeats = 0
+        case .cycle: loop = cycleLoop; repeats = max(0, cycleCount - 1)
+        case .sequence: loop = seqLoop; repeats = 0
+        }
+
+        // Synchronously stop the old audio and set the new anchor/phase, so the very next frame draws
+        // the head at the seek offset (via the `?? 0` fallback) instead of the old position.
         playTask?.cancel()
+        engine?.stop()
+        playbackStartFrame = frame
+        pausedSampleTime = nil
+        phase = loop ? .looping : .playing
         playTask = Task { @MainActor in
             do {
                 let engine = try ensureEngine()
-                self.playbackStartFrame = frame
-                self.seeking = true
-                self.pausedSampleTime = nil
-                self.phase = .playing
-                self.logger.log("seek", ["fraction": clamped])
-                try await engine.play(buffer, fromFrame: frame)
+                self.logger.log("seek", ["fraction": clamped, "loop": loop, "repeats": repeats])
+                try await engine.play(buffer, fromFrame: frame, repeats: repeats, loop: loop)
                 if case .playing = self.phase { self.phase = .idle }
             } catch is CancellationError {
                 self.phase = .idle

@@ -91,16 +91,36 @@ public final class BreathPlayer {
         if started, !player.isPlaying { player.play() }
     }
 
-    /// Play `buffer` once from `startFrame` (a seek), resolving when it finishes. Resets the node clock,
-    /// so `currentSampleTime` then counts from the slice start — the caller offsets by `startFrame` for
-    /// an absolute buffer position. (`scheduleSegment` is file-only, so we schedule a copied slice.)
-    public func play(_ buffer: AVAudioPCMBuffer, fromFrame startFrame: AVAudioFramePosition) async throws {
+    /// Seek: play `buffer` from `startFrame`, then continue the configured playback — `loop` loops the
+    /// whole buffer forever (returns immediately), otherwise it plays `repeats` more full copies and
+    /// resolves when the last finishes. Resets the node clock, so `currentSampleTime` counts from the
+    /// slice start; the caller offsets by `startFrame` for an absolute position. (`scheduleSegment` is
+    /// file-only, so the seek slice is a copied buffer.)
+    public func play(
+        _ buffer: AVAudioPCMBuffer,
+        fromFrame startFrame: AVAudioFramePosition,
+        repeats: Int,
+        loop: Bool
+    ) async throws {
         player.stop()
         try ensureRunning()
-        guard let segment = Self.slice(buffer, fromFrame: startFrame) else { return }
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            player.scheduleBuffer(segment, at: nil, options: [], completionCallbackType: .dataPlayedBack) { _ in
-                continuation.resume()
+        guard let slice = Self.slice(buffer, fromFrame: startFrame) else { return }
+        if loop {
+            player.scheduleBuffer(slice, at: nil, options: [], completionCallbackType: .dataPlayedBack) { _ in }
+            player.scheduleBuffer(buffer, at: nil, options: [.loops], completionCallbackType: .dataPlayedBack) { _ in }
+            return
+        }
+        var queue: [AVAudioPCMBuffer] = [slice]
+        for _ in 0..<max(0, repeats) { queue.append(buffer) }
+        for (index, segment) in queue.enumerated() {
+            if index == queue.count - 1 {
+                await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                    player.scheduleBuffer(segment, at: nil, options: [], completionCallbackType: .dataPlayedBack) { _ in
+                        continuation.resume()
+                    }
+                }
+            } else {
+                player.scheduleBuffer(segment, at: nil, options: [], completionCallbackType: .dataPlayedBack) { _ in }
             }
         }
     }
