@@ -11,6 +11,7 @@ let package = Package(
         .library(name: "BreathEngine", targets: ["BreathEngine"]),
         .executable(name: "breath", targets: ["BreathCLI"]),
         .executable(name: "breath-debug", targets: ["BreathDebugApp"]),
+        .executable(name: "breath-enroll", targets: ["BreathEnrollApp"]),
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.3.0"),
@@ -39,6 +40,21 @@ let package = Package(
                     "-Xlinker", "__TEXT",
                     "-Xlinker", "__info_plist",
                     "-Xlinker", "Sources/BreathDebugApp/Resources/Info.plist",
+                ])
+            ]
+        ),
+        .executableTarget(
+            name: "BreathEnrollApp",
+            dependencies: ["BreathEngine"],
+            exclude: ["Resources/Info.plist", "Resources/BreathEnroll.entitlements"],
+            linkerSettings: [
+                // Embed an Info.plist so the binary carries a bundle name + the microphone usage
+                // string (NSMicrophoneUsageDescription) macOS requires before any input-node access.
+                .unsafeFlags([
+                    "-Xlinker", "-sectcreate",
+                    "-Xlinker", "__TEXT",
+                    "-Xlinker", "__info_plist",
+                    "-Xlinker", "Sources/BreathEnrollApp/Resources/Info.plist",
                 ])
             ]
         ),
