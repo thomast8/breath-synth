@@ -191,9 +191,17 @@ struct ContentView: View {
 
     private var outputPane: some View {
         VStack(alignment: .leading, spacing: 12) {
-            statusLine
+            HStack {
+                statusLine
+                Spacer()
+                Toggle("Spectrogram", isOn: $model.showSpectrogram)
+                    .toggleStyle(.switch).font(.caption)
+            }
             waveform
                 .frame(height: 200)
+            if model.showSpectrogram, let image = model.spectrogram {
+                spectrogramView(image)
+            }
             if let stats = model.stats { statsView(stats) }
             Divider()
             logView
@@ -208,10 +216,27 @@ struct ContentView: View {
         switch model.phase {
         case .playing, .looping:
             TimelineView(.animation) { _ in
-                WaveformView(peaks: model.waveform, boundaries: model.boundaries, progress: model.playheadProgress)
+                WaveformView(peaks: model.waveform, boundaries: model.boundaries,
+                             transients: model.transients, progress: model.playheadProgress)
             }
         default:
-            WaveformView(peaks: model.waveform, boundaries: model.boundaries, progress: nil)
+            WaveformView(peaks: model.waveform, boundaries: model.boundaries,
+                         transients: model.transients, progress: nil)
+        }
+    }
+
+    /// Heat-mapped STFT under the waveform, time-aligned. Purple ticks on the waveform mark the same
+    /// onsets, so a glottal stop is visible as a vertical streak here and a flux tick above.
+    private func spectrogramView(_ image: CGImage) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Image(decorative: image, scale: 1)
+                .resizable()
+                .interpolation(.low)
+                .frame(height: 150)
+                .frame(maxWidth: .infinity)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+            Text("0–10 kHz (low at bottom) · brighter = louder · vertical streak = transient / glottal")
+                .font(.caption2).foregroundStyle(.tertiary)
         }
     }
 
