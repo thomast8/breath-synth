@@ -223,38 +223,26 @@ struct ContentView: View {
 
     /// The waveform, animated with a live playhead only while audio is running. Gating the
     /// `TimelineView` on phase means no redraw ticks (zero CPU) when idle, and no retained timer.
-    @ViewBuilder private var waveform: some View {
-        animatedWhilePlaying {
-            WaveformView(peaks: model.waveform, boundaries: model.boundaries,
-                         transients: model.transients, progress: model.displayProgress,
-                         duration: model.stats?.durationSec ?? 0)
-        }
+    /// The waveform reads the single `displayProgress` value; the model's head timer updates it, so the
+    /// view re-renders in lock-step with the spectrogram (no per-view clock to drift or freeze).
+    private var waveform: some View {
+        WaveformView(peaks: model.waveform, boundaries: model.boundaries,
+                     transients: model.transients, progress: model.displayProgress,
+                     duration: model.stats?.durationSec ?? 0)
     }
 
-    /// Refresh `content` ~display-rate while audio runs (so the playhead sweeps), static otherwise —
-    /// no timer, zero CPU when idle.
-    @ViewBuilder private func animatedWhilePlaying<Content: View>(@ViewBuilder _ content: @escaping () -> Content) -> some View {
-        switch model.phase {
-        case .playing, .looping:
-            TimelineView(.animation) { _ in content() }
-        default:
-            content()
-        }
-    }
-
-    /// Waveform gesture: a tap seeks and plays from there (continuing cycles / loops); a drag scrubs
-    /// the playhead and parks it where you release (to inspect a spot against the spectrogram / axis).
+    /// Click or drag anywhere on the waveform / spectrogram to position the playhead there; it stays
+    /// parked (audio stops) so you can read its time / line it up with a streak. Press Play to play
+    /// from the parked head, continuing the task's cycles / loop.
     private func scrubGesture(width: CGFloat) -> some Gesture {
         DragGesture(minimumDistance: 0)
             .onChanged { value in
                 guard width > 0 else { return }
-                model.scrubFraction = min(max(Double(value.location.x / width), 0), 1)
+                model.scrub(to: Double(value.location.x / width))
             }
             .onEnded { value in
                 guard width > 0 else { return }
-                let fraction = min(max(Double(value.location.x / width), 0), 1)
-                let moved = hypot(value.translation.width, value.translation.height) > 5
-                if moved { model.parkHead(at: fraction) } else { model.seek(toFraction: fraction) }
+                model.parkHead(at: Double(value.location.x / width))
             }
     }
 
@@ -262,12 +250,11 @@ struct ContentView: View {
     /// onsets, so a glottal stop is visible as a vertical streak here and a flux tick above.
     private func spectrogramView(_ image: CGImage) -> some View {
         VStack(alignment: .leading, spacing: 2) {
-            animatedWhilePlaying {
+            GeometryReader { geo in
                 Image(decorative: image, scale: 1)
                     .resizable()
                     .interpolation(.low)
-                    .frame(height: 150)
-                    .frame(maxWidth: .infinity)
+                    .frame(width: geo.size.width, height: geo.size.height)
                     .overlay {
                         Canvas { context, size in
                             drawPlayhead(in: context, size: size,
@@ -276,7 +263,10 @@ struct ContentView: View {
                         }
                     }
                     .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .contentShape(Rectangle())
+                    .gesture(scrubGesture(width: geo.size.width))
             }
+            .frame(height: 150)
             Text("0–10 kHz (low at bottom) · brighter = louder · vertical streak = transient / glottal")
                 .font(.caption2).foregroundStyle(.tertiary)
         }
