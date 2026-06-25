@@ -236,7 +236,8 @@ struct ContentView: View {
         }
     }
 
-    /// Drag (or click) anywhere on the waveform to move the red playhead and seek there.
+    /// Waveform gesture: a tap seeks and plays from there (continuing cycles / loops); a drag scrubs
+    /// the playhead and parks it where you release (to inspect a spot against the spectrogram / axis).
     private func scrubGesture(width: CGFloat) -> some Gesture {
         DragGesture(minimumDistance: 0)
             .onChanged { value in
@@ -245,7 +246,9 @@ struct ContentView: View {
             }
             .onEnded { value in
                 guard width > 0 else { return }
-                model.seek(toFraction: min(max(Double(value.location.x / width), 0), 1))
+                let fraction = min(max(Double(value.location.x / width), 0), 1)
+                let moved = hypot(value.translation.width, value.translation.height) > 5
+                if moved { model.parkHead(at: fraction) } else { model.seek(toFraction: fraction) }
             }
     }
 
