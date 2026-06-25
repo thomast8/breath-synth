@@ -70,12 +70,12 @@ final class DebugModel {
     private var engine: BreathEngine?
     private var loadedSignature = ""
     private var playTask: Task<Void, Never>?
-    /// The exact buffer last shown/played, kept so the playhead can be dragged to seek within it.
+    /// Drives the single playhead value (~60 fps) while audio runs.
+    private var headTask: Task<Void, Never>?
+    /// The exact buffer last shown/played; Play resumes from the parked head within it.
     private var currentBuffer: AVAudioPCMBuffer?
-    /// Frame offset the current playback started at (0 normally; the seek target after a drag).
+    /// Frame offset the current playback started at (0 normally; the parked head's frame for Play).
     private var playbackStartFrame: AVAudioFramePosition = 0
-    /// Frozen render position captured at pause (the player clock stops reporting once paused).
-    private var pausedSampleTime: AVAudioFramePosition?
     /// Phase to return to when resuming from pause.
     private var resumePhase: Phase = .playing
 
@@ -146,8 +146,10 @@ final class DebugModel {
     var showSpectrogram = true
     /// Set by the waveform drag gesture while scrubbing; overrides the playhead until released.
     var scrubFraction: Double?
-    /// Where the head rests after a drag (scrub-to-inspect), so it stays put instead of vanishing.
+    /// Where the head rests after a click/drag (scrub-to-inspect), so it stays put.
     private(set) var parkedFraction: Double?
+    /// The live sweeping position, updated ~60fps by the head timer while audio runs.
+    private(set) var livePlayhead: Double?
     private(set) var stats: RenderStats?
     private(set) var planSummary: String?
     private(set) var log: [LogLine] = []
@@ -157,29 +159,20 @@ final class DebugModel {
     var logPath: String { logger.url.path }
     var streamURL: String { "http://127.0.0.1:\(logger.server.port)/" }
 
-    /// Live playhead position as a fraction [0,1] of the *displayed* waveform, or nil when there is no
-    /// playhead (idle / rendering / error / before audio starts / past the end). Read straight from the
-    /// engine's player each call — drive redraws with a TimelineView, not `@Observable` tracking.
-    ///
-    /// `currentSampleTime` is the total frames played since playback started (monotonic, never wraps),
-    /// while `stats.frames` is one displayed unit, so `played % frames` sweeps once per displayed unit:
-    /// once for single/counted/sequence, once per cycle for cycle mode (the waveform shows one cycle).
-    /// It's the render position, so it leads the speaker by the output latency (~5-20 ms) — sub-pixel
-    /// here, not worth correcting for a debug tool.
-    var playheadProgress: Double? {
-        let sampleTime: AVAudioFramePosition?
-        switch phase {
-        // During play/loop, treat a momentarily-unavailable clock (pre-roll, or the brief stop+restart
-        // of a seek) as 0 so the head parks at the start/seek offset instead of vanishing or jumping.
-        case .playing, .looping: sampleTime = engine?.currentSampleTime ?? 0
-        case .paused: sampleTime = pausedSampleTime          // the player clock stops once paused
-        default: return nil
-        }
-        guard let frames = stats?.frames, frames > 0, let s = sampleTime else { return nil }
+    /// The single source of truth for the playhead, read by EVERY view (waveform + spectrogram) so they
+    /// can never disagree: the drag position while scrubbing, else the live sweeping position (sampled
+    /// into `livePlayhead` by one timer), else a parked position from a click/drag. One value, one
+    /// writer — no per-view clocks to drift or freeze.
+    var displayProgress: Double? { scrubFraction ?? livePlayhead ?? parkedFraction }
+
+    /// The live playback position as a fraction [0,1] of the displayed buffer, or nil when not playing.
+    /// `currentSampleTime` counts frames since playback started; `stats.frames` is one displayed unit,
+    /// so `played % frames` sweeps once per unit (once for single/counted/sequence, once per cycle).
+    private func computeLivePlayhead() -> Double? {
+        switch phase { case .playing, .looping: break; default: return nil }
+        guard let frames = stats?.frames, frames > 0 else { return nil }
         let total = AVAudioFramePosition(frames)
-        let played = max(0, playbackStartFrame + s)           // absolute position incl. any seek offset
-        // Clamp to the right edge at the end rather than returning nil, so the head never vanishes
-        // mid-playback (a tap-seek near the end) — `playbackFinished` then parks it there.
+        let played = max(0, playbackStartFrame + (engine?.currentSampleTime ?? 0))   // pre-roll → start
         switch task {
         case .single, .counted:
             return min(Double(played) / Double(total), 1)
@@ -192,10 +185,6 @@ final class DebugModel {
             return min(Double(played) / Double(total), 1)
         }
     }
-
-    /// What the waveform draws as the playhead: the drag position while scrubbing, else the live head
-    /// while playing, else a parked position from a previous scrub (so a moved head stays visible).
-    var displayProgress: Double? { scrubFraction ?? playheadProgress ?? parkedFraction }
 
     /// Whether the Pause/Resume control applies (something is playing, looping, or paused).
     var canPause: Bool {
@@ -303,30 +292,28 @@ final class DebugModel {
         run { engine in _ = try self.renderActive(engine) }
     }
 
+    /// Render the active task and play it, starting from the parked head if one is set (else the
+    /// start), continuing the task's cycles / loop. All four tasks go through one path
+    /// (`play(_:fromFrame:repeats:loop:)`) so playback and the playhead behave identically everywhere.
     func play() {
+        let startFraction = parkedFraction
         run { engine in
-            self.playbackStartFrame = 0
-            self.pausedSampleTime = nil
             let buffer = try self.renderActive(engine)
+            let total = AVAudioFramePosition(buffer.frameLength)
+            let startFrame = startFraction.map { AVAudioFramePosition(Double(total) * min(max($0, 0), 1)) } ?? 0
+            let loop: Bool
+            let repeats: Int
             switch self.task {
-            case .single, .counted:
-                self.phase = .playing
-                self.logger.log("play", ["task": self.task.rawValue])
-                try await engine.play(buffer)
-                self.playbackFinished()
-            case .cycle:
-                let spec = self.cycleSpec()
-                self.phase = spec.loop ? .looping : .playing
-                self.logger.log(spec.loop ? "loop" : "play", ["task": "cycle", "cycles": spec.cycles])
-                try await engine.playCycle(spec)            // loop=true returns immediately
-                self.playbackFinished()
-            case .sequence:
-                let plan = try self.makePlan()
-                self.phase = self.seqLoop ? .looping : .playing
-                self.logger.log(self.seqLoop ? "loop" : "play", ["task": "sequence", "cycles": plan.cycles])
-                try await engine.playSequence(plan, loop: self.seqLoop)
-                self.playbackFinished()
+            case .single, .counted: loop = false; repeats = 0
+            case .cycle: loop = self.cycleLoop; repeats = max(0, self.cycleCount - 1)
+            case .sequence: loop = self.seqLoop; repeats = 0
             }
+            self.playbackStartFrame = startFrame
+            self.phase = loop ? .looping : .playing
+            self.startHeadUpdates()
+            self.logger.log(loop ? "loop" : "play", ["task": self.task.rawValue, "fromFrame": startFrame])
+            try await engine.play(buffer, fromFrame: startFrame, repeats: repeats, loop: loop)
+            self.playbackFinished()
         }
     }
 
@@ -334,101 +321,88 @@ final class DebugModel {
         playTask?.cancel()
         playTask = nil
         engine?.stop()
+        stopHeadUpdates(clear: true)
         phase = .idle
-        pausedSampleTime = nil
         playbackStartFrame = 0
         scrubFraction = nil
         parkedFraction = nil
         logger.log("stop")
     }
 
-    /// Park the playhead at a fraction after a drag (scrub-to-inspect): stop audio and leave the head
-    /// sitting there so you can read off the time / line it up with a spectrogram streak. A tap (no
-    /// drag) seeks-and-plays instead — see `seek`.
+    /// Drag in progress: the head follows the finger live. Committed by `parkHead` on release.
+    func scrub(to fraction: Double) {
+        scrubFraction = min(max(fraction, 0), 1)
+    }
+
+    /// Click or drag-release: move the head there and leave it parked with audio stopped, so you can
+    /// read the time / line it up with a spectrogram streak. Press Play to play from here.
     func parkHead(at fraction: Double) {
-        scrubFraction = nil
         playTask?.cancel()
         playTask = nil
         engine?.stop()
+        stopHeadUpdates(clear: true)
         phase = .idle
-        pausedSampleTime = nil
         playbackStartFrame = 0
+        scrubFraction = nil
         parkedFraction = min(max(fraction, 0), 1)
         logger.log("scrub", ["fraction": parkedFraction ?? 0])
     }
 
-    /// Called when a non-looping playback finishes: go idle and park the head at the end so it stays
-    /// visible (it was sweeping; don't let it vanish). Looping playbacks never reach here.
+    /// A non-looping playback finished: go idle and park the head at the end so it stays visible.
+    /// Looping playbacks return immediately from `engine.play` with `phase == .looping`, so the guard
+    /// keeps the head sweeping for them.
     private func playbackFinished() {
-        if case .playing = phase {
-            phase = .idle
-            parkedFraction = 1
-        }
+        guard case .playing = phase else { return }
+        stopHeadUpdates(clear: true)
+        phase = .idle
+        parkedFraction = 1
     }
 
-    /// Toggle pause/resume of the current playback. The player clock freezes on pause, so we capture
-    /// the position first and show the playhead parked there until resumed.
+    /// Toggle pause/resume. Pause freezes the head (stops the timer, leaving the last value) and the
+    /// player; resume restarts both from where they were.
     func pauseResume() {
         switch phase {
         case .playing, .looping:
-            pausedSampleTime = engine?.currentSampleTime ?? pausedSampleTime
             resumePhase = phase
             engine?.pause()
+            stopHeadUpdates(clear: false)        // freeze the head at its last position
             phase = .paused
             logger.log("pause")
         case .paused:
             engine?.resume()
-            pausedSampleTime = nil
             phase = resumePhase
+            startHeadUpdates()
             logger.log("resume")
         default:
             break
         }
     }
 
-    /// Seek to a fraction of the displayed buffer (the playhead was dragged) and continue playing from
-    /// there with the task's configured repetition — so a cycle keeps playing its cycles, a loop keeps
-    /// looping, rather than stopping after the seeked buffer.
-    func seek(toFraction fraction: Double) {
-        guard let buffer = currentBuffer else { scrubFraction = nil; return }
-        scrubFraction = nil
-        let clamped = min(max(fraction, 0), 1)
-        let frame = AVAudioFramePosition(Double(buffer.frameLength) * clamped)
+    // MARK: - Playhead timer (single writer of `livePlayhead`)
 
-        let loop: Bool
-        let repeats: Int
-        switch task {
-        case .single, .counted: loop = false; repeats = 0
-        case .cycle: loop = cycleLoop; repeats = max(0, cycleCount - 1)
-        case .sequence: loop = seqLoop; repeats = 0
-        }
-
-        // Synchronously stop the old audio and set the new anchor/phase, so the very next frame draws
-        // the head at the seek offset (via the `?? 0` fallback) instead of the old position.
-        playTask?.cancel()
-        engine?.stop()
-        playbackStartFrame = frame
-        pausedSampleTime = nil
-        parkedFraction = nil
-        phase = loop ? .looping : .playing
-        playTask = Task { @MainActor in
-            do {
-                let engine = try ensureEngine()
-                self.logger.log("seek", ["fraction": clamped, "loop": loop, "repeats": repeats])
-                try await engine.play(buffer, fromFrame: frame, repeats: repeats, loop: loop)
-                self.playbackFinished()
-            } catch is CancellationError {
-                self.phase = .idle
-            } catch {
-                self.fail(error)
+    private func startHeadUpdates() {
+        headTask?.cancel()
+        headTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                self.livePlayhead = self.computeLivePlayhead()
+                try? await Task.sleep(nanoseconds: 16_000_000)   // ~60 fps
             }
         }
+    }
+
+    private func stopHeadUpdates(clear: Bool) {
+        headTask?.cancel()
+        headTask = nil
+        if clear { livePlayhead = nil }
     }
 
     /// Shared task scaffold: cancel any in-flight playback, ensure the engine, run `body`, surface errors.
     private func run(_ body: @escaping (BreathEngine) async throws -> Void) {
         playTask?.cancel()
         engine?.stop()
+        stopHeadUpdates(clear: true)
+        scrubFraction = nil
         parkedFraction = nil
         playTask = Task { @MainActor in
             do {
