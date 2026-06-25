@@ -146,6 +146,8 @@ final class DebugModel {
     var showSpectrogram = true
     /// Set by the waveform drag gesture while scrubbing; overrides the playhead until released.
     var scrubFraction: Double?
+    /// Where the head rests after a drag (scrub-to-inspect), so it stays put instead of vanishing.
+    private(set) var parkedFraction: Double?
     private(set) var stats: RenderStats?
     private(set) var planSummary: String?
     private(set) var log: [LogLine] = []
@@ -191,8 +193,9 @@ final class DebugModel {
         }
     }
 
-    /// What the waveform draws as the playhead: the drag position while scrubbing, else the live head.
-    var displayProgress: Double? { scrubFraction ?? playheadProgress }
+    /// What the waveform draws as the playhead: the drag position while scrubbing, else the live head
+    /// while playing, else a parked position from a previous scrub (so a moved head stays visible).
+    var displayProgress: Double? { scrubFraction ?? playheadProgress ?? parkedFraction }
 
     /// Whether the Pause/Resume control applies (something is playing, looping, or paused).
     var canPause: Bool {
@@ -335,7 +338,23 @@ final class DebugModel {
         pausedSampleTime = nil
         playbackStartFrame = 0
         scrubFraction = nil
+        parkedFraction = nil
         logger.log("stop")
+    }
+
+    /// Park the playhead at a fraction after a drag (scrub-to-inspect): stop audio and leave the head
+    /// sitting there so you can read off the time / line it up with a spectrogram streak. A tap (no
+    /// drag) seeks-and-plays instead — see `seek`.
+    func parkHead(at fraction: Double) {
+        scrubFraction = nil
+        playTask?.cancel()
+        playTask = nil
+        engine?.stop()
+        phase = .idle
+        pausedSampleTime = nil
+        playbackStartFrame = 0
+        parkedFraction = min(max(fraction, 0), 1)
+        logger.log("scrub", ["fraction": parkedFraction ?? 0])
     }
 
     /// Toggle pause/resume of the current playback. The player clock freezes on pause, so we capture
@@ -381,6 +400,7 @@ final class DebugModel {
         engine?.stop()
         playbackStartFrame = frame
         pausedSampleTime = nil
+        parkedFraction = nil
         phase = loop ? .looping : .playing
         playTask = Task { @MainActor in
             do {
@@ -400,6 +420,7 @@ final class DebugModel {
     private func run(_ body: @escaping (BreathEngine) async throws -> Void) {
         playTask?.cancel()
         engine?.stop()
+        parkedFraction = nil
         playTask = Task { @MainActor in
             do {
                 let engine = try ensureEngine()
