@@ -12,6 +12,8 @@ let package = Package(
         .executable(name: "breath", targets: ["BreathCLI"]),
         .executable(name: "breath-debug", targets: ["BreathDebugApp"]),
         .executable(name: "breath-enroll", targets: ["BreathEnrollApp"]),
+        .library(name: "BreathBank", targets: ["BreathBank"]),
+        .executable(name: "breath-bank", targets: ["BreathBankCLI"]),
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.3.0"),
@@ -45,7 +47,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "BreathEnrollApp",
-            dependencies: ["BreathEngine"],
+            dependencies: ["BreathEngine", "BreathBank"],
             exclude: ["Resources/Info.plist", "Resources/BreathEnroll.entitlements"],
             linkerSettings: [
                 // Embed an Info.plist so the binary carries a bundle name + the microphone usage
@@ -58,9 +60,24 @@ let package = Package(
                 ])
             ]
         ),
+        .target(
+            name: "BreathBank",
+            dependencies: ["BreathEngine"]
+        ),
+        .executableTarget(
+            name: "BreathBankCLI",
+            dependencies: [
+                "BreathBank",
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+            ]
+        ),
         .testTarget(
             name: "BreathEngineTests",
             dependencies: ["BreathEngine"]
+        ),
+        .testTarget(
+            name: "BreathBankTests",
+            dependencies: ["BreathBank"]
         ),
     ]
 )

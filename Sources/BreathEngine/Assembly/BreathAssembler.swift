@@ -273,7 +273,9 @@ public enum BreathAssembler {
     /// gap between the breath and a trailing plosive is resolved (the engine's broad RMS envelope
     /// would bridge it); the breath is the longest contiguous above-threshold run, the plosive a
     /// separate shorter run that is excluded.
-    private static func trimToMainBody(_ samples: [Float], sampleRate: Double) -> [Float] {
+    /// Public so the `breath-bank` builder derives the frc/rv one-shot *body* fragment exactly as
+    /// the engine's `oneShotBranch` does.
+    public static func trimToMainBody(_ samples: [Float], sampleRate: Double) -> [Float] {
         guard samples.count > 1 else { return samples }
         let win = max(1, Int(0.015 * sampleRate))
         let hop = max(1, Int(0.005 * sampleRate))
@@ -321,8 +323,9 @@ public enum BreathAssembler {
     /// Shared source prep for every render mode: trim the outer silence, run the single
     /// low-cut clean-up, then optionally subtract the spectral noise profile. Factored
     /// out of `recordedShapeBranch` so the one-shot and counted paths see an identically
-    /// cleaned signal. Internal (not private) so the engine's counted path can reuse it.
-    static func prepareSource(
+    /// cleaned signal. Public so the app-layer `breath-bank` builder cuts fragments from the
+    /// *same* prepared signal the engine renders from (offset validity).
+    public static func prepareSource(
         _ full: [Float],
         settings: AssemblerSettings,
         noiseProfile: [Float]?
@@ -408,7 +411,9 @@ public enum BreathAssembler {
         return ensureZeroEndpoints(out)
     }
 
-    private static func rmsEnvelope(_ samples: [Float], sampleRate: Double) -> [Float] {
+    /// Public so the `breath-bank` builder reuses the engine's envelope for texture extraction and
+    /// fragment-quality features.
+    public static func rmsEnvelope(_ samples: [Float], sampleRate: Double) -> [Float] {
         guard !samples.isEmpty else { return [] }
         let window = max(32, Segments.frames(seconds: 0.050, sampleRate: sampleRate))
         let hop = max(1, Segments.frames(seconds: 0.025, sampleRate: sampleRate))
@@ -484,7 +489,9 @@ public enum BreathAssembler {
         return envelope.map { min(1, max(0, $0 / peak)) }
     }
 
-    private static func flattenedTexture(
+    /// Public so the `breath-bank` builder tiles calm grains from the *same* energy-flat texture the
+    /// engine's textured path produces (so pooled grains are level-comparable and crossfade cleanly).
+    public static func flattenedTexture(
         from source: [Float],
         envelope: [Float],
         type: BreathType,

@@ -1,5 +1,6 @@
 import AVFoundation
 import AppKit
+import BreathBank
 import BreathEngine
 import Foundation
 import Observation

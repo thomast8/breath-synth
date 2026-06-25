@@ -61,26 +61,3 @@ enum EnrollmentScript {
         ),
     ]
 }
-
-/// What an enrollment session captured, written as `captures.json` in the output folder for the
-/// `breath-bank` builder to consume. (Re-homed into the builder library in PR4.)
-struct CaptureSession: Codable, Sendable {
-    struct Step: Codable, Sendable {
-        var slug: String
-        var style: String
-        var type: BreathType
-        var renderMode: RenderMode
-        var role: String
-        var reference: String?
-        var files: [String]
-    }
-
-    var roomTone: String?
-    var steps: [Step]
-
-    func write(to url: URL) throws {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        try encoder.encode(self).write(to: url, options: .atomic)
-    }
-}
