@@ -10,6 +10,8 @@ public final class AssetLibrary {
     private let manifest: BreathManifest
     private let sampleRate: Double
     private var cache: [String: [Float]] = [:]
+    private var bankCache: [String: FragmentBank?] = [:]
+    private var grainPoolCache: [String: [[Float]]] = [:]
 
     public init(baseURL: URL, manifest: BreathManifest, sampleRate: Double = AudioConstants.workingSampleRate) {
         self.baseURL = baseURL
@@ -70,6 +72,51 @@ public final class AssetLibrary {
         let decoded = try Self.loadMonoSamples(url: url, targetRate: sampleRate)
         cache[file] = decoded
         return decoded
+    }
+
+    // MARK: - Fragment banks
+
+    /// Load (and cache) the fragment-bank sidecar for `(style, type)`, or `nil` when the manifest
+    /// names none, it can't be read, or its `preparedSig` doesn't match `expectedSig` — the engine
+    /// refuses a bank cut under an incompatible prepare configuration rather than rendering from
+    /// offsets that no longer line up with how it prepares sources.
+    public func fragmentBank(style: BreathStyle, type: BreathType, expectedSig: String?) -> FragmentBank? {
+        let key = "\(style)|\(type.rawValue)"
+        if let cached = bankCache[key] { return cached }
+        let bank = loadBank(style: style, type: type, expectedSig: expectedSig)
+        bankCache[key] = bank
+        return bank
+    }
+
+    private func loadBank(style: BreathStyle, type: BreathType, expectedSig: String?) -> FragmentBank? {
+        // The sidecar lives at a manifest-relative path (e.g. "fragments/calm_inhale.frags.json");
+        // reject traversal so a crafted manifest can't read outside the assets directory.
+        guard let palette = manifest.palette(style: style, type: type),
+              let name = palette.fragmentBank, !name.isEmpty, !name.contains("..") else { return nil }
+        guard let bank = try? FragmentBank.load(from: baseURL.appendingPathComponent(name)) else { return nil }
+        if let expectedSig, bank.preparedSig != expectedSig { return nil }
+        return bank
+    }
+
+    /// The accepted grain pool for a textured `(style, type)`: each accepted `grain` fragment sliced
+    /// from its take's prepared cache, in the bank's stable `(file, startFrame)` order. `nil` when
+    /// there's no usable bank or no accepted grain. Cached — the pool is immutable for an engine.
+    public func grainPool(style: BreathStyle, type: BreathType, expectedSig: String?) -> [[Float]]? {
+        let key = "\(style)|\(type.rawValue)"
+        if let cached = grainPoolCache[key] { return cached.isEmpty ? nil : cached }
+        guard let bank = fragmentBank(style: style, type: type, expectedSig: expectedSig) else {
+            grainPoolCache[key] = []
+            return nil
+        }
+        var pool: [[Float]] = []
+        for fragment in bank.acceptedFragments(kind: .grain) {
+            guard let signal = try? samples(for: fragment.preparedCacheFile),
+                  fragment.startFrame >= 0, fragment.startFrame < fragment.endFrame,
+                  fragment.endFrame <= signal.count else { continue }
+            pool.append(Array(signal[fragment.startFrame..<fragment.endFrame]))
+        }
+        grainPoolCache[key] = pool
+        return pool.isEmpty ? nil : pool
     }
 
     /// Decode a file to mono Float32 at `targetRate`, resampling/downmixing as needed. `nonisolated`

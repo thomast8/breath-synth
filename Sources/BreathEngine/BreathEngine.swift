@@ -47,6 +47,9 @@ public final class BreathEngine {
     /// to every render so the denoiser subtracts the measured floor instead of estimating
     /// one. `nil` when no profile is configured or it failed to load (denoiser falls back).
     private let noiseProfile: [Float]?
+    /// The prepare-config signature the engine expects a fragment bank to carry; a bank whose
+    /// `preparedSig` differs is ignored (the render falls back to the single-take path).
+    private let bankSig: String
     private var player: BreathPlayer?
     private var cache: [String: AVAudioPCMBuffer] = [:]
     private var cacheOrder: [String] = []
@@ -78,6 +81,7 @@ public final class BreathEngine {
         } else {
             noiseProfile = nil
         }
+        bankSig = FragmentBank.preparedSignature(settings: config.settings, roomToneProfile: noiseProfile)
     }
 
     /// Convenience: build an engine from a manifest.json file in `assetsDirectory`.
@@ -103,6 +107,12 @@ public final class BreathEngine {
         var rng = SeededRNG(seed: seed)
         let deltas = Variation.draw(spec.variation, rng: &rng)
         let clips = try library.sourceClips(style: spec.style, type: spec.type, rng: &rng)
+        // Banked textured styles render from the cross-take accepted-grain pool. Loaded after the
+        // take pick and drawing no RNG, so the seed stream — and thus the no-bank render — is
+        // byte-identical whether or not a bank is present.
+        let grainPool = mode == .textured
+            ? library.grainPool(style: spec.style, type: spec.type, expectedSig: bankSig)
+            : nil
         var samples = BreathAssembler.assemble(
             type: spec.type,
             durationSec: spec.clampedDurationSec,
@@ -112,7 +122,8 @@ public final class BreathEngine {
             seed: seed,
             mode: mode,
             style: spec.style,
-            noiseProfile: noiseProfile
+            noiseProfile: noiseProfile,
+            grainPool: grainPool
         )
         applyMasterGainAndClamp(&samples, extraGain: spec.gain)
         return samples
