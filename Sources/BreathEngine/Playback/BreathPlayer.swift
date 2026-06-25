@@ -80,4 +80,74 @@ public final class BreathPlayer {
             started = false
         }
     }
+
+    /// Pause playback, keeping the schedule and position so `resume()` continues from here.
+    public func pause() {
+        player.pause()
+    }
+
+    /// Resume after `pause()`.
+    public func resume() {
+        if started, !player.isPlaying { player.play() }
+    }
+
+    /// Seek: play `buffer` from `startFrame`, then continue the configured playback — `loop` loops the
+    /// whole buffer forever (returns immediately), otherwise it plays `repeats` more full copies and
+    /// resolves when the last finishes. Resets the node clock, so `currentSampleTime` counts from the
+    /// slice start; the caller offsets by `startFrame` for an absolute position. (`scheduleSegment` is
+    /// file-only, so the seek slice is a copied buffer.)
+    public func play(
+        _ buffer: AVAudioPCMBuffer,
+        fromFrame startFrame: AVAudioFramePosition,
+        repeats: Int,
+        loop: Bool
+    ) async throws {
+        player.stop()
+        try ensureRunning()
+        guard let slice = Self.slice(buffer, fromFrame: startFrame) else { return }
+        if loop {
+            player.scheduleBuffer(slice, at: nil, options: [], completionCallbackType: .dataPlayedBack) { _ in }
+            player.scheduleBuffer(buffer, at: nil, options: [.loops], completionCallbackType: .dataPlayedBack) { _ in }
+            return
+        }
+        var queue: [AVAudioPCMBuffer] = [slice]
+        for _ in 0..<max(0, repeats) { queue.append(buffer) }
+        for (index, segment) in queue.enumerated() {
+            if index == queue.count - 1 {
+                await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                    player.scheduleBuffer(segment, at: nil, options: [], completionCallbackType: .dataPlayedBack) { _ in
+                        continuation.resume()
+                    }
+                }
+            } else {
+                player.scheduleBuffer(segment, at: nil, options: [], completionCallbackType: .dataPlayedBack) { _ in }
+            }
+        }
+    }
+
+    /// A copy of `buffer` from `startFrame` to the end (mono/multi-channel), or nil if empty.
+    private static func slice(_ buffer: AVAudioPCMBuffer, fromFrame startFrame: AVAudioFramePosition) -> AVAudioPCMBuffer? {
+        let total = AVAudioFramePosition(buffer.frameLength)
+        let start = AVAudioFrameCount(max(0, min(startFrame, total)))
+        let count = AVAudioFrameCount(total) - start
+        guard count > 0, let out = AVAudioPCMBuffer(pcmFormat: buffer.format, frameCapacity: count) else { return nil }
+        out.frameLength = count
+        if let src = buffer.floatChannelData, let dst = out.floatChannelData {
+            for ch in 0..<Int(buffer.format.channelCount) {
+                dst[ch].update(from: src[ch] + Int(start), count: Int(count))
+            }
+        }
+        return out
+    }
+
+    /// The player node's current render position in frames since playback started, or nil when not
+    /// playing / before the render clock is valid. Monotonic and continuous across back-to-back
+    /// `play(_:times:)` buffers and `loopForever` (it does NOT wrap at the buffer boundary), so a
+    /// caller wanting a within-buffer position must modulo by the buffer length itself.
+    public var currentSampleTime: AVAudioFramePosition? {
+        guard started, player.isPlaying,
+              let nodeTime = player.lastRenderTime,
+              let playerTime = player.playerTime(forNodeTime: nodeTime) else { return nil }
+        return playerTime.sampleTime
+    }
 }
