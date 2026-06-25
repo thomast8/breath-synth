@@ -14,6 +14,7 @@ public final class AssetLibrary {
     private var grainPoolCache: [String: [[Float]]] = [:]
     private var corePoolCache: [String: [[Float]]] = [:]
     private var gapPoolCache: [String: [Int]] = [:]
+    private var fingerprintCache: [String: String] = [:]
 
     public init(baseURL: URL, manifest: BreathManifest, sampleRate: Double = AudioConstants.workingSampleRate) {
         self.baseURL = baseURL
@@ -25,12 +26,14 @@ public final class AssetLibrary {
     public func sourceClips(
         style: BreathStyle,
         type: BreathType,
-        rng: inout SeededRNG
+        rng: inout SeededRNG,
+        acceptedOneShot: Set<String>? = nil
     ) throws -> BreathSourceClips {
         guard let palette = manifest.palette(style: style, type: type) else {
             throw BreathError.missingStyle(style, type)
         }
-        let oneShot = try loadOptional(palette.oneShot, style: style, type: type, role: .oneShot, rng: &rng)
+        let oneShot = try loadOptional(palette.oneShot, style: style, type: type, role: .oneShot,
+                                       rng: &rng, acceptedOneShot: acceptedOneShot)
         return BreathSourceClips(oneShot: oneShot)
     }
 
@@ -39,10 +42,12 @@ public final class AssetLibrary {
         style: BreathStyle,
         type: BreathType,
         role: BreathRole,
-        rng: inout SeededRNG
+        rng: inout SeededRNG,
+        acceptedOneShot: Set<String>?
     ) throws -> [Float]? {
         guard !assets.isEmpty else { return nil }
-        return try loadOne(assets, style: style, type: type, role: role, rng: &rng)
+        return try loadOne(assets, style: style, type: type, role: role,
+                           rng: &rng, acceptedOneShot: acceptedOneShot)
     }
 
     private func loadOne(
@@ -50,13 +55,51 @@ public final class AssetLibrary {
         style: BreathStyle,
         type: BreathType,
         role: BreathRole,
-        rng: inout SeededRNG
+        rng: inout SeededRNG,
+        acceptedOneShot: Set<String>?
     ) throws -> [Float] {
         guard !assets.isEmpty else {
             throw BreathError.emptyRole(style, type, role)
         }
-        let pick = assets.count == 1 ? assets[0] : assets[Int.random(in: 0..<assets.count, using: &rng)]
+        // Restrict the one-shot pick to the bank's accepted takes (frc/rv partial-failure tolerance).
+        // Same single seeded draw, just over the accepted subset; an empty filter (no bank, or none
+        // accepted) leaves the full list, so the no-bank pick is byte-identical.
+        var pool = assets
+        if role == .oneShot, let acceptedOneShot, !acceptedOneShot.isEmpty {
+            let filtered = assets.filter { acceptedOneShot.contains($0.file) }
+            if !filtered.isEmpty { pool = filtered }
+        }
+        let pick = pool.count == 1 ? pool[0] : pool[Int.random(in: 0..<pool.count, using: &rng)]
         return try samples(for: pick.file)
+    }
+
+    /// The set of accepted one-shot-body take filenames in the bank for `(style, type)` — the takes
+    /// the frc/rv pick is allowed to draw from. `nil` when there's no bank or no accepted body.
+    public func oneShotBodyAcceptedFiles(style: BreathStyle, type: BreathType, expectedSig: String?) -> Set<String>? {
+        guard let bank = fragmentBank(style: style, type: type, expectedSig: expectedSig) else { return nil }
+        let files = Set(bank.acceptedFragments(kind: .oneShotBody).map(\.file))
+        return files.isEmpty ? nil : files
+    }
+
+    /// A content fingerprint of the bank's accepted fragments for `(style, type)` — folded into the
+    /// render cache key so a regrade (different accept set, or a rebuilt bank) invalidates stale
+    /// buffers. `"0"` when there's no bank. Cached.
+    public func bankFingerprint(style: BreathStyle, type: BreathType, expectedSig: String?) -> String {
+        let key = "\(style)|\(type.rawValue)"
+        if let cached = fingerprintCache[key] { return cached }
+        let fingerprint: String
+        if let bank = fragmentBank(style: style, type: type, expectedSig: expectedSig) {
+            let accepted = bank.fragments
+                .filter { $0.accept }
+                .map { "\($0.file):\($0.startFrame):\($0.endFrame):\($0.kind.rawValue)" }
+                .sorted()
+                .joined(separator: ",")
+            fingerprint = String(format: "%016llx", Variation.fnv1a(bank.preparedSig + "|" + accepted))
+        } else {
+            fingerprint = "0"
+        }
+        fingerprintCache[key] = fingerprint
+        return fingerprint
     }
 
     /// Decoded mono samples for a file (cached).

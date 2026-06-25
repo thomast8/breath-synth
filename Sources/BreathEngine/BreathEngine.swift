@@ -106,7 +106,11 @@ public final class BreathEngine {
         let seed = spec.seed ?? Variation.stableSeed(for: spec)
         var rng = SeededRNG(seed: seed)
         let deltas = Variation.draw(spec.variation, rng: &rng)
-        let clips = try library.sourceClips(style: spec.style, type: spec.type, rng: &rng)
+        // frc/rv (oneShot) restrict the take pick to the bank's accepted takes; nil ⇒ no filter ⇒
+        // byte-identical pick. The same single seeded draw is used, so the stream doesn't shift.
+        let acceptedOneShot = library.oneShotBodyAcceptedFiles(style: spec.style, type: spec.type, expectedSig: bankSig)
+        let clips = try library.sourceClips(style: spec.style, type: spec.type, rng: &rng,
+                                            acceptedOneShot: acceptedOneShot)
         // Banked textured styles render from the cross-take accepted-grain pool. Loaded after the
         // take pick and drawing no RNG, so the seed stream — and thus the no-bank render — is
         // byte-identical whether or not a bank is present.
@@ -424,7 +428,10 @@ public final class BreathEngine {
 
     private func cacheKey(_ spec: BreathSpec) -> String {
         let seed = spec.seed ?? Variation.stableSeed(for: spec)
-        return sourceCachePrefix + "|" + Variation.canonicalString(spec) + "|seed:\(seed)"
+        // Fold in the bank fingerprint so a regrade (changed accept set / rebuilt bank) invalidates
+        // any stale cached buffer for this (style, type) instead of replaying pre-regrade audio.
+        let bank = library.bankFingerprint(style: spec.style, type: spec.type, expectedSig: bankSig)
+        return sourceCachePrefix + "|" + Variation.canonicalString(spec) + "|seed:\(seed)|bank:\(bank)"
     }
 
     private var sourceCachePrefix: String { "assets" }

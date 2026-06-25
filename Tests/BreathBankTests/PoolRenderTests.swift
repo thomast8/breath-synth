@@ -136,6 +136,61 @@ final class PoolRenderTests: XCTestCase {
         XCTAssertEqual(a, expected, "engine counted render equals assembleHybrid over the accepted pool")
     }
 
+    /// frc/rv (oneShot) restrict the take pick to the bank's accepted takes. The rejected take here is
+    /// distinctly LONGER (and clipped, so it's rejected): a no-bank engine sometimes renders that long
+    /// length across seeds, but the bank engine — filtered to the short accepted takes — never does.
+    func testOneShotPickRestrictedToAcceptedTakes() throws {
+        let cap = try tempDir()
+        let out = try tempDir()
+        defer {
+            try? FileManager.default.removeItem(at: cap)
+            try? FileManager.default.removeItem(at: out)
+        }
+        try AudioIO.writeMonoWAV(noise(seed: 9, count: Int(sr), amplitude: 0.001),
+                                 sampleRate: sr, to: cap.appendingPathComponent("room_tone.wav"))
+        func body(seed: UInt64, seconds: Double) -> [Float] {
+            var s = [Float](repeating: 0, count: Int(0.3 * sr))
+            s += noise(seed: seed, count: Int(seconds * sr), amplitude: 0.3)
+            s += [Float](repeating: 0, count: Int(0.3 * sr))
+            return s
+        }
+        for i in 1...3 {  // three clean, short (~4 s) accepted bodies
+            try AudioIO.writeMonoWAV(body(seed: UInt64(i), seconds: 4), sampleRate: sr,
+                                     to: cap.appendingPathComponent("frc_\(i).wav"))
+        }
+        var bad = body(seed: 4, seconds: 8)  // distinctly long, and clipped → rejected
+        for k in 2_000..<2_012 { bad[k] = 1.0 }
+        try AudioIO.writeMonoWAV(bad, sampleRate: sr, to: cap.appendingPathComponent("frc_4.wav"))
+
+        let session = CaptureSession(roomTone: "room_tone.wav", steps: [
+            .init(slug: "frc_exhale", style: "frc", type: .exhale, renderMode: .oneShot, role: "oneShotBody",
+                  reference: nil, files: ["frc_1.wav", "frc_2.wav", "frc_3.wav", "frc_4.wav"]),
+        ])
+        try session.write(to: cap.appendingPathComponent("captures.json"))
+        _ = try BankBuilder.build(capturesDir: cap, assetsDir: cap, outDir: out, builtAt: "test")
+
+        let bank = try FragmentBank.load(from: out.appendingPathComponent("fragments/frc_exhale.frags.json"))
+        XCTAssertEqual(bank.fragments.filter { !$0.accept }.map(\.file), ["frc_4.wav"])
+        XCTAssertEqual(Set(bank.acceptedFragments(kind: .oneShotBody).map(\.file)),
+                       ["frc_1.wav", "frc_2.wav", "frc_3.wav"])
+
+        func lengths(_ engine: BreathEngine) throws -> Set<Int> {
+            var lens = Set<Int>()
+            for seed: UInt64 in 0..<32 {
+                lens.insert(try engine.renderSamples(BreathSpec(type: .exhale, durationSec: 4, style: "frc", seed: seed)).count)
+            }
+            return lens
+        }
+
+        let banked = try lengths(BreathEngine.load(assetsDirectory: out))
+        try FileManager.default.removeItem(at: out.appendingPathComponent("fragments"))
+        let unbanked = try lengths(BreathEngine.load(assetsDirectory: out))
+
+        let longest = unbanked.max() ?? 0           // the long frc_4 body — only reachable without the bank
+        XCTAssertGreaterThan(longest, banked.max() ?? 0, "no-bank can draw the long rejected take")
+        XCTAssertFalse(banked.contains(longest), "the bank never renders the rejected take")
+    }
+
     /// Consecutive cycles must not be the same buffer repeated: the per-cycle golden-ratio seed makes
     /// each cycle draw an independent grain succession from the pool.
     func testSequenceCyclesDrawIndependentlyFromPool() throws {
