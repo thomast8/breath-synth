@@ -3,7 +3,8 @@
 # crucially, a copy of the breath palette so it runs without a working directory. Audio output needs
 # no special entitlement, so the bundle is a convenience (not a requirement) compared to `swift run`.
 #
-# Usage:  scripts/make-debug-app.sh   ->   builds .build/BreathDebug.app and prints how to run it.
+# Usage:  scripts/make-debug-app.sh   ->   builds dist/BreathDebug.app and prints how to run it.
+# Output lands in dist/ (not the hidden .build/) so it's visible and double-clickable in Finder.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -12,7 +13,7 @@ APP_NAME="BreathDebug"
 EXEC_NAME="breath-debug"
 PLIST="Sources/BreathDebugApp/Resources/Info.plist"
 ASSETS="Assets/breaths"
-APP_DIR=".build/${APP_NAME}.app"
+APP_DIR="dist/${APP_NAME}.app"
 
 echo "==> swift build -c release --product ${EXEC_NAME}"
 swift build -c release --product "${EXEC_NAME}"

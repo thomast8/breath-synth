@@ -256,8 +256,16 @@ public enum BreathAssembler {
         // exhale. Keep only the longest contiguous above-threshold region (the exhale) plus a short
         // decay pad, dropping the silent gap and any late transient before normalisation.
         let body = trimToMainBody(prepared, sampleRate: settings.sampleRate)
-        return normalizePeak(applyEdgeFades(body, sampleRate: settings.sampleRate))
+        var out = normalizePeak(applyEdgeFades(body, sampleRate: settings.sampleRate))
+        // A forced exhale (frc/rv) is a complete maneuver — append a short settle pause so it reads as
+        // a natural finish and doesn't jam straight into the next inhale when placed in a cycle or
+        // sequence (you wouldn't finish a full exhale and instantly draw the next breath).
+        out += [Float](repeating: 0, count: Int(oneShotSettleSec * settings.sampleRate))
+        return out
     }
+
+    /// Trailing settle pause appended to every one-shot (frc/rv) render. By-ear tunable.
+    private static let oneShotSettleSec = 0.45
 
     /// Trim a one-shot breath to its main energetic body, dropping trailing dead air and — crucially
     /// — any isolated transient that follows a short gap (a stop-knock, a vocalised "t"/"ptuh" at the
@@ -292,10 +300,22 @@ public enum BreathAssembler {
                 runStart = -1
             }
         }
-        let pad = Int(0.05 * sampleRate)
-        let end = min(samples.count, hopStart[bestEnd] + win + pad)
-        // Keep from the onset (prepareSource already trimmed the head) through the body + short pad.
-        return Array(samples[0..<end])
+        // Crop the quiet preamble that trimOuterSilence's loose 2.5% gate left in, keeping a short
+        // pre-roll so the onset transient isn't clipped. (The head was previously never cropped —
+        // `bestStart` was computed but unused — which left a long flat lead-in on frc/rv renders.)
+        let preRoll = Int(0.03 * sampleRate)
+        let start = max(0, hopStart[bestStart] - preRoll)
+        // Extend past the 5%-run end to keep the breath's natural decay, down to a low tail threshold
+        // (matching trimOuterSilence), so the one-shot tapers off as recorded instead of cutting at
+        // the main-body end. The walk stops at the silent gap, so a trailing plosive after the gap is
+        // still excluded.
+        let tailThreshold = peak * 0.025
+        var tailHop = bestEnd
+        while tailHop + 1 < hopRMS.count, hopRMS[tailHop + 1] >= tailThreshold { tailHop += 1 }
+        let tailPad = Int(0.08 * sampleRate)
+        let end = min(samples.count, hopStart[tailHop] + win + tailPad)
+        guard start < end else { return Array(samples[0..<end]) }
+        return Array(samples[start..<end])
     }
 
     /// Shared source prep for every render mode: trim the outer silence, run the single
