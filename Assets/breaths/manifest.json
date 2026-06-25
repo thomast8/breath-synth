@@ -78,7 +78,7 @@
         "start" : [],
         "loop" : [],
         "end" : [],
-        "oneShot" : [ { "file" : "recovery.aifc", "durationSec" : 8.138667, "sampleRate" : 48000, "channels" : 1 } ]
+        "oneShot" : [ { "file" : "recovery.aifc", "durationSec" : 6.68, "sampleRate" : 48000, "channels" : 1 } ]
       },
       "exhale" : {
         "start" : [],
