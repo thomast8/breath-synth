@@ -134,4 +134,35 @@ public struct FragmentBank: Codable, Sendable, Equatable {
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         try encoder.encode(self).write(to: url, options: .atomic)
     }
+
+    // MARK: - Builder/engine shared conventions
+
+    /// The flat prepared-cache filename a take's fragment samples are sliced from. The cache holds
+    /// whatever signal the bank's offsets index into — the energy-flat texture for `grain` banks, the
+    /// prepared source for `gulpCore` — written by the `breath-bank` builder and read back by the
+    /// engine. Naming lives here so builder and engine never disagree on it.
+    public static func preparedCacheName(forTake file: String) -> String {
+        (file as NSString).deletingPathExtension + ".prepared.wav"
+    }
+
+    /// A stable signature of the `prepareSource` configuration (and the room-tone profile that steers
+    /// its denoiser) the fragments were cut under. The engine refuses a bank whose `preparedSig`
+    /// doesn't match its own configuration rather than slicing offsets out of a differently-prepared
+    /// signal. Builder and engine MUST compute this identically — so it lives in the engine.
+    public static func preparedSignature(settings: AssemblerSettings, roomToneProfile: [Float]?) -> String {
+        var key = "prep1"
+        key += "|sr=\(settings.sampleRate)"
+        key += "|dn=\(settings.enableSpectralDenoise)"
+        key += "|os=\(settings.denoiseOverSubtraction)"
+        key += "|fg=\(settings.denoiseFloorGain)"
+        if let p = roomToneProfile, !p.isEmpty {
+            key += "|rp=\(Variation.fnv1a(p.map { Int(($0 * 10_000).rounded()) }.description))"
+        }
+        return String(format: "%016llx", Variation.fnv1a(key))
+    }
+}
+
+public extension Fragment {
+    /// The flat prepared-cache filename this fragment's samples are sliced from.
+    var preparedCacheFile: String { FragmentBank.preparedCacheName(forTake: file) }
 }

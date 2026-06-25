@@ -16,10 +16,15 @@ public struct CaptureSession: Codable, Sendable {
         public var reference: String?
         /// Recorded take filenames, relative to the enrollment folder.
         public var files: [String]
+        /// Per-technique take-length bounds (seconds). A take outside the band is graded "length"
+        /// (all its fragments rejected). `nil` (older captures) disables the length gate.
+        public var minSeconds: Double?
+        public var maxSeconds: Double?
 
         public init(
             slug: String, style: String, type: BreathType, renderMode: RenderMode,
-            role: String, reference: String?, files: [String]
+            role: String, reference: String?, files: [String],
+            minSeconds: Double? = nil, maxSeconds: Double? = nil
         ) {
             self.slug = slug
             self.style = style
@@ -28,6 +33,8 @@ public struct CaptureSession: Codable, Sendable {
             self.role = role
             self.reference = reference
             self.files = files
+            self.minSeconds = minSeconds
+            self.maxSeconds = maxSeconds
         }
     }
 

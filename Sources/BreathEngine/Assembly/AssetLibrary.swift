@@ -72,8 +72,10 @@ public final class AssetLibrary {
         return decoded
     }
 
-    /// Decode a file to mono Float32 at `targetRate`, resampling/downmixing as needed.
-    static func loadMonoSamples(url: URL, targetRate: Double) throws -> [Float] {
+    /// Decode a file to mono Float32 at `targetRate`, resampling/downmixing as needed. `nonisolated`
+    /// and `public` so the app-layer `breath-bank` builder decodes enrollment takes through the exact
+    /// same path the engine uses for its assets (no decode drift between build and render).
+    public nonisolated static func loadMonoSamples(url: URL, targetRate: Double) throws -> [Float] {
         let file: AVAudioFile
         do {
             file = try AVAudioFile(forReading: url)

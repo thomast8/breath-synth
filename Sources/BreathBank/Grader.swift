@@ -68,8 +68,11 @@ public enum Grader {
 
     // MARK: - Feature extraction
 
-    /// Extract grading features from a fragment's RAW (pre-`prepareSource`) samples, so clipping is
-    /// still visible. `roomToneProfile` is this session's room-tone magnitude profile for SNR.
+    /// Extract grading features (level, spectrum, SNR, clipping, duration) from a fragment's samples.
+    /// Clipping is detected on whatever samples are passed in; the bank builder grades the *prepared /
+    /// rendered* fragment audio (so SNR and spectrum match what the engine actually plays) and supplies
+    /// the clipping verdict separately as a take-level fact — clipping is invisible post-denoise, so it
+    /// is judged once on the raw take. `roomToneProfile` is this session's room-tone profile for SNR.
     public static func features(
         raw: [Float],
         sampleRate: Double,

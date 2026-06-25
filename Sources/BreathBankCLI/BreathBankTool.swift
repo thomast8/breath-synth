@@ -1,5 +1,6 @@
 import ArgumentParser
 import BreathBank
+import BreathEngine
 import Foundation
 
 @main
@@ -26,14 +27,19 @@ extension BreathBankTool {
         @Option(name: .long, help: "Output dir for the v2 manifest + fragments/ sidecars + prepared caches.")
         var out: String
 
+        @Flag(name: .long, help: "Disable spectral denoise during source prep (matches an engine run with it off).")
+        var noDenoise = false
+
         func run() throws {
-            let url = URL(fileURLWithPath: captures).appendingPathComponent("captures.json")
-            let session = try CaptureSession.load(from: url)
-            print("Loaded \(session.steps.count) steps (room tone: \(session.roomTone ?? "none"))")
-            for step in session.steps {
-                print("  \(step.slug): \(step.files.count) take(s), role=\(step.role), ref=\(step.reference ?? "—")")
-            }
-            print("Grading + bank emission land in the next step of PR4.")
+            var settings = AssemblerSettings()
+            if noDenoise { settings.enableSpectralDenoise = false }
+            let summary = try BankBuilder.build(
+                capturesDir: URL(fileURLWithPath: captures),
+                assetsDir: URL(fileURLWithPath: assets),
+                outDir: URL(fileURLWithPath: out),
+                settings: settings
+            )
+            print(summary.description)
         }
     }
 }

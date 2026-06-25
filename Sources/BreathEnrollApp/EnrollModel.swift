@@ -182,7 +182,8 @@ final class EnrollModel {
         let sessionSteps = steps.map { step in
             CaptureSession.Step(
                 slug: step.slug, style: step.style, type: step.type, renderMode: step.renderMode,
-                role: step.role, reference: step.reference, files: captured[step.slug] ?? []
+                role: step.role, reference: step.reference, files: captured[step.slug] ?? [],
+                minSeconds: step.minSeconds, maxSeconds: step.maxSeconds
             )
         }
         let session = CaptureSession(roomTone: roomToneFile, steps: sessionSteps)
