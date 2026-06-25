@@ -1,6 +1,8 @@
 # SwiftPM
 .build/
 .swiftpm/
+# Bundled debug .app output (scripts/make-debug-app.sh) — visible in Finder, not committed.
+dist/
 # Package.resolved is committed to pin the dependency graph (this package ships an executable).
 
 # Xcode

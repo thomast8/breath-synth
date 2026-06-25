@@ -14,7 +14,7 @@ swift test                         # needs the Xcode toolchain (XCTest is absent
                                    # DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test
 swift run breath <subcommand> ...  # CLI: render | play | cycle | sequence
 swift run breath-debug             # SwiftUI debug app (reads ./Assets/breaths)
-bash scripts/make-debug-app.sh     # → .build/BreathDebug.app (bundles the palette, ad-hoc signed)
+bash scripts/make-debug-app.sh     # → dist/BreathDebug.app (visible in Finder; bundles palette, ad-hoc signed)
 ```
 
 Platform is **macOS/iOS 26** (so `@Observable`, modern Accelerate, etc. are available). Working sample
