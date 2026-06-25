@@ -75,6 +75,67 @@ final class PoolRenderTests: XCTestCase {
         XCTAssertNotEqual(pooled, single, "the cross-take grain pool renders differently from the single-take loop")
     }
 
+    /// Packing renders from the banked cross-take core + cadence pools. Rigorous + hermetic: the
+    /// engine's render must equal `assembleHybrid` over the bank's accepted cores (re-cut + declicked
+    /// from the cache, exactly as `AssetLibrary.gulpCorePool` does) and accepted gaps, with the
+    /// engine's master gain applied — proving the counted path assembles from the graded pool, not the
+    /// raw take.
+    func testPackingRendersFromBankPoolMatchingAssembleHybrid() throws {
+        let cap = try tempDir()
+        let out = try tempDir()
+        defer {
+            try? FileManager.default.removeItem(at: cap)
+            try? FileManager.default.removeItem(at: out)
+        }
+        try AudioIO.writeMonoWAV(noise(seed: 9, count: Int(sr), amplitude: 0.001),
+                                 sampleRate: sr, to: cap.appendingPathComponent("room_tone.wav"))
+        // Identical bursts so every core/gap is graded-accepted: the faithful-reconstruction property
+        // (bank pool == full single-take set) holds only when grading rejects nothing. (Grading's
+        // filtering of bad fragments is covered separately in BankBuilderTests.)
+        func packing(seed: UInt64, gapSec: Double) -> [Float] {
+            var sig = [Float]()
+            for _ in 0..<8 {
+                sig += noise(seed: seed, count: Int(0.1 * sr), amplitude: 0.4)
+                sig += [Float](repeating: 0, count: Int(gapSec * sr))
+            }
+            return sig
+        }
+        try AudioIO.writeMonoWAV(packing(seed: 10, gapSec: 0.6), sampleRate: sr,
+                                 to: cap.appendingPathComponent("pack_sep.wav"))
+        try AudioIO.writeMonoWAV(packing(seed: 20, gapSec: 0.4), sampleRate: sr,
+                                 to: cap.appendingPathComponent("pack_cad.wav"))
+        let session = CaptureSession(roomTone: "room_tone.wav", steps: [
+            .init(slug: "packing_separated", style: "packing", type: .inhale, renderMode: .counted,
+                  role: "cores", reference: nil, files: ["pack_sep.wav"]),
+            .init(slug: "packing_cadence", style: "packing", type: .inhale, renderMode: .counted,
+                  role: "gaps", reference: nil, files: ["pack_cad.wav"]),
+        ])
+        try session.write(to: cap.appendingPathComponent("captures.json"))
+        _ = try BankBuilder.build(capturesDir: cap, assetsDir: cap, outDir: out, builtAt: "test")
+
+        let engine = try BreathEngine.load(assetsDirectory: out)
+        let a = try engine.renderCountedSamples(style: "packing", type: .inhale, count: 12, seed: 7)
+        let b = try engine.renderCountedSamples(style: "packing", type: .inhale, count: 12, seed: 7)
+        XCTAssertEqual(a, b, "same seed → identical pooled hybrid render")
+
+        // Reconstruct the expected render from the bank pool exactly as the engine's counted path does:
+        // accepted cores re-cut + declicked from the cache, accepted gaps in order, assembleHybrid at
+        // the same seed, then the engine's master gain (masterGain 1.0 · headroom -1 dB) and clamp.
+        let bank = try FragmentBank.load(from: out.appendingPathComponent("fragments/packing_inhale.frags.json"))
+        let cache = try AudioIO.decodeMono(url: out.appendingPathComponent("pack_sep.prepared.wav"))
+        let cores = bank.acceptedFragments(kind: .gulpCore).map {
+            UnitExtractor.declickedCore(Array(cache[$0.startFrame..<$0.endFrame]), sampleRate: sr)
+        }
+        let gaps = bank.acceptedFragments(kind: .gap).compactMap(\.gapToNext).filter { $0 > 0 }
+        XCTAssertFalse(cores.isEmpty)
+        XCTAssertFalse(gaps.isEmpty)
+        var expected = BreathAssembler.assembleHybrid(cores: cores, gaps: gaps, count: 12,
+                                                      settings: AssemblerSettings(), seed: 7)
+        let gain = Float(Variation.dbToGain(-1.0))
+        expected = expected.map { min(1, max(-1, $0 * gain)) }
+        XCTAssertEqual(a, expected, "engine counted render equals assembleHybrid over the accepted pool")
+    }
+
     /// Consecutive cycles must not be the same buffer repeated: the per-cycle golden-ratio seed makes
     /// each cycle draw an independent grain succession from the pool.
     func testSequenceCyclesDrawIndependentlyFromPool() throws {

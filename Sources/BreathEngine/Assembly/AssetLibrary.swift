@@ -12,6 +12,8 @@ public final class AssetLibrary {
     private var cache: [String: [Float]] = [:]
     private var bankCache: [String: FragmentBank?] = [:]
     private var grainPoolCache: [String: [[Float]]] = [:]
+    private var corePoolCache: [String: [[Float]]] = [:]
+    private var gapPoolCache: [String: [Int]] = [:]
 
     public init(baseURL: URL, manifest: BreathManifest, sampleRate: Double = AudioConstants.workingSampleRate) {
         self.baseURL = baseURL
@@ -117,6 +119,43 @@ public final class AssetLibrary {
         }
         grainPoolCache[key] = pool
         return pool.isEmpty ? nil : pool
+    }
+
+    /// The accepted gulp-core pool for a counted/hybrid `(style, type)`: each accepted `gulpCore`
+    /// fragment re-cut and declicked from its take's prepared cache, exactly as the engine would
+    /// render it. `nil` when there's no usable bank or no accepted core. Cached.
+    public func gulpCorePool(style: BreathStyle, type: BreathType, expectedSig: String?) -> [[Float]]? {
+        let key = "\(style)|\(type.rawValue)"
+        if let cached = corePoolCache[key] { return cached.isEmpty ? nil : cached }
+        guard let bank = fragmentBank(style: style, type: type, expectedSig: expectedSig) else {
+            corePoolCache[key] = []
+            return nil
+        }
+        var cores: [[Float]] = []
+        for fragment in bank.acceptedFragments(kind: .gulpCore) {
+            guard let signal = try? samples(for: fragment.preparedCacheFile),
+                  fragment.startFrame >= 0, fragment.startFrame < fragment.endFrame,
+                  fragment.endFrame <= signal.count else { continue }
+            cores.append(UnitExtractor.declickedCore(Array(signal[fragment.startFrame..<fragment.endFrame]),
+                                                     sampleRate: sampleRate))
+        }
+        corePoolCache[key] = cores
+        return cores.isEmpty ? nil : cores
+    }
+
+    /// The accepted inter-onset rhythm-gap pool (sample counts) for a counted/hybrid `(style, type)`,
+    /// in the bank's stable order — the cadence cores are laid out at. `nil` when there's no usable
+    /// bank or no accepted gap. Cached.
+    public func rhythmGapPool(style: BreathStyle, type: BreathType, expectedSig: String?) -> [Int]? {
+        let key = "\(style)|\(type.rawValue)"
+        if let cached = gapPoolCache[key] { return cached.isEmpty ? nil : cached }
+        guard let bank = fragmentBank(style: style, type: type, expectedSig: expectedSig) else {
+            gapPoolCache[key] = []
+            return nil
+        }
+        let gaps = bank.acceptedFragments(kind: .gap).compactMap(\.gapToNext).filter { $0 > 0 }
+        gapPoolCache[key] = gaps
+        return gaps.isEmpty ? nil : gaps
     }
 
     /// Decode a file to mono Float32 at `targetRate`, resampling/downmixing as needed. `nonisolated`

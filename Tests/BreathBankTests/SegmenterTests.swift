@@ -97,7 +97,7 @@ final class SegmenterTests: XCTestCase {
 
     // MARK: - gaps → cadence intervals
 
-    func testGapsAreRhythmIntervalsWithNoAudio() {
+    func testGapsAreRhythmIntervalsWithNoAudio() throws {
         var sig = [Float]()
         for i in 0..<6 {
             sig += noise(seed: UInt64(200 + i), count: Int(0.1 * sr), amplitude: 0.4)
@@ -107,12 +107,15 @@ final class SegmenterTests: XCTestCase {
                                     settings: settings, roomToneProfile: nil)
         XCTAssertNil(out.cacheSignal)
         XCTAssertGreaterThanOrEqual(out.fragments.count, 3)
+        var lastStart = -1
         for f in out.fragments {
             XCTAssertEqual(f.kind, .gap)
             XCTAssertTrue(f.audio.isEmpty)
-            XCTAssertEqual(f.startFrame, 0)
-            XCTAssertEqual(f.endFrame, 0)
-            XCTAssertGreaterThan(try XCTUnwrap(f.gapToNext), 0)
+            let gap = try XCTUnwrap(f.gapToNext)
+            XCTAssertGreaterThan(gap, 0)
+            XCTAssertEqual(f.endFrame, f.startFrame + gap)
+            XCTAssertGreaterThan(f.startFrame, lastStart, "onset offsets increase so the cadence order survives a stable sort")
+            lastStart = f.startFrame
         }
     }
 }

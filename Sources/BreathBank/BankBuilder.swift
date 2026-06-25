@@ -52,6 +52,7 @@ public enum BankBuilder {
         assetsDir: URL,
         outDir: URL,
         settings: AssemblerSettings = AssemblerSettings(),
+        thresholds: Grader.Thresholds = .default,
         builtAt: String = ISO8601DateFormatter().string(from: Date())
     ) throws -> BuildSummary {
         let fm = FileManager.default
@@ -114,7 +115,7 @@ public enum BankBuilder {
                 takesToWrite[outName] = raw
                 group.record(takeName: outName, role: step.role)
 
-                let clipped = Grader.clippingRun(raw, peak: settings_clipPeak, minRun: settings_clipRun)
+                let clipped = Grader.clippingRun(raw, peak: thresholds.clipPeak, minRun: thresholds.clipRunSamples)
                 let durationSec = Double(raw.count) / sr
                 let lengthOK = lengthWithinBounds(durationSec, min: step.minSeconds, max: step.maxSeconds)
 
@@ -130,7 +131,8 @@ public enum BankBuilder {
                     if fragment.kind == .gap {
                         features = nil
                     } else {
-                        var f = Grader.features(raw: fragment.audio, sampleRate: sr, roomToneProfile: roomProfile)
+                        var f = Grader.features(raw: fragment.audio, sampleRate: sr,
+                                                roomToneProfile: roomProfile, thresholds: thresholds)
                         f.clipped = clipped   // clipping is a take-level verdict, not a fragment one
                         features = f
                     }
@@ -141,8 +143,10 @@ public enum BankBuilder {
             // Pass 2: grade each fragment against its siblings and append to the group's bank.
             for rec in records {
                 if rec.raw.kind == .gap {
+                    // Keep the segmenter's monotonic onset offsets so the bank's stable
+                    // `(file, startFrame)` order replays the recorded cadence sequence.
                     group.fragments.append(Fragment(
-                        file: rec.outName, startFrame: 0, endFrame: 0, kind: .gap,
+                        file: rec.outName, startFrame: rec.raw.startFrame, endFrame: rec.raw.endFrame, kind: .gap,
                         accept: true, gapToNext: rec.raw.gapToNext
                     ))
                     continue
@@ -150,7 +154,7 @@ public enum BankBuilder {
                 guard let features = rec.features else { continue }
                 let verdict = Grader.grade(
                     features, siblings: siblings(for: rec, in: records),
-                    gold: refProfile, lengthOK: rec.lengthOK
+                    gold: refProfile, lengthOK: rec.lengthOK, thresholds: thresholds
                 )
                 group.fragments.append(Fragment(
                     file: rec.outName, startFrame: rec.raw.startFrame, endFrame: rec.raw.endFrame,
@@ -290,10 +294,6 @@ public enum BankBuilder {
         for i in 0..<n { acc[i] *= inv }
         return acc
     }
-
-    // Grader thresholds the builder needs directly (clipping is judged on the raw take).
-    private static let settings_clipPeak = Grader.Thresholds.default.clipPeak
-    private static let settings_clipRun = Grader.Thresholds.default.clipRunSamples
 
     // MARK: - Manifest assembly
 

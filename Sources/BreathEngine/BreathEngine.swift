@@ -192,7 +192,15 @@ public final class BreathEngine {
         let sr = config.sampleRate
         var body: [Float]
 
-        if palette.oneShot.count >= 2 {
+        if let cores = library.gulpCorePool(style: style, type: type, expectedSig: bankSig),
+           let gaps = library.rhythmGapPool(style: style, type: type, expectedSig: bankSig) {
+            // Banked hybrid: cross-take accepted gulp cores laid out at the pooled cadence. Seeded by
+            // `resolvedSeed`, so identical to the single-take hybrid in shape but drawing from the full
+            // graded pool. No bank ⇒ the pools are nil and we fall through to the take-based paths,
+            // which stay byte-identical.
+            let n = count ?? (gaps.count + 1)
+            body = BreathAssembler.assembleHybrid(cores: cores, gaps: gaps, count: n, settings: config.settings, seed: resolvedSeed)
+        } else if palette.oneShot.count >= 2 {
             // Hybrid: cores from take 0 (separated packs), rhythm from take 1 (natural cadence).
             let coreSrc = BreathAssembler.prepareSource(
                 try library.samples(for: palette.oneShot[0].file), settings: config.settings, noiseProfile: noiseProfile)

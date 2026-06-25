@@ -77,8 +77,16 @@ public enum Segmenter {
         case "cores":
             return gulpCoreFragments(prepared: prepared, sampleRate: sr)
         case "gaps":
+            // Carry a monotonically increasing onset position as the fragment offset so the bank's
+            // stable `(file, startFrame)` order preserves the recorded cadence sequence. (Storing 0
+            // for every gap would let the non-stable sort scramble the rhythm.)
             let gaps = UnitExtractor.rhythmGaps(from: prepared, sampleRate: sr)
-            let frags = gaps.map { Raw(startFrame: 0, endFrame: 0, kind: .gap, audio: [], gapToNext: $0) }
+            var frags: [Raw] = []
+            var cursor = 0
+            for gap in gaps {
+                frags.append(Raw(startFrame: cursor, endFrame: cursor + gap, kind: .gap, audio: [], gapToNext: gap))
+                cursor += gap
+            }
             return Output(cacheSignal: nil, fragments: frags)
         default:
             return Output(cacheSignal: nil, fragments: [])

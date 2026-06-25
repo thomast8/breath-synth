@@ -30,14 +30,20 @@ extension BreathBankTool {
         @Flag(name: .long, help: "Disable spectral denoise during source prep (matches an engine run with it off).")
         var noDenoise = false
 
+        @Option(name: .long, help: "Sibling-anomaly robust-z (MAD) cutoff; higher keeps more fragments. Default 3.5.")
+        var madK: Double?
+
         func run() throws {
             var settings = AssemblerSettings()
             if noDenoise { settings.enableSpectralDenoise = false }
+            var thresholds = Grader.Thresholds.default
+            if let madK { thresholds.madK = madK }
             let summary = try BankBuilder.build(
                 capturesDir: URL(fileURLWithPath: captures),
                 assetsDir: URL(fileURLWithPath: assets),
                 outDir: URL(fileURLWithPath: out),
-                settings: settings
+                settings: settings,
+                thresholds: thresholds
             )
             print(summary.description)
         }
