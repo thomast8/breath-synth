@@ -15,6 +15,8 @@ struct WaveformView: View {
     var transients: [Double] = []
     /// Playhead position as a fraction 0...1 of the width, or nil for no playhead.
     var progress: Double? = nil
+    /// Buffer duration (s), used to label the playhead with its exact time.
+    var duration: Double = 0
 
     var body: some View {
         Canvas { context, size in
@@ -60,14 +62,8 @@ struct WaveformView: View {
                 context.stroke(tick, with: .color(.purple.opacity(0.9)), lineWidth: 1.5)
             }
 
-            // Playhead — drawn last so it sits on top of the wave.
-            if let progress {
-                let x = size.width * CGFloat(min(max(progress, 0), 1))
-                var head = Path()
-                head.move(to: CGPoint(x: x, y: 0))
-                head.addLine(to: CGPoint(x: x, y: size.height))
-                context.stroke(head, with: .color(.red.opacity(0.9)), lineWidth: 1.5)
-            }
+            // Playhead + its exact time, drawn last so it sits on top (shared with the spectrogram).
+            drawPlayhead(in: context, size: size, progress: progress, duration: duration)
         }
         .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
         .overlay {
@@ -78,6 +74,33 @@ struct WaveformView: View {
             }
         }
     }
+}
+
+/// Draws the red playhead line plus a "x.xxs" time label at `progress` (fraction 0...1) within `size`.
+/// Shared by the waveform and the spectrogram so both show the head and its exact time, aligned.
+@MainActor
+func drawPlayhead(in context: GraphicsContext, size: CGSize, progress: Double?, duration: Double) {
+    guard let progress else { return }
+    let x = size.width * CGFloat(min(max(progress, 0), 1))
+    var line = Path()
+    line.move(to: CGPoint(x: x, y: 0))
+    line.addLine(to: CGPoint(x: x, y: size.height))
+    context.stroke(line, with: .color(.red.opacity(0.9)), lineWidth: 1.5)
+
+    guard duration > 0 else { return }
+    let label = context.resolve(
+        Text(String(format: "%.2fs", progress * duration))
+            .font(.system(size: 9, weight: .semibold, design: .monospaced))
+            .foregroundStyle(.white)
+    )
+    let textSize = label.measure(in: size)
+    let pad: CGFloat = 3
+    let boxWidth = textSize.width + pad * 2
+    // Put the label on whichever side of the line has room.
+    let labelX = (x + 4 + boxWidth <= size.width) ? x + 4 : x - 4 - boxWidth
+    let box = CGRect(x: max(0, labelX), y: 1, width: boxWidth, height: textSize.height + 2)
+    context.fill(Path(roundedRect: box, cornerRadius: 3), with: .color(.red.opacity(0.85)))
+    context.draw(label, at: CGPoint(x: box.minX + pad, y: box.minY + 1), anchor: .topLeading)
 }
 
 /// A compact time ruler (seconds) spanning the same width as the waveform / spectrogram, so the

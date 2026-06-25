@@ -224,15 +224,21 @@ struct ContentView: View {
     /// The waveform, animated with a live playhead only while audio is running. Gating the
     /// `TimelineView` on phase means no redraw ticks (zero CPU) when idle, and no retained timer.
     @ViewBuilder private var waveform: some View {
+        animatedWhilePlaying {
+            WaveformView(peaks: model.waveform, boundaries: model.boundaries,
+                         transients: model.transients, progress: model.displayProgress,
+                         duration: model.stats?.durationSec ?? 0)
+        }
+    }
+
+    /// Refresh `content` ~display-rate while audio runs (so the playhead sweeps), static otherwise —
+    /// no timer, zero CPU when idle.
+    @ViewBuilder private func animatedWhilePlaying<Content: View>(@ViewBuilder _ content: @escaping () -> Content) -> some View {
         switch model.phase {
         case .playing, .looping:
-            TimelineView(.animation) { _ in
-                WaveformView(peaks: model.waveform, boundaries: model.boundaries,
-                             transients: model.transients, progress: model.displayProgress)
-            }
+            TimelineView(.animation) { _ in content() }
         default:
-            WaveformView(peaks: model.waveform, boundaries: model.boundaries,
-                         transients: model.transients, progress: model.displayProgress)
+            content()
         }
     }
 
@@ -256,12 +262,21 @@ struct ContentView: View {
     /// onsets, so a glottal stop is visible as a vertical streak here and a flux tick above.
     private func spectrogramView(_ image: CGImage) -> some View {
         VStack(alignment: .leading, spacing: 2) {
-            Image(decorative: image, scale: 1)
-                .resizable()
-                .interpolation(.low)
-                .frame(height: 150)
-                .frame(maxWidth: .infinity)
-                .clipShape(RoundedRectangle(cornerRadius: 6))
+            animatedWhilePlaying {
+                Image(decorative: image, scale: 1)
+                    .resizable()
+                    .interpolation(.low)
+                    .frame(height: 150)
+                    .frame(maxWidth: .infinity)
+                    .overlay {
+                        Canvas { context, size in
+                            drawPlayhead(in: context, size: size,
+                                         progress: model.displayProgress,
+                                         duration: model.stats?.durationSec ?? 0)
+                        }
+                    }
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+            }
             Text("0–10 kHz (low at bottom) · brighter = louder · vertical streak = transient / glottal")
                 .font(.caption2).foregroundStyle(.tertiary)
         }
