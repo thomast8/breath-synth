@@ -256,8 +256,16 @@ public enum BreathAssembler {
         // exhale. Keep only the longest contiguous above-threshold region (the exhale) plus a short
         // decay pad, dropping the silent gap and any late transient before normalisation.
         let body = trimToMainBody(prepared, sampleRate: settings.sampleRate)
-        return normalizePeak(applyEdgeFades(body, sampleRate: settings.sampleRate))
+        var out = normalizePeak(applyEdgeFades(body, sampleRate: settings.sampleRate))
+        // A forced exhale (frc/rv) is a complete maneuver — append a short settle pause so it reads as
+        // a natural finish and doesn't jam straight into the next inhale when placed in a cycle or
+        // sequence (you wouldn't finish a full exhale and instantly draw the next breath).
+        out += [Float](repeating: 0, count: Int(oneShotSettleSec * settings.sampleRate))
+        return out
     }
+
+    /// Trailing settle pause appended to every one-shot (frc/rv) render. By-ear tunable.
+    private static let oneShotSettleSec = 0.45
 
     /// Trim a one-shot breath to its main energetic body, dropping trailing dead air and — crucially
     /// — any isolated transient that follows a short gap (a stop-knock, a vocalised "t"/"ptuh" at the

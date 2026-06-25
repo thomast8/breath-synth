@@ -24,14 +24,16 @@ final class OneShotAssemblerTests: XCTestCase {
             type: .exhale, durationSec: 3, clips: toneBurstClips(), settings: settings, mode: .oneShot
         )
 
-        // `prepareSource` trims the trailing silence, so the natural length is ~the 0.5 s tone
-        // plus the ~0.1 s trim pad — far short of the 3 s of frames a textured render would loop
-        // to fill, and close to a SINGLE copy of the tone (no looped repetition).
+        // `prepareSource` trims the trailing silence, so the audible length is ~the 0.5 s tone plus
+        // the ~0.1 s trim pad — far short of the 3 s a textured render would loop to fill, and close
+        // to a SINGLE copy of the tone (no looped repetition). A fixed settle pause is then appended.
+        let settle = Int(0.45 * sr)
         let threeSecFrames = Int((3 * sr).rounded())
         XCTAssertLessThan(out.count, threeSecFrames / 2, "one-shot should ignore the 3 s duration")
         XCTAssertGreaterThan(out.count, Int(0.4 * sr), "one-shot should keep the natural tone length")
-        XCTAssertLessThan(out.count, Int(0.8 * sr), "natural length is ~one copy of the tone, not a looped fill")
+        XCTAssertLessThan(out.count - settle, Int(0.8 * sr), "audible length is ~one copy of the tone, not a looped fill")
         XCTAssertGreaterThan(rms(out), 0.01, "the tone should be audible")
+        XCTAssertLessThan(rms(Array(out.suffix(Int(0.3 * sr)))), 1e-6, "ends with a silent settle pause")
     }
 
     /// One-shot trimming crops the quiet leading preamble (the head) but keeps the recording's quiet
