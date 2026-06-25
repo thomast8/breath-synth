@@ -288,6 +288,15 @@ public final class BreathEngine {
         player?.stop()
     }
 
+    /// Pause / resume the current playback (debug tooling). No-op when nothing is playing.
+    public func pause() { player?.pause() }
+    public func resume() { player?.resume() }
+
+    /// Play `buffer` once from a frame offset (a seek). See `BreathPlayer.play(_:fromFrame:)`.
+    public func play(_ buffer: AVAudioPCMBuffer, fromFrame startFrame: AVAudioFramePosition) async throws {
+        try await playerInstance().play(buffer, fromFrame: startFrame)
+    }
+
     /// Current playback position in frames since playback started, or nil when nothing is playing.
     /// Used by debug tooling to drive a playhead; see `BreathPlayer.currentSampleTime` for semantics
     /// (monotonic, does not wrap on loop — the caller modulos by the displayed buffer length).
