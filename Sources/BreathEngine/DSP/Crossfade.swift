@@ -85,4 +85,39 @@ public enum Crossfade {
         }
         return out
     }
+
+    /// Build a sustain of exactly `targetLen` frames by drawing grains from a *pool* of pre-cut
+    /// texture windows (one per slot, seeded), instead of random offsets into a single texture.
+    /// This is the cross-take variant of `assembleTexturedLoop`: the pool spans grains from every
+    /// accepted take, so even one long breath mixes genuinely different material — and a given seed
+    /// always draws the same grain succession, so cycles re-seed to decorrelate reproducibly.
+    /// Grains are expected to be ~`grainLen` long; an over-long grain is trimmed. An empty pool
+    /// yields silence.
+    public static func assembleTexturedFromPool(
+        grains: [[Float]],
+        targetLen: Int,
+        grainLen: Int,
+        crossfadeLen: Int,
+        rng: inout SeededRNG
+    ) -> [Float] {
+        let pool = grains.filter { !$0.isEmpty }
+        guard !pool.isEmpty, targetLen > 0 else {
+            return [Float](repeating: 0, count: max(0, targetLen))
+        }
+        let grain = max(2, grainLen)
+        let x = max(0, min(crossfadeLen, grain - 1))
+        let stride = max(1, grain - x)
+
+        var out = [Float](repeating: 0, count: targetLen)
+        var pos = 0
+        var k = 0
+        while pos < targetLen {
+            var pick = pool[Int.random(in: 0..<pool.count, using: &rng)]
+            if pick.count > grain { pick = Array(pick[0..<grain]) }
+            place(into: &out, segment: pick, at: pos, headCrossfade: k == 0 ? 0 : x)
+            pos += stride
+            k += 1
+        }
+        return out
+    }
 }
