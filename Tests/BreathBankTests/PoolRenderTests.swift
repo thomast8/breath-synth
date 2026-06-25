@@ -80,6 +80,50 @@ final class PoolRenderTests: XCTestCase {
     /// from the cache, exactly as `AssetLibrary.gulpCorePool` does) and accepted gaps, with the
     /// engine's master gain applied — proving the counted path assembles from the graded pool, not the
     /// raw take.
+    /// A banked counted render with no explicit count must default to ONE cadence take's worth of
+    /// gulps, not the pooled cross-take total (which would scale the breath with the take count).
+    func testBankedCountedDefaultIsOneTakeNotPooledTotal() throws {
+        let cap = try tempDir()
+        let out = try tempDir()
+        defer {
+            try? FileManager.default.removeItem(at: cap)
+            try? FileManager.default.removeItem(at: out)
+        }
+        try AudioIO.writeMonoWAV(noise(seed: 9, count: Int(sr), amplitude: 0.001),
+                                 sampleRate: sr, to: cap.appendingPathComponent("room_tone.wav"))
+        func packing(seed: UInt64) -> [Float] {
+            var sig = [Float]()
+            for _ in 0..<8 {
+                sig += noise(seed: seed, count: Int(0.1 * sr), amplitude: 0.4)
+                sig += [Float](repeating: 0, count: Int(0.5 * sr))
+            }
+            return sig
+        }
+        try AudioIO.writeMonoWAV(packing(seed: 10), sampleRate: sr, to: cap.appendingPathComponent("pack_sep.wav"))
+        try AudioIO.writeMonoWAV(packing(seed: 20), sampleRate: sr, to: cap.appendingPathComponent("pack_cad1.wav"))
+        try AudioIO.writeMonoWAV(packing(seed: 30), sampleRate: sr, to: cap.appendingPathComponent("pack_cad2.wav"))
+        let session = CaptureSession(roomTone: "room_tone.wav", steps: [
+            .init(slug: "packing_separated", style: "packing", type: .inhale, renderMode: .counted,
+                  role: "cores", reference: nil, files: ["pack_sep.wav"]),
+            .init(slug: "packing_cadence", style: "packing", type: .inhale, renderMode: .counted,
+                  role: "gaps", reference: nil, files: ["pack_cad1.wav", "pack_cad2.wav"]),
+        ])
+        try session.write(to: cap.appendingPathComponent("captures.json"))
+        _ = try BankBuilder.build(capturesDir: cap, assetsDir: cap, outDir: out, builtAt: "test")
+
+        let bank = try FragmentBank.load(from: out.appendingPathComponent("fragments/packing_inhale.frags.json"))
+        let perTake = Dictionary(grouping: bank.acceptedFragments(kind: .gap), by: \.file).mapValues(\.count)
+        let totalGaps = bank.acceptedFragments(kind: .gap).count
+        XCTAssertGreaterThan(perTake.count, 1, "two cadence takes pooled")
+
+        let manifest = try BreathManifest.load(from: out.appendingPathComponent("manifest.json"))
+        let library = AssetLibrary(baseURL: out, manifest: manifest)
+        let defaultEvents = try XCTUnwrap(library.defaultCountedEvents(style: "packing", type: .inhale, expectedSig: nil))
+        XCTAssertLessThan(defaultEvents, totalGaps + 1, "default must not be the pooled cross-take total")
+        let median = perTake.values.sorted()[perTake.count / 2]
+        XCTAssertEqual(defaultEvents, median + 1, "default is one cadence take's worth of gulps")
+    }
+
     func testPackingRendersFromBankPoolMatchingAssembleHybrid() throws {
         let cap = try tempDir()
         let out = try tempDir()

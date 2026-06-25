@@ -201,8 +201,11 @@ public final class BreathEngine {
             // Banked hybrid: cross-take accepted gulp cores laid out at the pooled cadence. Seeded by
             // `resolvedSeed`, so identical to the single-take hybrid in shape but drawing from the full
             // graded pool. No bank ⇒ the pools are nil and we fall through to the take-based paths,
-            // which stay byte-identical.
-            let n = count ?? (gaps.count + 1)
+            // which stay byte-identical. A nil count defaults to ONE cadence take's worth of gulps, not
+            // the pooled cross-take total (which would scale the breath with the number of takes).
+            let n = count
+                ?? library.defaultCountedEvents(style: style, type: type, expectedSig: bankSig)
+                ?? (gaps.count + 1)
             body = BreathAssembler.assembleHybrid(cores: cores, gaps: gaps, count: n, settings: config.settings, seed: resolvedSeed)
         } else if palette.oneShot.count >= 2 {
             // Hybrid: cores from take 0 (separated packs), rhythm from take 1 (natural cadence).

@@ -54,6 +54,21 @@ final class CrossfadePoolTests: XCTestCase {
         for value in body { XCTAssertGreaterThanOrEqual(value, 1 - 1e-4) }
     }
 
+    func testShortGrainsLeaveNoSilentGaps() {
+        // A pooled grain shorter than the nominal grainLen must not leave a periodic silent gap: the
+        // advance follows the *placed* length, not the fixed nominal stride. (Regression: the old
+        // fixed-stride advance left ~grainLen-grain frames of silence per slot for short grains.)
+        let pool = [constantGrain(0.5, 500)] // 500 ≪ nominal grainLen 1000
+        var rng = SeededRNG(seed: 7)
+        let body = Crossfade.assembleTexturedFromPool(grains: pool, targetLen: 5_000, grainLen: 1_000, crossfadeLen: 200, rng: &rng)
+        XCTAssertEqual(body.count, 5_000)
+        var longestZeroRun = 0, run = 0
+        for value in body[0..<4_800] { // skip the very tail, which may legitimately be unfilled
+            if value == 0 { run += 1; longestZeroRun = max(longestZeroRun, run) } else { run = 0 }
+        }
+        XCTAssertLessThan(longestZeroRun, 100, "short pooled grains must not leave periodic silence: \(longestZeroRun)")
+    }
+
     func testEmptyPoolReturnsSilence() {
         var rng = SeededRNG(seed: 1)
         let body = Crossfade.assembleTexturedFromPool(grains: [], targetLen: 500, grainLen: 1_000, crossfadeLen: 200, rng: &rng)

@@ -106,7 +106,6 @@ public enum Crossfade {
         }
         let grain = max(2, grainLen)
         let x = max(0, min(crossfadeLen, grain - 1))
-        let stride = max(1, grain - x)
 
         var out = [Float](repeating: 0, count: targetLen)
         var pos = 0
@@ -115,7 +114,10 @@ public enum Crossfade {
             var pick = pool[Int.random(in: 0..<pool.count, using: &rng)]
             if pick.count > grain { pick = Array(pick[0..<grain]) }
             place(into: &out, segment: pick, at: pos, headCrossfade: k == 0 ? 0 : x)
-            pos += stride
+            // Advance by the *actually placed* length minus the overlap, not a fixed nominal stride, so
+            // a pooled grain shorter than the nominal grain can't leave a silent gap before the next one
+            // (mirrors `assembleTexturedLoop`'s contiguity for its single, exactly-sized texture).
+            pos += max(1, pick.count - x)
             k += 1
         }
         return out

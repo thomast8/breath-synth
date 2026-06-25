@@ -201,6 +201,18 @@ public final class AssetLibrary {
         return gaps.isEmpty ? nil : gaps
     }
 
+    /// The default event count for a banked counted render when the caller passes no count: a single
+    /// cadence take's worth of gulps (median gaps-per-take + 1), NOT the pooled cross-take total —
+    /// which would balloon the breath to the number of enrollment takes. Mirrors the no-bank default
+    /// of `rhythmGaps(oneShot[1]).count + 1`. `nil` when there's no usable bank or no accepted gap.
+    public func defaultCountedEvents(style: BreathStyle, type: BreathType, expectedSig: String?) -> Int? {
+        guard let bank = fragmentBank(style: style, type: type, expectedSig: expectedSig) else { return nil }
+        let perTake = Dictionary(grouping: bank.acceptedFragments(kind: .gap), by: \.file).mapValues(\.count)
+        let counts = perTake.values.sorted()
+        guard !counts.isEmpty else { return nil }
+        return counts[counts.count / 2] + 1
+    }
+
     /// Decode a file to mono Float32 at `targetRate`, resampling/downmixing as needed. `nonisolated`
     /// and `public` so the app-layer `breath-bank` builder decodes enrollment takes through the exact
     /// same path the engine uses for its assets (no decode drift between build and render).
