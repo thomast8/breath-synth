@@ -1,6 +1,7 @@
 import AVFoundation
 import AppKit
 import BreathEngine
+import CoreGraphics
 import Foundation
 import Observation
 import UniformTypeIdentifiers
@@ -128,6 +129,12 @@ final class DebugModel {
     private(set) var phase: Phase = .idle
     private(set) var waveform: [WavePeak] = []
     private(set) var boundaries: [Double] = []
+    /// Heat-mapped STFT of the last render (low frequency at the bottom); nil until something renders.
+    private(set) var spectrogram: CGImage?
+    /// Impulsive-onset positions (fractions 0...1) from spectral flux — flags clicks / glottal stops.
+    private(set) var transients: [Double] = []
+    /// UI toggle for the spectrogram panel.
+    var showSpectrogram = true
     private(set) var stats: RenderStats?
     private(set) var planSummary: String?
     private(set) var log: [LogLine] = []
@@ -540,6 +547,16 @@ final class DebugModel {
 
         waveform = peaks
         self.boundaries = boundaries
+
+        // Spectrogram + impulsive-onset markers from the raw samples (glottal stops show as bright
+        // vertical streaks / flux peaks). Computed synchronously — fine for a debug tool at this size.
+        var raw = [Float]()
+        if frames > 0, let channel = buffer.floatChannelData?[0] {
+            raw = Array(UnsafeBufferPointer(start: channel, count: frames))
+        }
+        let spectro = Spectrogram.analyze(raw, sampleRate: sampleRate)
+        spectrogram = spectro.image
+        transients = spectro.transients
         stats = RenderStats(
             taskName: task.title,
             detail: detail,
