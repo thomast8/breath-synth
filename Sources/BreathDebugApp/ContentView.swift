@@ -34,6 +34,10 @@ struct ContentView: View {
                 .help("Render the current parameters and show the waveform (no audio)")
             Button("Play", systemImage: "play.fill") { model.play() }
                 .help("Render and play. Loops when the Loop toggle is on (cycle / sequence)")
+            Button(model.isPaused ? "Resume" : "Pause",
+                   systemImage: model.isPaused ? "play.fill" : "pause.fill") { model.pauseResume() }
+                .disabled(!model.canPause)
+                .help("Pause / resume playback")
             Button("Stop", systemImage: "stop.fill") { model.stop() }
                 .help("Stop playback")
             Button("Save WAV", systemImage: "square.and.arrow.down") { model.saveWAV() }
@@ -197,8 +201,15 @@ struct ContentView: View {
                 Toggle("Spectrogram", isOn: $model.showSpectrogram)
                     .toggleStyle(.switch).font(.caption)
             }
-            waveform
+            VStack(spacing: 2) {
+                GeometryReader { geo in
+                    waveform
+                        .contentShape(Rectangle())
+                        .gesture(scrubGesture(width: geo.size.width))
+                }
                 .frame(height: 200)
+                TimeAxisView(duration: model.stats?.durationSec ?? 0)
+            }
             if model.showSpectrogram, let image = model.spectrogram {
                 spectrogramView(image)
             }
@@ -217,12 +228,25 @@ struct ContentView: View {
         case .playing, .looping:
             TimelineView(.animation) { _ in
                 WaveformView(peaks: model.waveform, boundaries: model.boundaries,
-                             transients: model.transients, progress: model.playheadProgress)
+                             transients: model.transients, progress: model.displayProgress)
             }
         default:
             WaveformView(peaks: model.waveform, boundaries: model.boundaries,
-                         transients: model.transients, progress: nil)
+                         transients: model.transients, progress: model.displayProgress)
         }
+    }
+
+    /// Drag (or click) anywhere on the waveform to move the red playhead and seek there.
+    private func scrubGesture(width: CGFloat) -> some Gesture {
+        DragGesture(minimumDistance: 0)
+            .onChanged { value in
+                guard width > 0 else { return }
+                model.scrubFraction = min(max(Double(value.location.x / width), 0), 1)
+            }
+            .onEnded { value in
+                guard width > 0 else { return }
+                model.seek(toFraction: min(max(Double(value.location.x / width), 0), 1))
+            }
     }
 
     /// Heat-mapped STFT under the waveform, time-aligned. Purple ticks on the waveform mark the same
@@ -248,6 +272,8 @@ struct ContentView: View {
             Label("Rendering…", systemImage: "waveform").foregroundStyle(.secondary)
         case .playing:
             Label("Playing…", systemImage: "speaker.wave.2.fill").foregroundStyle(.green)
+        case .paused:
+            Label("Paused", systemImage: "pause.circle").foregroundStyle(.orange)
         case .looping:
             Label("Looping — press Stop to end", systemImage: "repeat").foregroundStyle(.green)
         case .error(let message):

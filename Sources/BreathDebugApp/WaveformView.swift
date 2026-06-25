@@ -79,3 +79,45 @@ struct WaveformView: View {
         }
     }
 }
+
+/// A compact time ruler (seconds) spanning the same width as the waveform / spectrogram, so the
+/// transient ticks and playhead can be read off in real time.
+struct TimeAxisView: View {
+    let duration: Double
+
+    var body: some View {
+        Canvas { context, size in
+            guard duration > 0, size.width > 0 else { return }
+            let step = Self.niceStep(duration)
+            var t = 0.0
+            while t <= duration + 1e-6 {
+                let x = size.width * CGFloat(t / duration)
+                var tick = Path()
+                tick.move(to: CGPoint(x: x, y: 0))
+                tick.addLine(to: CGPoint(x: x, y: 4))
+                context.stroke(tick, with: .color(.secondary.opacity(0.6)), lineWidth: 0.5)
+                let label = Text(Self.format(t)).font(.system(size: 9, design: .monospaced)).foregroundStyle(.secondary)
+                context.draw(label, at: CGPoint(x: min(x + 2, size.width - 2), y: 5), anchor: .topLeading)
+                t += step
+            }
+        }
+        .frame(height: 18)
+    }
+
+    /// Pick a tick interval giving ≤ ~10 labels across the duration.
+    static func niceStep(_ duration: Double) -> Double {
+        let candidates: [Double] = [0.05, 0.1, 0.2, 0.25, 0.5, 1, 2, 2.5, 5, 10, 15, 30, 60]
+        for step in candidates where duration / step <= 10 { return step }
+        return 60
+    }
+
+    static func format(_ t: Double) -> String {
+        if t == 0 { return "0" }
+        let rounded = (t * 100).rounded() / 100
+        if abs(rounded - rounded.rounded()) < 1e-9 { return "\(Int(rounded.rounded()))s" }
+        var string = String(format: "%.2f", rounded)
+        while string.hasSuffix("0") { string.removeLast() }
+        if string.hasSuffix(".") { string.removeLast() }
+        return string + "s"
+    }
+}

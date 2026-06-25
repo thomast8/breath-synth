@@ -33,6 +33,7 @@ final class DebugModel {
         case rendering
         case playing
         case looping
+        case paused
         case error(String)
     }
 
@@ -69,6 +70,16 @@ final class DebugModel {
     private var engine: BreathEngine?
     private var loadedSignature = ""
     private var playTask: Task<Void, Never>?
+    /// The exact buffer last shown/played, kept so the playhead can be dragged to seek within it.
+    private var currentBuffer: AVAudioPCMBuffer?
+    /// Frame offset the current playback started at (0 normally; the seek target after a drag).
+    private var playbackStartFrame: AVAudioFramePosition = 0
+    /// Frozen render position captured at pause (the player clock stops reporting once paused).
+    private var pausedSampleTime: AVAudioFramePosition?
+    /// Phase to return to when resuming from pause.
+    private var resumePhase: Phase = .playing
+    /// True while the current playback is a seeked once-through (sweeps offset→end, ignores loop).
+    private var seeking = false
 
     // MARK: Engine config (a change here rebuilds the engine on the next render)
 
@@ -135,6 +146,8 @@ final class DebugModel {
     private(set) var transients: [Double] = []
     /// UI toggle for the spectrogram panel.
     var showSpectrogram = true
+    /// Set by the waveform drag gesture while scrubbing; overrides the playhead until released.
+    var scrubFraction: Double?
     private(set) var stats: RenderStats?
     private(set) var planSummary: String?
     private(set) var log: [LogLine] = []
@@ -154,14 +167,20 @@ final class DebugModel {
     /// It's the render position, so it leads the speaker by the output latency (~5-20 ms) — sub-pixel
     /// here, not worth correcting for a debug tool.
     var playheadProgress: Double? {
+        let sampleTime: AVAudioFramePosition?
         switch phase {
-        case .playing, .looping: break
+        case .playing, .looping: sampleTime = engine?.currentSampleTime
+        case .paused: sampleTime = pausedSampleTime          // the player clock stops once paused
         default: return nil
         }
-        guard let frames = stats?.frames, frames > 0,
-              let sampleTime = engine?.currentSampleTime else { return nil }
+        guard let frames = stats?.frames, frames > 0, let s = sampleTime else { return nil }
         let total = AVAudioFramePosition(frames)
-        let played = max(0, sampleTime)        // clamp the negative/zero pre-roll
+        let played = max(0, playbackStartFrame + s)           // absolute position incl. any seek offset
+        // A seek plays a plain once-through from the offset, regardless of the task's loop settings.
+        if seeking {
+            let fraction = Double(played) / Double(total)
+            return fraction >= 1 ? nil : fraction
+        }
         switch task {
         case .single, .counted:
             let fraction = Double(played) / Double(total)
@@ -176,6 +195,15 @@ final class DebugModel {
             return fraction >= 1 ? nil : fraction
         }
     }
+
+    /// What the waveform draws as the playhead: the drag position while scrubbing, else the live head.
+    var displayProgress: Double? { scrubFraction ?? playheadProgress }
+
+    /// Whether the Pause/Resume control applies (something is playing, looping, or paused).
+    var canPause: Bool {
+        switch phase { case .playing, .looping, .paused: return true; default: return false }
+    }
+    var isPaused: Bool { phase == .paused }
 
     // MARK: Palette subsets for the pickers
 
@@ -279,6 +307,9 @@ final class DebugModel {
 
     func play() {
         run { engine in
+            self.playbackStartFrame = 0
+            self.seeking = false
+            self.pausedSampleTime = nil
             let buffer = try self.renderActive(engine)
             switch self.task {
             case .single, .counted:
@@ -307,7 +338,56 @@ final class DebugModel {
         playTask = nil
         engine?.stop()
         phase = .idle
+        seeking = false
+        pausedSampleTime = nil
+        playbackStartFrame = 0
+        scrubFraction = nil
         logger.log("stop")
+    }
+
+    /// Toggle pause/resume of the current playback. The player clock freezes on pause, so we capture
+    /// the position first and show the playhead parked there until resumed.
+    func pauseResume() {
+        switch phase {
+        case .playing, .looping:
+            pausedSampleTime = engine?.currentSampleTime ?? pausedSampleTime
+            resumePhase = phase
+            engine?.pause()
+            phase = .paused
+            logger.log("pause")
+        case .paused:
+            engine?.resume()
+            pausedSampleTime = nil
+            phase = resumePhase
+            logger.log("resume")
+        default:
+            break
+        }
+    }
+
+    /// Seek to a fraction of the displayed buffer (the playhead was dragged) and play once from there.
+    func seek(toFraction fraction: Double) {
+        guard let buffer = currentBuffer else { scrubFraction = nil; return }
+        scrubFraction = nil
+        let clamped = min(max(fraction, 0), 1)
+        let frame = AVAudioFramePosition(Double(buffer.frameLength) * clamped)
+        playTask?.cancel()
+        playTask = Task { @MainActor in
+            do {
+                let engine = try ensureEngine()
+                self.playbackStartFrame = frame
+                self.seeking = true
+                self.pausedSampleTime = nil
+                self.phase = .playing
+                self.logger.log("seek", ["fraction": clamped])
+                try await engine.play(buffer, fromFrame: frame)
+                if case .playing = self.phase { self.phase = .idle }
+            } catch is CancellationError {
+                self.phase = .idle
+            } catch {
+                self.fail(error)
+            }
+        }
     }
 
     /// Shared task scaffold: cancel any in-flight playback, ensure the engine, run `body`, surface errors.
@@ -547,6 +627,7 @@ final class DebugModel {
 
         waveform = peaks
         self.boundaries = boundaries
+        currentBuffer = buffer          // kept so the playhead can be dragged to seek within it
 
         // Spectrogram + impulsive-onset markers from the raw samples (glottal stops show as bright
         // vertical streaks / flux peaks). Computed synchronously — fine for a debug tool at this size.

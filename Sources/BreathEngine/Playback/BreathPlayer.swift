@@ -81,6 +81,45 @@ public final class BreathPlayer {
         }
     }
 
+    /// Pause playback, keeping the schedule and position so `resume()` continues from here.
+    public func pause() {
+        player.pause()
+    }
+
+    /// Resume after `pause()`.
+    public func resume() {
+        if started, !player.isPlaying { player.play() }
+    }
+
+    /// Play `buffer` once from `startFrame` (a seek), resolving when it finishes. Resets the node clock,
+    /// so `currentSampleTime` then counts from the slice start — the caller offsets by `startFrame` for
+    /// an absolute buffer position. (`scheduleSegment` is file-only, so we schedule a copied slice.)
+    public func play(_ buffer: AVAudioPCMBuffer, fromFrame startFrame: AVAudioFramePosition) async throws {
+        player.stop()
+        try ensureRunning()
+        guard let segment = Self.slice(buffer, fromFrame: startFrame) else { return }
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            player.scheduleBuffer(segment, at: nil, options: [], completionCallbackType: .dataPlayedBack) { _ in
+                continuation.resume()
+            }
+        }
+    }
+
+    /// A copy of `buffer` from `startFrame` to the end (mono/multi-channel), or nil if empty.
+    private static func slice(_ buffer: AVAudioPCMBuffer, fromFrame startFrame: AVAudioFramePosition) -> AVAudioPCMBuffer? {
+        let total = AVAudioFramePosition(buffer.frameLength)
+        let start = AVAudioFrameCount(max(0, min(startFrame, total)))
+        let count = AVAudioFrameCount(total) - start
+        guard count > 0, let out = AVAudioPCMBuffer(pcmFormat: buffer.format, frameCapacity: count) else { return nil }
+        out.frameLength = count
+        if let src = buffer.floatChannelData, let dst = out.floatChannelData {
+            for ch in 0..<Int(buffer.format.channelCount) {
+                dst[ch].update(from: src[ch] + Int(start), count: Int(count))
+            }
+        }
+        return out
+    }
+
     /// The player node's current render position in frames since playback started, or nil when not
     /// playing / before the render clock is valid. Monotonic and continuous across back-to-back
     /// `play(_:times:)` buffers and `loopForever` (it does NOT wrap at the buffer boundary), so a
