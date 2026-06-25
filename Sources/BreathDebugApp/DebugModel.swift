@@ -178,18 +178,18 @@ final class DebugModel {
         guard let frames = stats?.frames, frames > 0, let s = sampleTime else { return nil }
         let total = AVAudioFramePosition(frames)
         let played = max(0, playbackStartFrame + s)           // absolute position incl. any seek offset
+        // Clamp to the right edge at the end rather than returning nil, so the head never vanishes
+        // mid-playback (a tap-seek near the end) — `playbackFinished` then parks it there.
         switch task {
         case .single, .counted:
-            let fraction = Double(played) / Double(total)
-            return fraction >= 1 ? nil : fraction
+            return min(Double(played) / Double(total), 1)
         case .cycle:
             if cycleLoop { return Double(played % total) / Double(total) }
-            if played >= total * AVAudioFramePosition(max(1, cycleCount)) { return nil }
+            if played >= total * AVAudioFramePosition(max(1, cycleCount)) { return 1 }
             return Double(played % total) / Double(total)
         case .sequence:
             if seqLoop { return Double(played % total) / Double(total) }
-            let fraction = Double(played) / Double(total)
-            return fraction >= 1 ? nil : fraction
+            return min(Double(played) / Double(total), 1)
         }
     }
 
@@ -313,19 +313,19 @@ final class DebugModel {
                 self.phase = .playing
                 self.logger.log("play", ["task": self.task.rawValue])
                 try await engine.play(buffer)
-                if case .playing = self.phase { self.phase = .idle }
+                self.playbackFinished()
             case .cycle:
                 let spec = self.cycleSpec()
                 self.phase = spec.loop ? .looping : .playing
                 self.logger.log(spec.loop ? "loop" : "play", ["task": "cycle", "cycles": spec.cycles])
                 try await engine.playCycle(spec)            // loop=true returns immediately
-                if case .playing = self.phase { self.phase = .idle }
+                self.playbackFinished()
             case .sequence:
                 let plan = try self.makePlan()
                 self.phase = self.seqLoop ? .looping : .playing
                 self.logger.log(self.seqLoop ? "loop" : "play", ["task": "sequence", "cycles": plan.cycles])
                 try await engine.playSequence(plan, loop: self.seqLoop)
-                if case .playing = self.phase { self.phase = .idle }
+                self.playbackFinished()
             }
         }
     }
@@ -355,6 +355,15 @@ final class DebugModel {
         playbackStartFrame = 0
         parkedFraction = min(max(fraction, 0), 1)
         logger.log("scrub", ["fraction": parkedFraction ?? 0])
+    }
+
+    /// Called when a non-looping playback finishes: go idle and park the head at the end so it stays
+    /// visible (it was sweeping; don't let it vanish). Looping playbacks never reach here.
+    private func playbackFinished() {
+        if case .playing = phase {
+            phase = .idle
+            parkedFraction = 1
+        }
     }
 
     /// Toggle pause/resume of the current playback. The player clock freezes on pause, so we capture
@@ -407,7 +416,7 @@ final class DebugModel {
                 let engine = try ensureEngine()
                 self.logger.log("seek", ["fraction": clamped, "loop": loop, "repeats": repeats])
                 try await engine.play(buffer, fromFrame: frame, repeats: repeats, loop: loop)
-                if case .playing = self.phase { self.phase = .idle }
+                self.playbackFinished()
             } catch is CancellationError {
                 self.phase = .idle
             } catch {
