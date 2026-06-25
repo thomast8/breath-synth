@@ -144,13 +144,35 @@ public final class BreathEngine {
         return buffer
     }
 
-    /// Render a full inhale/hold/exhale/hold cycle into a single buffer.
+    /// Render `max(1, cycle.cycles)` inhale/hold/exhale/hold cycles into one buffer, each cycle
+    /// re-seeded so consecutive cycles draw independent samples (no "ABC ABC ABC" repeat) while
+    /// staying reproducible. Cycle 0 matches a single-cycle render of the spec.
     public func renderCycle(_ cycle: CycleSpec) throws -> AVAudioPCMBuffer {
-        var samples = try renderSamples(cycle.inhale)
+        try makeBuffer(renderCyclesSamples(cycle, count: max(1, cycle.cycles)))
+    }
+
+    /// One cycle's samples, decorrelated by `cycleIndex` (golden-ratio seed stride, as sequences use).
+    public func renderCycleSamples(_ cycle: CycleSpec, cycleIndex: Int = 0) throws -> [Float] {
+        var samples = try renderSamples(decorrelated(cycle.inhale, cycleIndex: cycleIndex))
         samples += silence(seconds: cycle.holdAfterInhaleSec)
-        samples += try renderSamples(cycle.exhale)
+        samples += try renderSamples(decorrelated(cycle.exhale, cycleIndex: cycleIndex))
         samples += silence(seconds: cycle.holdAfterExhaleSec)
-        return try makeBuffer(samples)
+        return samples
+    }
+
+    private func renderCyclesSamples(_ cycle: CycleSpec, count: Int) throws -> [Float] {
+        var samples: [Float] = []
+        for index in 0..<max(1, count) { samples += try renderCycleSamples(cycle, cycleIndex: index) }
+        return samples
+    }
+
+    /// Per-cycle decorrelated copy of a breath spec: stride the seed by `cycleIndex` with the golden
+    /// ratio so consecutive cycles differ yet stay reproducible. Index 0 is the spec's own seed.
+    private func decorrelated(_ base: BreathSpec, cycleIndex: Int) -> BreathSpec {
+        var spec = base
+        let baseSeed = base.seed ?? Variation.stableSeed(for: base)
+        spec.seed = baseSeed &+ UInt64(cycleIndex) &* 0x9E37_79B9_7F4A_7C15
+        return spec
     }
 
     /// Render a planned sequence (a whole number of pattern cycles) to mono samples.
@@ -288,16 +310,21 @@ public final class BreathEngine {
         try await playerInstance().playOnce(buffer)
     }
 
-    /// Play a cycle. Loops forever (non-blocking) when `cycle.loop`, otherwise plays
-    /// `cycle.cycles` times and returns when done.
+    /// Play a cycle. When `cycle.loop`, loops a BLOCK of distinct cycles forever (non-blocking) so the
+    /// repeat period is many breaths, not one. Otherwise plays `cycle.cycles` distinct cycles once and
+    /// returns when done. Either way no two consecutive breaths are the identical buffer replayed.
     public func playCycle(_ cycle: CycleSpec) async throws {
-        let buffer = try renderCycle(cycle)
         if cycle.loop {
-            try playerInstance().loopForever(buffer)
+            let block = try makeBuffer(renderCyclesSamples(cycle, count: Self.loopBlockCycles))
+            try playerInstance().loopForever(block)
         } else {
-            try await playerInstance().play(buffer, times: max(1, cycle.cycles))
+            try await playerInstance().playOnce(renderCycle(cycle))
         }
     }
+
+    /// Distinct cycles rendered into a looped block so an infinite cycle doesn't audibly repeat a
+    /// single breath. Eight breaths is well past the point the repeat is perceptible under holds.
+    private static let loopBlockCycles = 8
 
     /// Play a planned sequence as one buffer. Loops the whole sequence forever
     /// (non-blocking) when `loop`, otherwise plays it once and returns when done.
