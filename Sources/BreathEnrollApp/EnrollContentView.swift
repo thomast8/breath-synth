@@ -32,6 +32,11 @@ struct EnrollContentView: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             Spacer()
+            if case .technique = model.stage {
+                Button("Finish & save now") { model.finishEarly() }
+                    .font(.caption)
+                    .help("Stop here and write captures.json with the takes recorded so far.")
+            }
             if let dir = model.outputDir {
                 Text(dir.lastPathComponent)
                     .font(.caption.monospaced()).foregroundStyle(.secondary)

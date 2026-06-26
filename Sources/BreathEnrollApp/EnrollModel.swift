@@ -85,6 +85,7 @@ final class EnrollModel {
                 onFinished: { [weak self] in
                     guard let self else { return }
                     self.roomFloor = self.recorder.lastNoiseFloorRMS
+                    self.writeSessionManifest()   // captures.json now exists (room tone recorded)
                     self.stage = .technique(step: 0)
                 }
             )
@@ -109,8 +110,9 @@ final class EnrollModel {
                     dir.appendingPathComponent("\(slugByLabel[label] ?? "take")_\(i + 1).caf")
                 },
                 onSegment: { [weak self] _, label, url, _ in
-                    guard let slug = slugByLabel[label] else { return }
-                    self?.captured[slug, default: []].append(url.lastPathComponent)
+                    guard let self, let slug = slugByLabel[label] else { return }
+                    self.captured[slug, default: []].append(url.lastPathComponent)
+                    self.writeSessionManifest()   // persist after every segment so a quit/crash can't lose the run
                 },
                 onFinished: { [weak self] in self?.advance(fromStep: stepIndex) }
             )
@@ -124,6 +126,15 @@ final class EnrollModel {
     func stopCurrentTake() { recorder.stopCurrentTake() }
     /// Manual override: discard the take in progress and re-listen for it.
     func redoCurrentTake() { recorder.cancelTake() }
+
+    /// Finish the session now with whatever's been captured so far (aborting any in-progress take),
+    /// writing `captures.json` so a partial enrollment is still usable by the builder.
+    func finishEarly() {
+        guard case .technique = stage else { return }
+        recorder.abort()
+        writeSessionManifest()
+        stage = .finished
+    }
 
     /// Map a step's catalog intent to the engine's detection contract (tuning lives here, app-side).
     private func detection(for step: EnrollmentStep) -> CaptureDetection {
