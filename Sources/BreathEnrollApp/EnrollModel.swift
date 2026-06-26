@@ -6,51 +6,51 @@ import Foundation
 import Observation
 
 /// Drives the guided enrollment: choose a folder, capture the mandatory room tone, then walk the
-/// reference-led technique script recording N takes each, and finally write `captures.json` for the
-/// `breath-bank` builder. All state is `@Observable` and main-actor isolated (AVFoundation + AppKit).
+/// reference-led technique script. Capture is **automatic** — the engine's `BreathRecorder` detects
+/// each take, self-terminates, and auto-advances through N takes; this model only picks the per-step
+/// `CaptureDetection` (the app-layer catalog), plays the demo, files written segments, and writes
+/// `captures.json`. All state is `@Observable` / main-actor (AVFoundation + AppKit).
 @MainActor
 @Observable
 final class EnrollModel {
     enum Stage: Equatable {
         case needsOutputDir
         case roomTone
-        case technique(step: Int, take: Int)
+        case technique(step: Int)
         case finished
     }
 
     let steps = EnrollmentScript.steps
+    /// The engine recorder — the view binds to its published state (phase, level, takeIndex, count).
+    let recorder = BreathRecorder()
 
-    private let recorder = AudioRecorder()
-    private var player: AVAudioPlayer?
-    private var elapsedTask: Task<Void, Never>?
-    private var recordingStart: Date?
+    @ObservationIgnored private var player: AVAudioPlayer?
 
     private(set) var stage: Stage = .needsOutputDir
     private(set) var outputDir: URL?
     /// Where reference takes are read from (bundled palette in a built .app, else ./Assets/breaths).
     var assetsDir: URL = EnrollModel.defaultAssetsDir()
 
-    private(set) var isRecording = false
     private(set) var isPlayingReference = false
-    private(set) var level: Float = 0
-    private(set) var elapsed: Double = 0
     private(set) var errorMessage: String?
 
     /// slug → captured filenames (in order).
     private(set) var captured: [String: [String]] = [:]
     private(set) var roomToneFile: String?
+    /// Room-tone noise floor for this session, fed to every later step's detection.
+    @ObservationIgnored private var roomFloor: Float?
+
+    /// First error to surface — a model-level start error, else a recorder write error.
+    var displayError: String? { errorMessage ?? recorder.errorMessage }
 
     // MARK: - Derived UI state
 
+    var currentStepIndex: Int { if case let .technique(step) = stage { return step }; return 0 }
     var currentStep: EnrollmentStep? {
-        guard case let .technique(step, _) = stage, steps.indices.contains(step) else { return nil }
+        guard case let .technique(step) = stage, steps.indices.contains(step) else { return nil }
         return steps[step]
     }
-    var currentTakeIndex: Int {
-        if case let .technique(_, take) = stage { return take }
-        return 0
-    }
-    var totalTakesCaptured: Int { captured.values.reduce(0) { $0 + $1.count } }
+    var totalFilesCaptured: Int { captured.values.reduce(0) { $0 + $1.count } }
 
     // MARK: - Output folder
 
@@ -65,68 +65,97 @@ final class EnrollModel {
         outputDir = url
         captured = [:]
         roomToneFile = nil
+        roomFloor = nil
         stage = .roomTone
         errorMessage = nil
     }
 
-    // MARK: - Recording
+    // MARK: - Capture
 
-    /// Begin recording the current phase (room tone or a technique take).
-    func startRecording() {
-        guard let dir = outputDir, !isRecording else { return }
-        let url = dir.appendingPathComponent(currentFilename())
+    /// Capture the mandatory room tone (fixed 5 s, auto-stop), then advance to the first technique.
+    func startRoomTone() {
+        guard let dir = outputDir, !recorder.isRecording else { return }
         do {
-            try recorder.start(writingTo: url) { [weak self] level in
-                self?.level = level
-            }
-            isRecording = true
-            elapsed = 0
-            recordingStart = Date()
-            startElapsedTimer()
+            try recorder.start(
+                takes: 1,
+                detection: .fixedDuration(seconds: EnrollmentScript.roomToneSeconds),
+                noiseFloorRMS: nil,
+                fileURL: { _, _ in dir.appendingPathComponent("room_tone.caf") },
+                onSegment: { [weak self] _, _, url, _ in self?.roomToneFile = url.lastPathComponent },
+                onFinished: { [weak self] in
+                    guard let self else { return }
+                    self.roomFloor = self.recorder.lastNoiseFloorRMS
+                    self.stage = .technique(step: 0)
+                }
+            )
             errorMessage = nil
         } catch {
             errorMessage = error.localizedDescription
         }
     }
 
-    /// Stop the current recording, file it, and advance.
-    func stopRecording() {
-        guard isRecording else { return }
-        recorder.stop()
-        isRecording = false
-        level = 0
-        stopElapsedTimer()
-        commitCurrentFile()
-    }
-
-    /// Drop the most recent take and step back so it can be recorded again.
-    func redoLastTake() {
-        guard !isRecording else { return }
-        switch stage {
-        case .roomTone:
-            roomToneFile = nil
-        case let .technique(step, take):
-            if take > 0 {
-                removeLastCapture(ofStep: step)
-                stage = .technique(step: step, take: take - 1)
-            } else if step > 0 {
-                removeLastCapture(ofStep: step - 1)
-                stage = .technique(step: step - 1, take: steps[step - 1].takes - 1)
-            }
-        default:
-            break
+    /// Begin auto-capturing the current technique's N takes (self-paced; auto-advances + auto-stops).
+    func startStepCapture() {
+        guard let dir = outputDir, let step = currentStep, !recorder.isRecording else { return }
+        stopReference()  // never let demo playback bleed into the mic
+        let stepIndex = currentStepIndex
+        let slugByLabel = Dictionary(uniqueKeysWithValues: step.lanes.map { ($0.label, $0.slug) })
+        do {
+            try recorder.start(
+                takes: step.takes,
+                detection: detection(for: step),
+                noiseFloorRMS: roomFloor,
+                fileURL: { i, label in
+                    dir.appendingPathComponent("\(slugByLabel[label] ?? "take")_\(i + 1).caf")
+                },
+                onSegment: { [weak self] _, label, url, _ in
+                    guard let slug = slugByLabel[label] else { return }
+                    self?.captured[slug, default: []].append(url.lastPathComponent)
+                },
+                onFinished: { [weak self] in self?.advance(fromStep: stepIndex) }
+            )
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
         }
     }
 
-    private func removeLastCapture(ofStep step: Int) {
-        let slug = steps[step].slug
-        if captured[slug]?.isEmpty == false { captured[slug]?.removeLast() }
+    /// Manual override: finalize the take in progress now.
+    func stopCurrentTake() { recorder.stopCurrentTake() }
+    /// Manual override: discard the take in progress and re-listen for it.
+    func redoCurrentTake() { recorder.cancelTake() }
+
+    /// Map a step's catalog intent to the engine's detection contract (tuning lives here, app-side).
+    private func detection(for step: EnrollmentStep) -> CaptureDetection {
+        switch step.detection {
+        case .cycle:
+            return .cycle(minPhaseSec: step.minSeconds, midPauseSec: 0.45,
+                          maxCycleSec: step.maxSeconds * 2 + 6, trailingSilenceSec: 1.0)
+        case .single:
+            return .single(minActiveSec: max(0.3, step.minSeconds * 0.5),
+                           maxTakeSec: step.maxSeconds + 3, trailingSilenceSec: 0.8)
+        case .cleanEvents:
+            // Trailing silence must exceed the deliberate inter-event gap (events are well-separated),
+            // so a slow gap doesn't end the take after the first event — only the real done-pause does.
+            return .cleanEvents(minGapSec: 0.35, maxTakeSec: step.maxSeconds + 8, trailingSilenceSec: 3.0)
+        case .naturalRhythm:
+            return .naturalRhythm(minActiveSec: 1.0, maxTakeSec: step.maxSeconds + 5, trailingSilenceSec: 1.0)
+        }
     }
 
-    // MARK: - Reference playback
+    private func advance(fromStep step: Int) {
+        if step + 1 < steps.count {
+            stage = .technique(step: step + 1)
+        } else {
+            stage = .finished
+            writeSessionManifest()
+        }
+    }
+
+    // MARK: - Reference demo playback
 
     func playReference() {
-        guard let step = currentStep, let ref = step.reference else { return }
+        guard let ref = currentStep?.demoReference else { return }
         let url = assetsDir.appendingPathComponent(ref)
         guard FileManager.default.fileExists(atPath: url.path) else {
             errorMessage = "Reference \(ref) not found in \(assetsDir.path)."
@@ -153,38 +182,18 @@ final class EnrollModel {
         isPlayingReference = false
     }
 
-    // MARK: - Advancement
-
-    private func commitCurrentFile() {
-        switch stage {
-        case .roomTone:
-            roomToneFile = currentFilename()
-            stage = .technique(step: 0, take: 0)
-        case let .technique(step, take):
-            let s = steps[step]
-            captured[s.slug, default: []].append(currentFilename())
-            let nextTake = take + 1
-            if nextTake < s.takes {
-                stage = .technique(step: step, take: nextTake)
-            } else if step + 1 < steps.count {
-                stage = .technique(step: step + 1, take: 0)
-            } else {
-                stage = .finished
-                writeSessionManifest()
-            }
-        default:
-            break
-        }
-    }
+    // MARK: - Manifest
 
     private func writeSessionManifest() {
         guard let dir = outputDir else { return }
-        let sessionSteps = steps.map { step in
-            CaptureSession.Step(
-                slug: step.slug, style: step.style, type: step.type, renderMode: step.renderMode,
-                role: step.role, reference: step.reference, files: captured[step.slug] ?? [],
-                minSeconds: step.minSeconds, maxSeconds: step.maxSeconds
-            )
+        let sessionSteps: [CaptureSession.Step] = steps.flatMap { step in
+            step.lanes.map { lane in
+                CaptureSession.Step(
+                    slug: lane.slug, style: lane.style, type: lane.type, renderMode: step.renderMode,
+                    role: lane.role, reference: lane.reference, files: captured[lane.slug] ?? [],
+                    minSeconds: step.minSeconds, maxSeconds: step.maxSeconds
+                )
+            }
         }
         let session = CaptureSession(roomTone: roomToneFile, steps: sessionSteps)
         do {
@@ -192,35 +201,6 @@ final class EnrollModel {
         } catch {
             errorMessage = "Failed to write captures.json: \(error.localizedDescription)"
         }
-    }
-
-    // MARK: - Filenames
-
-    private func currentFilename() -> String {
-        switch stage {
-        case .roomTone: return "room_tone.caf"
-        case let .technique(step, take): return "\(steps[step].slug)_\(take + 1).caf"
-        default: return "unused.caf"
-        }
-    }
-
-    // MARK: - Elapsed timer
-
-    private func startElapsedTimer() {
-        elapsedTask?.cancel()
-        elapsedTask = Task { @MainActor [weak self] in
-            while !Task.isCancelled {
-                guard let self, let start = self.recordingStart else { return }
-                self.elapsed = Date().timeIntervalSince(start)
-                try? await Task.sleep(nanoseconds: 50_000_000)  // ~20 fps
-            }
-        }
-    }
-
-    private func stopElapsedTimer() {
-        elapsedTask?.cancel()
-        elapsedTask = nil
-        recordingStart = nil
     }
 
     // MARK: - Assets dir
