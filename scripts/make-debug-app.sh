@@ -15,10 +15,10 @@ PLIST="Sources/BreathDebugApp/Resources/Info.plist"
 ASSETS="Assets/breaths"
 APP_DIR="dist/${APP_NAME}.app"
 
-echo "==> swift build -c release --build-path dist --product ${EXEC_NAME}"
-swift build -c release --build-path dist --product "${EXEC_NAME}"
+echo "==> swift build -c release --product ${EXEC_NAME}"
+swift build -c release --product "${EXEC_NAME}"
 
-BIN_PATH="$(swift build -c release --build-path dist --product "${EXEC_NAME}" --show-bin-path)/${EXEC_NAME}"
+BIN_PATH="$(swift build -c release --product "${EXEC_NAME}" --show-bin-path)/${EXEC_NAME}"
 
 echo "==> assembling ${APP_DIR}"
 rm -rf "${APP_DIR}"
