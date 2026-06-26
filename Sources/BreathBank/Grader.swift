@@ -16,11 +16,19 @@ public enum Grader {
         public var madK: Double
         /// Cosine distance (0…1 for non-negative spectra) beyond which a fragment is "off-technique".
         public var maxTemplateDistance: Double
+        /// An interior below-floor run this long (s) in a one-shot body is a mid-breath dropout.
+        public var dropoutMinGapSec: Double
+        /// Relative deviation of a packing take's median gulp spacing from the gold reference's,
+        /// beyond which the cadence is judged "drift".
+        public var maxRhythmDistance: Double
+        /// Minimum inter-onset spacing (s) between packing gulp cores; tighter = merged/rushed.
+        public var minCoreSpacingSec: Double
 
         public init(
             clipPeak: Float = 0.999, clipRunSamples: Int = 3, minSNRdB: Double = 10,
             bandLowHz: Double = 300, bandHighHz: Double = 3000, madK: Double = 3.5,
-            maxTemplateDistance: Double = 0.6
+            maxTemplateDistance: Double = 0.6, dropoutMinGapSec: Double = 0.15,
+            maxRhythmDistance: Double = 0.5, minCoreSpacingSec: Double = 0.22
         ) {
             self.clipPeak = clipPeak
             self.clipRunSamples = clipRunSamples
@@ -29,6 +37,9 @@ public enum Grader {
             self.bandHighHz = bandHighHz
             self.madK = madK
             self.maxTemplateDistance = maxTemplateDistance
+            self.dropoutMinGapSec = dropoutMinGapSec
+            self.maxRhythmDistance = maxRhythmDistance
+            self.minCoreSpacingSec = minCoreSpacingSec
         }
 
         public static let `default` = Thresholds()
@@ -118,13 +129,18 @@ public enum Grader {
         return worst
     }
 
-    /// Full grade: signal QA (clipping → length → SNR), then template, then sibling anomaly. Returns
-    /// the first failure's reason, else accept. `lengthOK` is decided by the builder per technique.
+    /// Full grade: signal QA (clipping → length → dropout → SNR) → technique (merged-gulp → template →
+    /// cadence) → sibling anomaly. Returns the first failure's reason, else accept. `lengthOK`,
+    /// `dropoutOK` (one-shot bodies), `spacingOK` / `cadenceOK` (packing) are decided by the builder
+    /// per technique using the helpers below; non-applicable gates default to passing.
     public static func grade(
         _ f: Features,
         siblings: [Features],
         gold: [Float]?,
         lengthOK: Bool,
+        dropoutOK: Bool = true,
+        spacingOK: Bool = true,
+        cadenceOK: Bool = true,
         thresholds: Thresholds = .default
     ) -> Verdict {
         let distance = templateDistance(f, gold: gold)
@@ -134,10 +150,39 @@ public enum Grader {
         }
         if f.clipped { return reject("clipped") }
         if !lengthOK { return reject("length") }
+        if !dropoutOK { return reject("dropout") }
         if f.snrDb < thresholds.minSNRdB { return reject("low_snr") }
+        if !spacingOK { return reject("merged_gulp") }
         if distance > thresholds.maxTemplateDistance { return reject("off_technique") }
+        if !cadenceOK { return reject("cadence_drift") }
         if anomaly > thresholds.madK { return reject("outlier") }
         return Verdict(accept: true, reason: nil, qaScore: f.snrDb, anomalyScore: anomaly, templateDistance: distance)
+    }
+
+    /// Dropout gate (one-shot bodies): true if `envelope` has an *interior* run below 10 % of its peak
+    /// lasting ≥ `minGapSec` — a mid-breath silence the loud sustain shouldn't contain. Leading/trailing
+    /// quiet is ignored (only the span between the first and last above-floor sample is scanned).
+    public static func dropoutRun(_ envelope: [Float], sampleRate: Double, minGapSec: Double) -> Bool {
+        guard let peak = envelope.max(), peak > 0 else { return false }
+        let floor = peak * 0.1
+        guard let first = envelope.firstIndex(where: { $0 >= floor }),
+              let last = envelope.lastIndex(where: { $0 >= floor }), last > first else { return false }
+        let minRun = max(1, Int(minGapSec * sampleRate))
+        var run = 0
+        for i in first...last {
+            if envelope[i] < floor { run += 1; if run >= minRun { return true } } else { run = 0 }
+        }
+        return false
+    }
+
+    /// Cadence gate (packing): relative deviation of a take's median gulp spacing from the gold
+    /// reference's. 0 when either side is empty (→ no cadence rejection).
+    public static func rhythmDistance(_ enrollee: [Int], _ gold: [Int]) -> Double {
+        guard !enrollee.isEmpty, !gold.isEmpty else { return 0 }
+        let me = median(enrollee.map(Double.init))
+        let ref = median(gold.map(Double.init))
+        guard ref > 0 else { return 0 }
+        return abs(me - ref) / ref
     }
 
     // MARK: - DSP helpers

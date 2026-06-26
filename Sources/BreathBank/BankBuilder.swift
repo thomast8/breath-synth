@@ -101,6 +101,14 @@ public enum BankBuilder {
                     role: step.role, type: step.type, settings: settings, roomProfile: roomProfile
                 )
             }
+            // Gold cadence (gulp-core spacing) for the packing cadence gate — cores steps only.
+            let refCadence: [Int] = step.role == "cores"
+                ? (step.reference.flatMap {
+                    referenceCadence(assetsDir.appendingPathComponent($0), type: step.type,
+                                     settings: settings, roomProfile: roomProfile)
+                  } ?? [])
+                : []
+            let minCoreSpacing = Int(thresholds.minCoreSpacingSec * sr)
 
             // Pass 1: segment every take, stage its files, compute per-fragment features.
             var records: [Record] = []
@@ -126,6 +134,11 @@ public enum BankBuilder {
                 if let cache = out.cacheSignal {
                     cachesToWrite[FragmentBank.preparedCacheName(forTake: outName)] = cache
                 }
+                // Take-level packing cadence vs the gold reference (applies to all this take's cores).
+                let takeCoreGaps = out.fragments.filter { $0.kind == .gulpCore }.compactMap(\.gapToNext)
+                let cadenceOK = refCadence.isEmpty || takeCoreGaps.isEmpty
+                    ? true
+                    : Grader.rhythmDistance(takeCoreGaps, refCadence) <= thresholds.maxRhythmDistance
                 for fragment in out.fragments {
                     let features: Grader.Features?
                     if fragment.kind == .gap {
@@ -136,7 +149,17 @@ public enum BankBuilder {
                         f.clipped = clipped   // clipping is a take-level verdict, not a fragment one
                         features = f
                     }
-                    records.append(Record(outName: outName, raw: fragment, features: features, lengthOK: lengthOK))
+                    // Per-kind quality gates the Grader can't see from features alone.
+                    let dropoutOK = fragment.kind != .oneShotBody
+                        || !Grader.dropoutRun(BreathAssembler.rmsEnvelope(fragment.audio, sampleRate: sr),
+                                              sampleRate: sr, minGapSec: thresholds.dropoutMinGapSec)
+                    let spacingOK = fragment.kind != .gulpCore
+                        || (fragment.gapToNext.map { $0 >= minCoreSpacing } ?? true)
+                    records.append(Record(
+                        outName: outName, raw: fragment, features: features, lengthOK: lengthOK,
+                        dropoutOK: dropoutOK, spacingOK: spacingOK,
+                        cadenceOK: fragment.kind == .gulpCore ? cadenceOK : true
+                    ))
                 }
             }
 
@@ -154,7 +177,9 @@ public enum BankBuilder {
                 guard let features = rec.features else { continue }
                 let verdict = Grader.grade(
                     features, siblings: siblings(for: rec, in: records),
-                    gold: refProfile, lengthOK: rec.lengthOK, thresholds: thresholds
+                    gold: refProfile, lengthOK: rec.lengthOK,
+                    dropoutOK: rec.dropoutOK, spacingOK: rec.spacingOK, cadenceOK: rec.cadenceOK,
+                    thresholds: thresholds
                 )
                 group.fragments.append(Fragment(
                     file: rec.outName, startFrame: rec.raw.startFrame, endFrame: rec.raw.endFrame,
@@ -281,6 +306,19 @@ public enum BankBuilder {
         return averageProfiles(profiles)
     }
 
+    /// The gold reference's packing cadence — its gulp-core inter-onset gaps — for the cadence gate.
+    private static func referenceCadence(
+        _ url: URL, type: BreathType, settings: AssemblerSettings, roomProfile: [Float]?
+    ) -> [Int]? {
+        guard FileManager.default.fileExists(atPath: url.path),
+              let raw = try? AudioIO.decodeMono(url: url, sampleRate: settings.sampleRate) else { return nil }
+        let out = Segmenter.segment(
+            rawTake: raw, role: "cores", type: type, settings: settings, roomToneProfile: roomProfile
+        )
+        let gaps = out.fragments.filter { $0.kind == .gulpCore }.compactMap(\.gapToNext)
+        return gaps.isEmpty ? nil : gaps
+    }
+
     private static func averageProfiles(_ profiles: [[Float]]) -> [Float]? {
         guard let n = profiles.first?.count, n > 0 else { return nil }
         var acc = [Float](repeating: 0, count: n)
@@ -373,6 +411,9 @@ private struct Record {
     var raw: Segmenter.Raw
     var features: Grader.Features?
     var lengthOK: Bool
+    var dropoutOK: Bool = true
+    var spacingOK: Bool = true
+    var cadenceOK: Bool = true
 }
 
 /// Per-(style, type) accumulator: the bank's fragments plus the take ordering for the manifest's

@@ -97,4 +97,32 @@ final class GraderTests: XCTestCase {
         XCTAssertGreaterThan(f.flatness, 0.3, "white-ish noise should read fairly flat")
         XCTAssertEqual(f.durationSec, 0.5, accuracy: 1e-6)
     }
+
+    // MARK: - New gates: dropout, merged-gulp, cadence
+
+    func testDropoutRunDetectsInteriorGapOnly() {
+        let sr = 1_000.0
+        // 0.3 s loud, 0.2 s silence, 0.3 s loud → an interior 0.2 s gap.
+        let withGap = [Float](repeating: 1, count: 300) + [Float](repeating: 0, count: 200) + [Float](repeating: 1, count: 300)
+        XCTAssertTrue(Grader.dropoutRun(withGap, sampleRate: sr, minGapSec: 0.15))
+        XCTAssertFalse(Grader.dropoutRun(withGap, sampleRate: sr, minGapSec: 0.30), "gap shorter than the threshold")
+        // Leading/trailing quiet must NOT count as a dropout.
+        let edges = [Float](repeating: 0, count: 200) + [Float](repeating: 1, count: 600) + [Float](repeating: 0, count: 200)
+        XCTAssertFalse(Grader.dropoutRun(edges, sampleRate: sr, minGapSec: 0.15))
+    }
+
+    func testRhythmDistanceRelativeToReference() {
+        XCTAssertEqual(Grader.rhythmDistance([100, 100, 100], [100, 100, 100]), 0, accuracy: 1e-9)
+        XCTAssertEqual(Grader.rhythmDistance([50, 50, 50], [100, 100, 100]), 0.5, accuracy: 1e-9, "half the spacing")
+        XCTAssertEqual(Grader.rhythmDistance([], [100]), 0, "empty side ⇒ no cadence rejection")
+    }
+
+    func testGradeRejectsDropoutMergedGulpAndCadence() {
+        let s = normalSiblings()
+        XCTAssertEqual(Grader.grade(features(), siblings: s, gold: flatProfile, lengthOK: true, dropoutOK: false).reason, "dropout")
+        XCTAssertEqual(Grader.grade(features(), siblings: s, gold: flatProfile, lengthOK: true, spacingOK: false).reason, "merged_gulp")
+        XCTAssertEqual(Grader.grade(features(), siblings: s, gold: flatProfile, lengthOK: true, cadenceOK: false).reason, "cadence_drift")
+        // All gates passing (defaults) → the clean fragment is still accepted.
+        XCTAssertTrue(Grader.grade(features(), siblings: s, gold: flatProfile, lengthOK: true).accept)
+    }
 }
