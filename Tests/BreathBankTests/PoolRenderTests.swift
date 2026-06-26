@@ -254,4 +254,30 @@ final class PoolRenderTests: XCTestCase {
         let inhale1 = Array(full[cycleLen..<(cycleLen + inhaleLen)])
         XCTAssertNotEqual(inhale0, inhale1, "consecutive cycles must not be the identical buffer")
     }
+
+    /// The gitignored prepared caches must regenerate bit-for-bit from the committed takes + banks, so
+    /// a fresh checkout (no caches) plus `prepare-caches` renders identically to the freshly-built bundle.
+    func testRegenerateCachesReproducesBitIdentical() throws {
+        let (bundle, cleanup) = try buildCalmBank()
+        defer { cleanup() }
+        let cacheURL = bundle.appendingPathComponent("calm_inhale_1.prepared.wav")
+        let before = try AudioIO.decodeMono(url: cacheURL)
+        XCTAssertFalse(before.isEmpty)
+        let renderBefore = try BreathEngine.load(assetsDirectory: bundle).renderSamples(spec(seed: 3))
+
+        // Drop every prepared cache, as a fresh checkout would (they're gitignored).
+        for url in try FileManager.default.contentsOfDirectory(at: bundle, includingPropertiesForKeys: nil)
+        where url.lastPathComponent.hasSuffix(".prepared.wav") {
+            try FileManager.default.removeItem(at: url)
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: cacheURL.path))
+
+        let written = try BankBuilder.regenerateCaches(assetsDir: bundle)
+        XCTAssertTrue(written.contains("calm_inhale_1.prepared.wav"))
+        let after = try AudioIO.decodeMono(url: cacheURL)
+        XCTAssertEqual(before, after, "regenerated cache is bit-identical to the build's")
+
+        let renderAfter = try BreathEngine.load(assetsDirectory: bundle).renderSamples(spec(seed: 3))
+        XCTAssertEqual(renderBefore, renderAfter, "render unchanged after cache regeneration")
+    }
 }

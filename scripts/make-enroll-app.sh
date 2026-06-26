@@ -28,6 +28,10 @@ mkdir -p "${APP_DIR}/Contents/MacOS"
 mkdir -p "${APP_DIR}/Contents/Resources"
 cp "${BIN_PATH}" "${APP_DIR}/Contents/MacOS/${EXEC_NAME}"
 cp "${PLIST}" "${APP_DIR}/Contents/Info.plist"
+# Regenerate the gitignored prepared caches so the bundled palette renders from any fragment bank
+# (no-op when no bank is declared).
+echo "==> swift run breath-bank prepare-caches --assets ${ASSETS}"
+swift run breath-bank prepare-caches --assets "${ASSETS}"
 # Bundle the reference palette so the app can play gold references via Bundle.main.
 cp -R "${ASSETS}" "${APP_DIR}/Contents/Resources/breaths"
 

@@ -8,7 +8,7 @@ struct BreathBankTool: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "breath-bank",
         abstract: "Grade enrollment takes and pool them into per-(style, type) fragment banks.",
-        subcommands: [Build.self]
+        subcommands: [Build.self, PrepareCaches.self]
     )
 }
 
@@ -46,6 +46,30 @@ extension BreathBankTool {
                 thresholds: thresholds
             )
             print(summary.description)
+        }
+    }
+
+    struct PrepareCaches: ParsableCommand {
+        static let configuration = CommandConfiguration(
+            commandName: "prepare-caches",
+            abstract: "Regenerate the gitignored *.prepared.wav caches from committed takes + banks."
+        )
+
+        @Option(name: .long, help: "Assets dir with manifest.json, fragments/, and the committed takes.")
+        var assets: String = "Assets/breaths"
+
+        @Flag(name: .long, help: "Disable spectral denoise (must match the config the bank was built with).")
+        var noDenoise = false
+
+        func run() throws {
+            var settings = AssemblerSettings()
+            if noDenoise { settings.enableSpectralDenoise = false }
+            let written = try BankBuilder.regenerateCaches(assetsDir: URL(fileURLWithPath: assets), settings: settings)
+            if written.isEmpty {
+                print("No fragment banks declared — nothing to regenerate.")
+            } else {
+                print("Regenerated \(written.count) prepared cache(s): \(written.joined(separator: ", "))")
+            }
         }
     }
 }

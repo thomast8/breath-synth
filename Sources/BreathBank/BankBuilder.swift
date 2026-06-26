@@ -72,10 +72,16 @@ public enum BankBuilder {
         var roomToneOut: String?
         if let rt = session.roomTone {
             let samples = try AudioIO.decodeMono(url: capturesDir.appendingPathComponent(rt), sampleRate: sr)
-            let profile = SpectralDenoise.magnitudeProfile(from: samples, sampleRate: sr)
-            if !profile.isEmpty { roomProfile = profile }
             roomToneOut = "room_tone.wav"
-            try AudioIO.writeMonoWAV(samples, sampleRate: sr, to: staging.appendingPathComponent(roomToneOut!))
+            let roomToneURL = staging.appendingPathComponent(roomToneOut!)
+            try AudioIO.writeMonoWAV(samples, sampleRate: sr, to: roomToneURL)
+            // Derive the room profile from the *written* room_tone.wav (what the engine and
+            // prepare-caches read), NOT the capture-dir room tone — a re-encode/resample shifts a quiet
+            // profile enough to flip the signature, so deriving it from the committed file keeps
+            // build == render == regenerate consistent.
+            let committed = try AudioIO.decodeMono(url: roomToneURL, sampleRate: sr)
+            let profile = SpectralDenoise.magnitudeProfile(from: committed, sampleRate: sr)
+            if !profile.isEmpty { roomProfile = profile }
         }
         let preparedSig = FragmentBank.preparedSignature(settings: settings, roomToneProfile: roomProfile)
 
@@ -234,6 +240,53 @@ public enum BankBuilder {
             outDir: outDir.path, roomTone: roomToneOut, preparedSig: preparedSig,
             banks: summaries, warnings: warnings
         )
+    }
+
+    /// Regenerate the gitignored `*.prepared.wav` caches in a committed assets bundle from its committed
+    /// takes + banks (the offsets the engine slices are stored in the banks; only the cache *audio* is
+    /// derived and not committed). For each `(style, type)` with a `fragmentBank`, each take referenced
+    /// by an accepted grain/gulpCore fragment is re-segmented and its `cacheSignal` written. Refuses a
+    /// bank whose `preparedSig` doesn't match this config (a stale cache would mis-slice). Returns the
+    /// cache filenames written. A bundle with no `fragmentBank` is a no-op.
+    @discardableResult
+    public static func regenerateCaches(
+        assetsDir: URL, settings: AssemblerSettings = AssemblerSettings()
+    ) throws -> [String] {
+        let sr = settings.sampleRate
+        let manifest = try BreathManifest.load(from: assetsDir.appendingPathComponent("manifest.json"))
+        var roomProfile: [Float]?
+        if let rt = manifest.noiseProfile,
+           let samples = try? AudioIO.decodeMono(url: assetsDir.appendingPathComponent(rt), sampleRate: sr) {
+            let profile = SpectralDenoise.magnitudeProfile(from: samples, sampleRate: sr)
+            if !profile.isEmpty { roomProfile = profile }
+        }
+        let expectedSig = FragmentBank.preparedSignature(settings: settings, roomToneProfile: roomProfile)
+
+        var written: [String] = []
+        var done = Set<String>()
+        for style in manifest.styles.keys.sorted() {
+            for type in [BreathType.inhale, .exhale] {
+                guard let name = manifest.palette(style: style, type: type)?.fragmentBank else { continue }
+                let bank = try FragmentBank.load(from: assetsDir.appendingPathComponent(name))
+                guard bank.preparedSig == expectedSig else {
+                    throw BreathError.ioFailure(
+                        "\(name): preparedSig \(bank.preparedSig) ≠ current config \(expectedSig) — rebuild the bank")
+                }
+                for fragment in bank.fragments where fragment.accept && (fragment.kind == .grain || fragment.kind == .gulpCore) {
+                    let cacheName = FragmentBank.preparedCacheName(forTake: fragment.file)
+                    guard done.insert(cacheName).inserted else { continue }
+                    let raw = try AudioIO.decodeMono(url: assetsDir.appendingPathComponent(fragment.file), sampleRate: sr)
+                    let out = Segmenter.segment(
+                        rawTake: raw, role: fragment.kind == .grain ? "texture" : "cores",
+                        type: bank.type, settings: settings, roomToneProfile: roomProfile
+                    )
+                    guard let cache = out.cacheSignal else { continue }
+                    try AudioIO.writeMonoWAV(cache, sampleRate: sr, to: assetsDir.appendingPathComponent(cacheName))
+                    written.append(cacheName)
+                }
+            }
+        }
+        return written.sorted()
     }
 
     /// Promote a fully-staged bundle into `outDir`: replace the tool-owned `fragments/` directory
