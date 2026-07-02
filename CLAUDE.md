@@ -26,6 +26,14 @@ rate is **44.1 kHz** (`AudioConstants.workingSampleRate`); all assets are resamp
 - **BreathCLI** (`breath`) — `Sources/BreathCLI/`. Subcommands: render / play / cycle / sequence.
 - **BreathDebugApp** (`breath-debug`) — `Sources/BreathDebugApp/`. SwiftUI app to exercise everything.
 
+## North star: fixes belong in the engine
+
+Bugs and behavior gaps found while exercising `BreathCLI`, `BreathDebugApp`, or `BreathEnrollApp` get
+fixed in `BreathEngine` (or `BreathBank` for enrollment/grading) — never patched around in app code. The
+apps are thin consumers (capture, playback, visualization) with no DSP/timing/decision logic of their
+own; a fix that lives only in one app leaves the same defect in every other consumer. Diagnose from the
+app, fix in the library, verify against the library's test suite.
+
 ## Engine layout (`Sources/BreathEngine/`)
 
 - `Model/` — `BreathTypes` (BreathType, BreathSpec, CycleSpec, VariationOptions, BreathError),
