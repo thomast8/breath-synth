@@ -36,6 +36,10 @@ final class EnrollModel {
 
     /// slug → captured filenames (in order).
     private(set) var captured: [String: [String]] = [:]
+    /// Take filename → that take's spectral-gate candidate diagnostics (only takes with a
+    /// `spectralGate` profile populate this — see `writeSessionManifest`'s sidecar write). Field data
+    /// for future threshold re-tuning; not read by the current build pipeline.
+    private(set) var spectralDiagnostics: [String: [CaptureAnalyzer.SpectralCandidate]] = [:]
     private(set) var roomToneFile: String?
     /// Room-tone noise floor for this session, fed to every later step's detection.
     @ObservationIgnored private var roomFloor: Float?
@@ -64,6 +68,7 @@ final class EnrollModel {
         guard panel.runModal() == .OK, let url = panel.url else { return }
         outputDir = url
         captured = [:]
+        spectralDiagnostics = [:]
         roomToneFile = nil
         roomFloor = nil
         stage = .roomTone
@@ -81,7 +86,7 @@ final class EnrollModel {
                 detection: .fixedDuration(seconds: EnrollmentScript.roomToneSeconds),
                 noiseFloorRMS: nil,
                 fileURL: { _, _ in dir.appendingPathComponent("room_tone.caf") },
-                onSegment: { [weak self] _, _, url, _ in self?.roomToneFile = url.lastPathComponent },
+                onSegment: { [weak self] _, _, url, _, _ in self?.roomToneFile = url.lastPathComponent },
                 onFinished: { [weak self] in
                     guard let self else { return }
                     self.roomFloor = self.recorder.lastNoiseFloorRMS
@@ -109,9 +114,12 @@ final class EnrollModel {
                 fileURL: { i, label in
                     dir.appendingPathComponent("\(slugByLabel[label] ?? "take")_\(i + 1).caf")
                 },
-                onSegment: { [weak self] _, label, url, _ in
+                onSegment: { [weak self] _, label, url, _, spectralCandidates in
                     guard let self, let slug = slugByLabel[label] else { return }
                     self.captured[slug, default: []].append(url.lastPathComponent)
+                    if !spectralCandidates.isEmpty {
+                        self.spectralDiagnostics[url.lastPathComponent] = spectralCandidates
+                    }
                     self.writeSessionManifest()   // persist after every segment so a quit/crash can't lose the run
                 },
                 onFinished: { [weak self] in self?.advance(fromStep: stepIndex) }
@@ -148,10 +156,28 @@ final class EnrollModel {
         case .cleanEvents:
             // Trailing silence must exceed the deliberate inter-event gap (events are well-separated),
             // so a slow gap doesn't end the take after the first event — only the real done-pause does.
-            return .cleanEvents(minGapSec: 0.35, maxTakeSec: step.maxSeconds + 8, trailingSilenceSec: 3.0)
+            return .cleanEvents(minGapSec: 0.35, maxTakeSec: step.maxSeconds + 8, trailingSilenceSec: 3.0,
+                                eventMinDistSec: eventMinDistSec(for: step), targetEvents: step.targetEvents,
+                                spectralGate: spectralGateProfile(for: step))
         case .naturalRhythm:
-            return .naturalRhythm(minActiveSec: 1.0, maxTakeSec: step.maxSeconds + 5, trailingSilenceSec: 1.0)
+            return .naturalRhythm(minActiveSec: 1.0, maxTakeSec: step.maxSeconds + 5, trailingSilenceSec: 1.0,
+                                  eventMinDistSec: eventMinDistSec(for: step),
+                                  spectralGate: spectralGateProfile(for: step))
         }
+    }
+
+    /// Refractory spacing between counted events, by style: recovery's hook breaths need the wider
+    /// offline `hookMinDistSec` floor (matches `UnitExtractor.extract`'s double-sip merge) so an
+    /// in/out pair isn't split into two events; every other counted style uses the tighter gulp floor.
+    private func eventMinDistSec(for step: EnrollmentStep) -> Double {
+        step.lanes.first?.style == "recovery" ? UnitExtractor.hookMinDistSec : UnitExtractor.gulpMinDistSec
+    }
+
+    /// Spectral event-shape profile, by style: packing's sharp glottal gulps and recovery's turbulent
+    /// hook breaths are spectrally near-opposite (see `SpectralGateProfile.gulp`/`.hook`), so there is
+    /// no shared default — every counted style picks explicitly.
+    private func spectralGateProfile(for step: EnrollmentStep) -> SpectralGateProfile {
+        step.lanes.first?.style == "recovery" ? .hook : .gulp
     }
 
     private func advance(fromStep step: Int) {
@@ -211,6 +237,22 @@ final class EnrollModel {
             try session.write(to: dir.appendingPathComponent("captures.json"))
         } catch {
             errorMessage = "Failed to write captures.json: \(error.localizedDescription)"
+        }
+        writeSpectralDiagnostics(to: dir)
+    }
+
+    /// Sidecar file, not read by `breath-bank build`: per-take spectral-gate candidate diagnostics
+    /// (frame, flatness, bandRatio, centroid, accepted), keyed by take filename. Field data for future
+    /// `SpectralGateProfile` re-tuning or a learned classifier — see plan Step 2.4.
+    private func writeSpectralDiagnostics(to dir: URL) {
+        guard !spectralDiagnostics.isEmpty else { return }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        do {
+            let data = try encoder.encode(spectralDiagnostics)
+            try data.write(to: dir.appendingPathComponent("spectral_diagnostics.json"), options: .atomic)
+        } catch {
+            errorMessage = "Failed to write spectral_diagnostics.json: \(error.localizedDescription)"
         }
     }
 

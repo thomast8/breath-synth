@@ -60,7 +60,7 @@ public final class BreathRecorder {
     @ObservationIgnored private var isFixed = false
     @ObservationIgnored private var minPhaseFrames = 0
     @ObservationIgnored private var fileURL: (@MainActor (Int, SegmentLabel) -> URL)?
-    @ObservationIgnored private var onSegment: (@MainActor (Int, SegmentLabel, URL, [Int]) -> Void)?
+    @ObservationIgnored private var onSegment: (@MainActor (Int, SegmentLabel, URL, [Int], [CaptureAnalyzer.SpectralCandidate]) -> Void)?
     @ObservationIgnored private var onFinished: (@MainActor () -> Void)?
     @ObservationIgnored private var configObserver: NSObjectProtocol?
     /// Consecutive auto-rejected cycle takes; after `maxCycleRetries` the next take is force-accepted
@@ -80,7 +80,10 @@ public final class BreathRecorder {
         detection: CaptureDetection,
         noiseFloorRMS: Float?,
         fileURL: @escaping @MainActor (_ takeIndex: Int, _ label: SegmentLabel) -> URL,
-        onSegment: @escaping @MainActor (_ takeIndex: Int, _ label: SegmentLabel, _ url: URL, _ intervalsFrames: [Int]) -> Void,
+        onSegment: @escaping @MainActor (
+            _ takeIndex: Int, _ label: SegmentLabel, _ url: URL, _ intervalsFrames: [Int],
+            _ spectralCandidates: [CaptureAnalyzer.SpectralCandidate]
+        ) -> Void,
         onFinished: @escaping @MainActor () -> Void
     ) throws {
         guard !isRecording else { return }
@@ -216,7 +219,7 @@ public final class BreathRecorder {
                 teardown()
                 return
             }
-            onSegment(takeIndex, segment.label, url, request.intervals)
+            onSegment(takeIndex, segment.label, url, request.intervals, request.spectralCandidates)
         }
         takeIndex += 1
         if takeIndex >= takes {
@@ -375,6 +378,7 @@ private struct FinalizeRequest: Sendable {
     let reason: CaptureAnalyzer.EndReason
     let intervals: [Int]
     let meanFloor: Float
+    let spectralCandidates: [CaptureAnalyzer.SpectralCandidate]
 }
 
 /// One bucket of a downsampled waveform: the min/max sample over its frame range. Cheap to draw (one
@@ -449,7 +453,8 @@ private final class CaptureBox: @unchecked Sendable {
                 armed = false
                 return FinalizeRequest(
                     segments: segments, reason: reason,
-                    intervals: analyzer.intervalsFrames, meanFloor: analyzer.meanFloorRMS()
+                    intervals: analyzer.intervalsFrames, meanFloor: analyzer.meanFloorRMS(),
+                    spectralCandidates: analyzer.spectralCandidates
                 )
             }
         }

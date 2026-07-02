@@ -95,8 +95,8 @@ public enum Grader {
         let binHz = sampleRate / 1024.0
         return Features(
             rmsDb: level > 0 ? 20 * log10(Double(level)) : -120,
-            centroidHz: spectralCentroid(profile, binHz: binHz),
-            flatness: spectralFlatness(profile),
+            centroidHz: SpectralFeatures.centroid(profile, binHz: binHz),
+            flatness: SpectralFeatures.flatness(profile),
             snrDb: snrDb(profile: profile, room: roomToneProfile, binHz: binHz,
                          low: thresholds.bandLowHz, high: thresholds.bandHighHz),
             profile: profile,
@@ -208,40 +208,12 @@ public enum Grader {
         return false
     }
 
-    static func spectralCentroid(_ profile: [Float], binHz: Double) -> Double {
-        var num = 0.0, den = 0.0
-        for (k, m) in profile.enumerated() {
-            num += Double(k) * binHz * Double(m)
-            den += Double(m)
-        }
-        return den > 0 ? num / den : 0
-    }
-
-    /// Spectral flatness (Wiener entropy): geometric mean / arithmetic mean of the magnitudes, in
-    /// [0, 1]. 1 ≈ white/noisy, → 0 ≈ tonal. Computed over bins with non-trivial magnitude.
-    static func spectralFlatness(_ profile: [Float]) -> Double {
-        let mags = profile.map { Double($0) }.filter { $0 > 1e-9 }
-        guard !mags.isEmpty else { return 0 }
-        let logMean = mags.reduce(0) { $0 + log($1) } / Double(mags.count)
-        let arithMean = mags.reduce(0, +) / Double(mags.count)
-        return arithMean > 0 ? exp(logMean) / arithMean : 0
-    }
-
-    static func bandEnergy(_ profile: [Float], binHz: Double, low: Double, high: Double) -> Double {
-        var energy = 0.0
-        for (k, m) in profile.enumerated() {
-            let hz = Double(k) * binHz
-            if hz >= low, hz <= high { energy += Double(m) * Double(m) }
-        }
-        return energy
-    }
-
     /// SNR in dB: in-band fragment energy over in-band room-tone energy. Returns a high value (so the
     /// SNR stage never rejects) when there is no room-tone profile to compare against.
     static func snrDb(profile: [Float], room: [Float]?, binHz: Double, low: Double, high: Double) -> Double {
         guard let room, room.count == profile.count, !room.isEmpty else { return 99 }
-        let signal = bandEnergy(profile, binHz: binHz, low: low, high: high)
-        let noise = bandEnergy(room, binHz: binHz, low: low, high: high)
+        let signal = SpectralFeatures.bandEnergy(profile, binHz: binHz, low: low, high: high)
+        let noise = SpectralFeatures.bandEnergy(room, binHz: binHz, low: low, high: high)
         guard noise > 1e-12 else { return 99 }
         guard signal > 1e-12 else { return -99 }
         return 10 * log10(signal / noise)

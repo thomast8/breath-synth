@@ -131,7 +131,9 @@ struct EnrollContentView: View {
             let target = step.targetEvents.map { " / ~\($0)" } ?? ""
             Text("\(model.recorder.eventCount)\(target) detected")
                 .font(.callout.monospacedDigit())
-            if model.recorder.gapTooClose {
+            if let target = step.targetEvents, model.recorder.eventCount >= target {
+                Text("Got all \(target) — wrapping up").font(.caption).foregroundStyle(.green)
+            } else if model.recorder.gapTooClose {
                 Text("Leave a clearer gap between events").font(.caption).foregroundStyle(.orange)
             }
         }

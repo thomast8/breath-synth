@@ -311,4 +311,79 @@ final class CaptureAnalyzerTests: XCTestCase {
         let offline = UnitExtractor.gulpCoreRanges(from: buffer, sampleRate: sr).count
         XCTAssertEqual(analyzer.eventCount, offline, accuracy: 1)
     }
+
+    // MARK: Style-aware spectral gate (Step 2.4) — zero-true-event-loss against the gold assets
+
+    /// Every width-confirmed candidate in a bundled gold recording must be spectrally accepted under
+    /// its style's profile — this is the permanent release gate for `SpectralGateProfile` thresholds.
+    /// Packing gulps (sharp glottal clicks, energy skewed above 3 kHz) and recovery hooks (turbulent
+    /// airflow concentrated in 300-3000 Hz) are spectrally near-opposite — see `SpectralGateProfile`'s
+    /// doc comments for the measured cluster evidence behind `.gulp`/`.hook`.
+    func testGoldPackingAcceptedUnderGulpProfile() throws {
+        for name in ["packing_1.aifc", "packing_2.aifc"] {
+            let samples = try AssetLibrary.loadMonoSamples(url: assetURL(name), targetRate: sr)
+            let (_, analyzer) = run(.cleanEvents(minGapSec: 0.22, maxTakeSec: 40, trailingSilenceSec: 3.0,
+                                                 eventMinDistSec: UnitExtractor.gulpMinDistSec,
+                                                 spectralGate: .gulp), samples)
+            let rejected = analyzer.spectralCandidates.filter { !$0.accepted }
+            XCTAssertTrue(rejected.isEmpty, "\(name): \(rejected.count)/\(analyzer.spectralCandidates.count) real gulps rejected — \(rejected)")
+        }
+    }
+
+    func testGoldRecoveryAcceptedUnderHookProfile() throws {
+        let samples = try AssetLibrary.loadMonoSamples(url: assetURL("recovery.aifc"), targetRate: sr)
+        let (_, analyzer) = run(.naturalRhythm(minActiveSec: 0.5, maxTakeSec: 40, trailingSilenceSec: 3.0,
+                                               eventMinDistSec: UnitExtractor.hookMinDistSec,
+                                               spectralGate: .hook), samples)
+        let rejected = analyzer.spectralCandidates.filter { !$0.accepted }
+        XCTAssertTrue(rejected.isEmpty, "recovery.aifc: \(rejected.count)/\(analyzer.spectralCandidates.count) real hooks rejected — \(rejected)")
+    }
+
+    /// Synthetic band-limited bursts, approximated as a sum of sinusoids spanning `[lowHz, highHz]`
+    /// (cheaper and more precisely band-limited for test purposes than a filtered noise source).
+    private func spectralBurst(lowHz: Double, highHz: Double, sec: Double, amp: Float = 0.3) -> [Float] {
+        let n = Int(sec * sr)
+        return (0..<n).map { i in
+            let t = Double(i) / sr
+            var s = 0.0
+            var f = lowHz
+            let step = (highHz - lowHz) / 8
+            while f <= highHz {
+                s += sin(2 * .pi * f * t)
+                f += step
+            }
+            return Float(s / 9) * amp
+        }
+    }
+
+    /// Locks in the style inversion found this session: a signal shaped like real recovery breath
+    /// (broadband energy concentrated in 300-3000 Hz) is *not* what a packing gulp looks like
+    /// (centroid well above 3 kHz), and vice versa. Guards against a future "unification" of the two
+    /// profiles, which the measured gold data shows would be wrong for at least one style.
+    func testGulpAndHookProfilesDisagreeByDesign() {
+        let breathBandBurst = silence(0.3) + spectralBurst(lowHz: 300, highHz: 3000, sec: 0.3) + silence(1.5)
+        let (_, gulpOnBreathBand) = run(.cleanEvents(minGapSec: 0.22, maxTakeSec: 10, trailingSilenceSec: 1.0,
+                                                      spectralGate: .gulp), breathBandBurst)
+        XCTAssertEqual(gulpOnBreathBand.eventCount, 0, "a breath-band (recovery-shaped) burst must not pass .gulp")
+        let (_, hookOnBreathBand) = run(.cleanEvents(minGapSec: 0.22, maxTakeSec: 10, trailingSilenceSec: 1.0,
+                                                      spectralGate: .hook), breathBandBurst)
+        XCTAssertEqual(hookOnBreathBand.eventCount, 1, "a breath-band (recovery-shaped) burst must pass .hook")
+
+        let highBurst = silence(0.3) + spectralBurst(lowHz: 6000, highHz: 9000, sec: 0.3) + silence(1.5)
+        let (_, gulpOnHigh) = run(.cleanEvents(minGapSec: 0.22, maxTakeSec: 10, trailingSilenceSec: 1.0,
+                                               spectralGate: .gulp), highBurst)
+        XCTAssertEqual(gulpOnHigh.eventCount, 1, "a high-centroid (packing-shaped) burst must pass .gulp")
+        let (_, hookOnHigh) = run(.cleanEvents(minGapSec: 0.22, maxTakeSec: 10, trailingSilenceSec: 1.0,
+                                               spectralGate: .hook), highBurst)
+        XCTAssertEqual(hookOnHigh.eventCount, 0, "a high-centroid (packing-shaped) burst must not pass .hook")
+    }
+
+    /// `spectralGate: nil` (the default) must leave width/refractory-only behavior untouched.
+    func testSpectralGateNilLeavesCountingUnaffected() {
+        let signal = silence(0.3) + impulses(6, spacingSec: 0.5) + silence(1.0)
+        let (_, analyzer) = run(.cleanEvents(minGapSec: 0.4, maxTakeSec: 20, trailingSilenceSec: 0.8,
+                                             spectralGate: nil), signal)
+        XCTAssertEqual(analyzer.eventCount, 6)
+        XCTAssertTrue(analyzer.spectralCandidates.isEmpty)
+    }
 }

@@ -22,6 +22,8 @@ public struct CaptureAnalyzer {
         case silence
         /// A `cycle` never produced a full inhale→pause→exhale within `maxCycleSec` (inhale-only).
         case incomplete
+        /// `targetEvents` was reached and the shorter post-target trailing silence elapsed.
+        case targetReached
     }
 
     public enum Event: Sendable, Equatable {
@@ -61,10 +63,27 @@ public struct CaptureAnalyzer {
     private static let releaseRatio: Float = 0.6
     /// An event peak must exceed this fraction of the take's running peak (matches `UnitExtractor`).
     private static let eventPeakFrac: Float = 0.12
-    /// Refractory spacing between counted events (matches the offline gulp cadence floor).
-    private static let eventRefractorySec = UnitExtractor.gulpMinDistSec
     /// A cycle's two phases must be within this duration ratio to be accepted.
     public static let cycleBalanceRatio = 3.0
+    /// An onset is only confirmed once its containing activity run has lasted this long — shorter runs
+    /// (a keyboard click, a knock) are discarded and the take stays armed, listening for a real one.
+    private static let onsetWidthSec = 0.05
+    /// A counted event is only confirmed once its containing activity run has lasted this long. Clicks
+    /// (tens of ms) never qualify; gulps/hooks (hundreds of ms) always do.
+    private static let minEventWidthSec = 0.10
+    /// Once `targetEvents` (where set) is reached, the take ends on this much shorter trailing silence
+    /// instead of the full `trailingSilenceSec` — above intra-event dips, far below a typical done-pause.
+    private static let postTargetTrailingSec = 0.7
+    /// Raw-audio history to retain for the spectral event gate — covers the width gate's confirmation
+    /// delay (`minEventWidthSec`) plus half the spectral analysis window, with margin.
+    private static let rawRetentionSec = 0.4
+    /// Spectral analysis window around a confirmed candidate, capped (peak-centered where enough
+    /// history is retained on both sides, otherwise whatever's available).
+    private static let spectralWindowSec = 0.25
+    /// Breath band (Hz) — matches `Grader.Thresholds`' defaults; used for the diagnostic `bandRatio`
+    /// feature (see `SpectralCandidate`), not a per-call knob.
+    private static let breathBandLowHz = 300.0
+    private static let breathBandHighHz = 3000.0
 
     // MARK: Config
 
@@ -85,6 +104,13 @@ public struct CaptureAnalyzer {
     private let countsEvents: Bool
     private let isCycle: Bool
     private let isFixed: Bool
+    private let targetEventsCount: Int?
+    private let spectralGateProfile: SpectralGateProfile?
+    private let onsetWidthFrames: Int
+    private let minEventWidthFrames: Int
+    private let postTargetTrailingFrames: Int
+    private let rawRetentionFrames: Int
+    private let spectralWindowFrames: Int
 
     // MARK: Sliding-RMS ring (squared samples)
 
@@ -107,6 +133,35 @@ public struct CaptureAnalyzer {
     private var silenceFrames = 0
     private var silenceStartFrame = 0
     private var totalActiveFrames = 0
+    /// Start of the *current continuous activity run* (resets every `becameActive`) — the basis for
+    /// both the onset and event-peak width gates. Distinct from `segmentStartFrame`/`phaseStartFrame`,
+    /// which mark segment/phase boundaries and don't reset per intra-take run.
+    private var currentRunStartFrame = 0
+    /// An onset candidate awaiting width confirmation (armed state only).
+    private var pendingOnsetFrame: Int?
+    /// An event-peak candidate awaiting width confirmation, at most one per activity run.
+    private var pendingPeakFrame: Int?
+
+    // MARK: Raw-sample retention (spectral event gate; populated only when `spectralGateProfile != nil`)
+
+    private var rawBuffer: [Float] = []
+    /// Absolute frame (`totalFrames`) of `rawBuffer[0]`.
+    private var rawBufferStartFrame = 0
+
+    /// One width-confirmed candidate's spectral features and the gate's verdict — populated only when
+    /// `spectralGateProfile != nil`. Diagnostic surface for tuning `SpectralGateProfile` presets
+    /// against real recordings and for the fixture-replay test harness; not consumed by the state
+    /// machine itself (the verdict is applied inline in `detectEventPeak`).
+    public struct SpectralCandidate: Sendable, Equatable, Codable {
+        public let frame: Int
+        public let flatness: Double
+        public let bandRatio: Double
+        public let centroidHz: Double
+        public let windowFrameCount: Int
+        public let windowRMS: Double
+        public let accepted: Bool
+    }
+    public private(set) var spectralCandidates: [SpectralCandidate] = []
 
     // MARK: Capture state machine
 
@@ -166,13 +221,18 @@ public struct CaptureAnalyzer {
         activityThreshold = max(floorBase, Self.absActivityFloor)
         let sr = sampleRate
         let toFrames: (Double) -> Int = { max(1, Int($0 * sr)) }
-        refractoryFrames = toFrames(Self.eventRefractorySec)
+        onsetWidthFrames = toFrames(Self.onsetWidthSec)
+        minEventWidthFrames = toFrames(Self.minEventWidthSec)
+        postTargetTrailingFrames = toFrames(Self.postTargetTrailingSec)
+        rawRetentionFrames = toFrames(Self.rawRetentionSec)
+        spectralWindowFrames = toFrames(Self.spectralWindowSec)
 
         switch detection {
         case let .fixedDuration(seconds):
             isFixed = true; isCycle = false; countsEvents = false
             maxFrames = toFrames(seconds)
             trailingFrames = 0; midPauseFrames = 0; minActiveFrames = 0; minGapFrames = 0
+            refractoryFrames = 0; targetEventsCount = nil; spectralGateProfile = nil
             state = .capturing
         case let .cycle(minPhaseSec, midPauseSec, maxCycleSec, trailingSilenceSec):
             isFixed = false; isCycle = true; countsEvents = false
@@ -180,33 +240,41 @@ public struct CaptureAnalyzer {
             midPauseFrames = toFrames(midPauseSec)
             maxFrames = toFrames(maxCycleSec)
             minActiveFrames = toFrames(minPhaseSec)
-            minGapFrames = 0
+            minGapFrames = 0; refractoryFrames = 0; targetEventsCount = nil; spectralGateProfile = nil
         case let .single(minActiveSec, maxTakeSec, trailingSilenceSec):
             isFixed = false; isCycle = false; countsEvents = false
             trailingFrames = toFrames(trailingSilenceSec)
             maxFrames = toFrames(maxTakeSec)
             minActiveFrames = toFrames(minActiveSec)
-            midPauseFrames = 0; minGapFrames = 0
-        case let .cleanEvents(minGapSec, maxTakeSec, trailingSilenceSec):
+            midPauseFrames = 0; minGapFrames = 0; refractoryFrames = 0
+            targetEventsCount = nil; spectralGateProfile = nil
+        case let .cleanEvents(minGapSec, maxTakeSec, trailingSilenceSec, eventMinDistSec, targetEvents, spectralGate):
             isFixed = false; isCycle = false; countsEvents = true
             trailingFrames = toFrames(trailingSilenceSec)
             maxFrames = toFrames(maxTakeSec)
             minGapFrames = toFrames(minGapSec)
             minActiveFrames = 0; midPauseFrames = 0
-        case let .naturalRhythm(minActiveSec, maxTakeSec, trailingSilenceSec):
+            refractoryFrames = toFrames(eventMinDistSec)
+            targetEventsCount = targetEvents; spectralGateProfile = spectralGate
+        case let .naturalRhythm(minActiveSec, maxTakeSec, trailingSilenceSec, eventMinDistSec, spectralGate):
             isFixed = false; isCycle = false; countsEvents = true
             trailingFrames = toFrames(trailingSilenceSec)
             maxFrames = toFrames(maxTakeSec)
             minActiveFrames = toFrames(minActiveSec)
             minGapFrames = 0; midPauseFrames = 0
+            refractoryFrames = toFrames(eventMinDistSec)
+            targetEventsCount = nil; spectralGateProfile = spectralGate
         }
     }
 
     // MARK: Ingest
 
-    /// Feed mono frames; returns the events produced. Cheap and allocation-light (one small array).
+    /// Feed mono frames; returns the events produced. Cheap and allocation-light (one small array; a
+    /// bounded raw-history append+trim when the spectral gate is enabled — the trim is a memmove of at
+    /// most a few tens of KB per call, negligible next to a ~93ms tap-buffer period).
     public mutating func ingest(_ frames: [Float]) -> [Event] {
         var events: [Event] = []
+        if spectralGateProfile != nil { rawBuffer.append(contentsOf: frames) }
         for sample in frames {
             let sq = sample * sample
             if ringFilled < windowSamples {
@@ -227,7 +295,22 @@ public struct CaptureAnalyzer {
                 step(env, into: &events)
             }
         }
+        if spectralGateProfile != nil, rawBuffer.count > rawRetentionFrames {
+            let excess = rawBuffer.count - rawRetentionFrames
+            rawBuffer.removeFirst(excess)
+            rawBufferStartFrame += excess
+        }
         return events
+    }
+
+    /// Raw samples for absolute frames `[start, end)`, clamped to what's currently retained. Empty if
+    /// nothing in range is retained (spectral gating disabled, or the window has already aged out).
+    private func rawWindow(from start: Int, to end: Int) -> [Float] {
+        let bufEnd = rawBufferStartFrame + rawBuffer.count
+        let lo = max(start, rawBufferStartFrame)
+        let hi = min(end, bufEnd)
+        guard lo < hi else { return [] }
+        return Array(rawBuffer[(lo - rawBufferStartFrame)..<(hi - rawBufferStartFrame)])
     }
 
     /// Force the current take to end now (manual Stop): emit the in-progress segment with the
@@ -290,21 +373,34 @@ public struct CaptureAnalyzer {
             silenceFrames += hopSamples
         }
         let becameActive = !wasActive && isActive
+        if becameActive { currentRunStartFrame = max(0, currentFrame - windowSamples) }
 
         switch state {
         case .armed:
+            // Onset is confirmed only once its containing run has lasted `onsetWidthFrames` — a click
+            // that ends before that stays un-onset and the take keeps listening for a real one.
             if becameActive {
-                segmentStartFrame = max(0, currentFrame - windowSamples)
-                phaseStartFrame = segmentStartFrame
-                events.append(.onset)
-                state = isCycle ? .inhale : .capturing
+                pendingOnsetFrame = currentRunStartFrame
+            }
+            if let onset = pendingOnsetFrame {
+                if !isActive {
+                    pendingOnsetFrame = nil
+                } else if currentFrame - onset >= onsetWidthFrames {
+                    pendingOnsetFrame = nil
+                    segmentStartFrame = onset
+                    phaseStartFrame = onset
+                    events.append(.onset)
+                    state = isCycle ? .inhale : .capturing
+                }
             }
         case .capturing:
             if countsEvents { detectEventPeak(env: env, currentFrame: currentFrame, into: &events) }
+            let targetHit = targetEventsCount.map { eventCount >= $0 } ?? false
+            let requiredTrailing = targetHit ? postTargetTrailingFrames : trailingFrames
             if currentFrame >= maxFrames {
                 endWhole(at: currentFrame, reason: .duration, into: &events)
-            } else if !isActive, silenceFrames >= trailingFrames, totalActiveFrames >= minActiveFrames {
-                endWhole(at: silenceStartFrame, reason: .silence, into: &events)
+            } else if !isActive, silenceFrames >= requiredTrailing, totalActiveFrames >= minActiveFrames {
+                endWhole(at: silenceStartFrame, reason: targetHit ? .targetReached : .silence, into: &events)
             }
         case .inhale:
             // Require a real phase's worth of airflow before a pause can split: a natural intra-breath
@@ -349,22 +445,45 @@ public struct CaptureAnalyzer {
         state = .done
     }
 
-    /// One-hop-lookahead local-max peak picker: the previous hop is a peak if it rose (`prevEnv ≥
-    /// prevPrevEnv`) then fell (`prevEnv > env`), clears the event threshold, and is at least the
-    /// refractory distance from the last counted peak. The peak's frame is one hop back.
+    /// One-hop-lookahead local-max peak picker, width-gated: a peak-shaped candidate (`prevEnv ≥
+    /// prevPrevEnv` then falling, clearing the event threshold) is tracked but not yet counted; it's
+    /// only confirmed once *its containing activity run* has lasted `minEventWidthFrames` — a click
+    /// whose run ends first is discarded, as if it never happened. At most one pending candidate is
+    /// tracked per run (a run confirmed once stays confirmed for any later peak within the same run).
     private mutating func detectEventPeak(env: Float, currentFrame: Int, into events: inout [Event]) {
-        let threshold = max(activityThreshold, Self.eventPeakFrac * runningPeak)
-        guard prevEnv >= threshold, prevEnv >= prevPrevEnv, prevEnv > env else { return }
-        let peakFrame = max(0, currentFrame - hopSamples)
-        if let last = lastPeakFrame, peakFrame - last < refractoryFrames { return }
+        // Frozen once the target is reached — the take is just waiting out the post-target trailing
+        // silence now, so further activity (including the keyboard sounds that used to keep piling up
+        // past the target) is neither counted nor allowed to reset that shorter silence window.
+        if let target = targetEventsCount, eventCount >= target { return }
+        if pendingPeakFrame == nil {
+            let threshold = max(activityThreshold, Self.eventPeakFrac * runningPeak)
+            if prevEnv >= threshold, prevEnv >= prevPrevEnv, prevEnv > env {
+                pendingPeakFrame = max(0, currentFrame - hopSamples)
+            }
+        }
+        guard let candidate = pendingPeakFrame else { return }
+        if !isActive {
+            pendingPeakFrame = nil  // the run that contained this candidate ended too soon — a click
+            return
+        }
+        guard currentFrame - currentRunStartFrame >= minEventWidthFrames else { return }  // keep waiting
+        pendingPeakFrame = nil
+
+        // Spectral gate: reject a width-confirmed candidate whose spectrum is clearly non-breath (a
+        // typing roll wide enough to pass the width gate, nearby speech). Discarded exactly like a
+        // width-gate rejection — no event, no interval, `lastPeakFrame` untouched so it can't distort
+        // the refractory spacing between two genuine events either side of it.
+        if spectralGateProfile != nil, !isCandidateBreathShaped(candidate) { return }
+
+        if let last = lastPeakFrame, candidate - last < refractoryFrames { return }
         if let last = lastPeakFrame {
-            let gap = peakFrame - last
+            let gap = candidate - last
             intervalsFrames.append(gap)
             lastGapWithinMin = minGapFrames > 0 && gap < minGapFrames
         } else {
             lastGapWithinMin = false
         }
-        lastPeakFrame = peakFrame
+        lastPeakFrame = candidate
         events.append(.eventDetected(index: eventCount))
         eventCount += 1
     }
@@ -387,5 +506,30 @@ public struct CaptureAnalyzer {
     /// ``cycleIssue(inhaleFrames:exhaleFrames:minPhaseFrames:)`` for callers that only need the bool.
     public static func cycleSegmentsValid(inhaleFrames: Int, exhaleFrames: Int, minPhaseFrames: Int) -> Bool {
         cycleIssue(inhaleFrames: inhaleFrames, exhaleFrames: exhaleFrames, minPhaseFrames: minPhaseFrames) == nil
+    }
+
+    /// Spectral breath-shape check for a width-confirmed event candidate, reusing the same
+    /// `SpectralDenoise.magnitudeProfile` + `SpectralFeatures` formulas the offline `Grader` grades
+    /// fragments with. An empty profile (too little retained history at the candidate's position, or a
+    /// window too short for even one FFT frame) is never rejected — the width gate already filtered
+    /// out anything that short, so an empty profile here means "not enough context," not "not breath."
+    private mutating func isCandidateBreathShaped(_ candidate: Int) -> Bool {
+        let half = spectralWindowFrames / 2
+        let window = rawWindow(from: candidate - half, to: candidate + half)
+        let profile = SpectralDenoise.magnitudeProfile(from: window, sampleRate: sampleRate)
+        let binHz = sampleRate / 1024.0
+        let flat = SpectralFeatures.flatness(profile)
+        let ratio = SpectralFeatures.bandEnergyRatio(
+            profile, binHz: binHz, low: Self.breathBandLowHz, high: Self.breathBandHighHz)
+        let centroid = SpectralFeatures.centroid(profile, binHz: binHz)
+        var sumSq: Double = 0
+        for s in window { sumSq += Double(s) * Double(s) }
+        let rms = window.isEmpty ? 0 : (sumSq / Double(window.count)).squareRoot()
+        let accepted = profile.isEmpty
+            || (spectralGateProfile?.accepts(flatness: flat, bandRatio: ratio, centroidHz: centroid) ?? true)
+        spectralCandidates.append(SpectralCandidate(
+            frame: candidate, flatness: flat, bandRatio: ratio, centroidHz: centroid,
+            windowFrameCount: window.count, windowRMS: rms, accepted: accepted))
+        return accepted
     }
 }
