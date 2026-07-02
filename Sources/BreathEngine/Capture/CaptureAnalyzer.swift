@@ -35,6 +35,20 @@ public struct CaptureAnalyzer {
         case takeEnded(reason: EndReason)
     }
 
+    /// Why a take was rejected by the structural validity guard — surfaced to the UI so a retake
+    /// prompt can name the actual defect instead of one generic sentence.
+    public enum TakeIssue: Sendable, Equatable {
+        /// A `cycle` take never completed a full inhale→pause→exhale split (missing exhale, or a
+        /// manual stop mid-take).
+        case noPauseDetected
+        case inhaleTooShort
+        case exhaleTooShort
+        /// The two phases' duration ratio exceeded ``cycleBalanceRatio``.
+        case phasesImbalanced(ratio: Double)
+        /// A non-`cycle` take produced no segment at all.
+        case noSegment
+    }
+
     // MARK: Tuning
 
     private static let windowSec = 0.020
@@ -99,6 +113,31 @@ public struct CaptureAnalyzer {
     private enum State { case armed, capturing, inhale, midPause, exhale, done }
     private var state: State = .armed
     private var segmentStartFrame = 0
+    /// Frame the *current* state was entered — the basis for ``phaseElapsedFrames``.
+    private var phaseStartFrame = 0
+
+    /// Coarse live phase for the UI — collapses ``State`` to what's worth showing (`.done` reads as
+    /// `.waiting` since a take-ended take is about to be re-armed for the next one).
+    public enum LivePhase: Sendable, Equatable {
+        case waiting
+        case capturing
+        case inhale
+        case midPause
+        case exhale
+    }
+
+    public var livePhase: LivePhase {
+        switch state {
+        case .armed, .done: return .waiting
+        case .capturing: return .capturing
+        case .inhale: return .inhale
+        case .midPause: return .midPause
+        case .exhale: return .exhale
+        }
+    }
+
+    /// Frames elapsed since the current phase (state) began.
+    public var phaseElapsedFrames: Int { max(0, totalFrames - phaseStartFrame) }
 
     // MARK: Public detection results (read by the recorder for live UI)
 
@@ -256,6 +295,7 @@ public struct CaptureAnalyzer {
         case .armed:
             if becameActive {
                 segmentStartFrame = max(0, currentFrame - windowSamples)
+                phaseStartFrame = segmentStartFrame
                 events.append(.onset)
                 state = isCycle ? .inhale : .capturing
             }
@@ -271,6 +311,7 @@ public struct CaptureAnalyzer {
             // dip (which can exceed `midPauseFrames`) must not be mistaken for the inter-phase pause.
             if !isActive, silenceFrames >= midPauseFrames, totalActiveFrames >= minActiveFrames {
                 events.append(.segmentReady(label: .inhale, startFrame: segmentStartFrame, endFrame: silenceStartFrame))
+                phaseStartFrame = silenceStartFrame
                 state = .midPause
             } else if currentFrame >= maxFrames {
                 events.append(.takeEnded(reason: .incomplete))
@@ -279,6 +320,7 @@ public struct CaptureAnalyzer {
         case .midPause:
             if becameActive {
                 segmentStartFrame = max(0, currentFrame - windowSamples)
+                phaseStartFrame = segmentStartFrame
                 state = .exhale
             } else if currentFrame >= maxFrames {
                 events.append(.takeEnded(reason: .incomplete))
@@ -327,14 +369,23 @@ public struct CaptureAnalyzer {
         eventCount += 1
     }
 
-    /// Whether a `cycle` take's two phase durations (frames) are a plausible split: each at least
-    /// `minPhaseFrames`, and within ``cycleBalanceRatio``. The structural guard against a missing
-    /// mid-pause (1 segment) or a turbulence-induced false split (2 lopsided segments) — the grader is
-    /// *not* a reliable phase backstop for soft broadband airflow.
-    public static func cycleSegmentsValid(inhaleFrames: Int, exhaleFrames: Int, minPhaseFrames: Int) -> Bool {
-        guard inhaleFrames >= minPhaseFrames, exhaleFrames >= minPhaseFrames else { return false }
+    /// Why a `cycle` take's two phase durations (frames) fail the plausible-split guard, or `nil` if
+    /// they pass: each at least `minPhaseFrames`, and within ``cycleBalanceRatio``. The structural
+    /// guard against a missing mid-pause (1 segment) or a turbulence-induced false split (2 lopsided
+    /// segments) — the grader is *not* a reliable phase backstop for soft broadband airflow.
+    public static func cycleIssue(inhaleFrames: Int, exhaleFrames: Int, minPhaseFrames: Int) -> TakeIssue? {
+        if inhaleFrames < minPhaseFrames { return .inhaleTooShort }
+        if exhaleFrames < minPhaseFrames { return .exhaleTooShort }
         let lo = Double(min(inhaleFrames, exhaleFrames))
         let hi = Double(max(inhaleFrames, exhaleFrames))
-        return lo > 0 && hi / lo <= cycleBalanceRatio
+        guard lo > 0 else { return .inhaleTooShort }
+        let ratio = hi / lo
+        return ratio > cycleBalanceRatio ? .phasesImbalanced(ratio: ratio) : nil
+    }
+
+    /// Whether a `cycle` take's two phase durations (frames) are a plausible split. Thin wrapper over
+    /// ``cycleIssue(inhaleFrames:exhaleFrames:minPhaseFrames:)`` for callers that only need the bool.
+    public static func cycleSegmentsValid(inhaleFrames: Int, exhaleFrames: Int, minPhaseFrames: Int) -> Bool {
+        cycleIssue(inhaleFrames: inhaleFrames, exhaleFrames: exhaleFrames, minPhaseFrames: minPhaseFrames) == nil
     }
 }

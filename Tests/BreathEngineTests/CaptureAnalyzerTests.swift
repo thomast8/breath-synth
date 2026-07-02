@@ -186,6 +186,65 @@ final class CaptureAnalyzerTests: XCTestCase {
             inhaleFrames: Int(0.6 * sr), exhaleFrames: Int(2.5 * sr), minPhaseFrames: minPhase))
     }
 
+    // MARK: TakeIssue (Phase 1 — live rejection-reason detail)
+
+    func testCycleIssueDistinguishesReasons() {
+        let minPhase = Int(0.5 * sr)
+        XCTAssertNil(CaptureAnalyzer.cycleIssue(
+            inhaleFrames: Int(1.5 * sr), exhaleFrames: Int(1.5 * sr), minPhaseFrames: minPhase))
+        XCTAssertEqual(CaptureAnalyzer.cycleIssue(
+            inhaleFrames: Int(0.2 * sr), exhaleFrames: Int(1.5 * sr), minPhaseFrames: minPhase), .inhaleTooShort)
+        XCTAssertEqual(CaptureAnalyzer.cycleIssue(
+            inhaleFrames: Int(1.5 * sr), exhaleFrames: Int(0.2 * sr), minPhaseFrames: minPhase), .exhaleTooShort)
+        // Both short: inhale takes priority (arbitrary but consistent single-reason choice).
+        XCTAssertEqual(CaptureAnalyzer.cycleIssue(
+            inhaleFrames: Int(0.1 * sr), exhaleFrames: Int(0.2 * sr), minPhaseFrames: minPhase), .inhaleTooShort)
+        // Imbalanced (> 3:1), both individually long enough.
+        if case let .phasesImbalanced(ratio)? = CaptureAnalyzer.cycleIssue(
+            inhaleFrames: Int(0.6 * sr), exhaleFrames: Int(2.5 * sr), minPhaseFrames: minPhase) {
+            XCTAssertEqual(ratio, 2.5 / 0.6, accuracy: 0.01)
+        } else {
+            XCTFail("expected .phasesImbalanced")
+        }
+        // cycleSegmentsValid stays a thin bool wrapper — regression guard for Step 1.1's refactor.
+        XCTAssertEqual(CaptureAnalyzer.cycleSegmentsValid(
+            inhaleFrames: Int(1.5 * sr), exhaleFrames: Int(1.5 * sr), minPhaseFrames: minPhase),
+            CaptureAnalyzer.cycleIssue(inhaleFrames: Int(1.5 * sr), exhaleFrames: Int(1.5 * sr), minPhaseFrames: minPhase) == nil)
+    }
+
+    // MARK: LivePhase / phaseElapsedFrames (Phase 1 — live phase feedback)
+
+    func testLivePhaseTracksInhalePauseExhale() {
+        let signal = silence(0.3) + tone(1.5) + silence(0.6) + tone(1.5) + silence(1.0)
+        let detection = CaptureDetection.cycle(minPhaseSec: 0.5, midPauseSec: 0.4, maxCycleSec: 20, trailingSilenceSec: 0.8)
+
+        func analyzer(after seconds: Double) -> CaptureAnalyzer {
+            var a = CaptureAnalyzer(sampleRate: sr, detection: detection, noiseFloorRMS: nil)
+            let count = min(signal.count, Int(seconds * sr))
+            var i = 0
+            while i < count {
+                let end = min(count, i + 4_096)
+                _ = a.ingest(Array(signal[i..<end]))
+                i = end
+            }
+            return a
+        }
+
+        // Onset at ~0.3s; mid-pause doesn't trigger until ~1.8s of silence + 0.4s midPauseSec ≈ 2.2s;
+        // exhale onset at ~2.4s. Checkpoints sit well inside each phase, clear of hop-boundary jitter.
+        XCTAssertEqual(analyzer(after: 1.0).livePhase, .inhale)
+        XCTAssertEqual(analyzer(after: 2.3).livePhase, .midPause)
+        XCTAssertEqual(analyzer(after: 3.0).livePhase, .exhale)
+
+        let midInhale = analyzer(after: 1.0).phaseElapsedFrames
+        let laterInhale = analyzer(after: 1.5).phaseElapsedFrames
+        XCTAssertGreaterThan(laterInhale, midInhale)
+
+        // Just after the exhale onset, elapsed-in-phase should be small — not carried over from inhale.
+        let earlyExhale = analyzer(after: 2.5).phaseElapsedFrames
+        XCTAssertLessThan(earlyExhale, Int(0.3 * sr))
+    }
+
     // MARK: Real breath recordings — drive the detector with real audio (oracle = offline UnitExtractor)
 
     private func assetURL(_ name: String) -> URL {

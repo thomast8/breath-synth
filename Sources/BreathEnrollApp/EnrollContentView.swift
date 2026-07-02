@@ -125,6 +125,8 @@ struct EnrollContentView: View {
         Text(phaseLabel(step))
             .font(.callout).foregroundStyle(.secondary)
         levelMeter
+        EnrollWaveformView(peaks: model.recorder.wavePeaks)
+            .frame(maxWidth: 480, minHeight: 80, maxHeight: 100)
         if step.detection == .cleanEvents || step.detection == .naturalRhythm {
             let target = step.targetEvents.map { " / ~\($0)" } ?? ""
             Text("\(model.recorder.eventCount)\(target) detected")
@@ -133,8 +135,8 @@ struct EnrollContentView: View {
                 Text("Leave a clearer gap between events").font(.caption).foregroundStyle(.orange)
             }
         }
-        if model.recorder.invalidTakes > 0 {
-            Text("Retaking — last attempt wasn't a clean inhale → pause → exhale")
+        if let issue = model.recorder.lastTakeIssue {
+            Text("Retaking — \(retakeReason(issue))")
                 .font(.caption).foregroundStyle(.orange)
         }
         HStack(spacing: 16) {
@@ -148,13 +150,32 @@ struct EnrollContentView: View {
         .controlSize(.large)
     }
 
+    /// Phase-specific status text, including a running per-phase timer — replaces the old static
+    /// "Capturing… (inhale, pause, exhale)" that never changed for the whole take.
     private func phaseLabel(_ step: EnrollmentStep) -> String {
-        switch model.recorder.phase {
-        case .idle: return "…"
-        case .waitingForOnset:
+        let elapsed = fmt(model.recorder.phaseElapsed)
+        switch model.recorder.livePhase {
+        case .waiting:
             return step.detection == .cycle ? "Ready — inhale when you are" : "Ready — begin when you are"
+        case .inhale:
+            return "Inhaling… \(elapsed)s"
+        case .midPause:
+            return "Pause — now exhale"
+        case .exhale:
+            return "Exhaling… \(elapsed)s"
         case .capturing:
-            return step.detection == .cycle ? "Capturing… (inhale, pause, exhale)" : "Capturing…"
+            return "Capturing… \(elapsed)s"
+        }
+    }
+
+    /// Names the specific structural defect instead of one generic "wasn't clean" sentence.
+    private func retakeReason(_ issue: CaptureAnalyzer.TakeIssue) -> String {
+        switch issue {
+        case .noPauseDetected: return "no pause detected between inhale and exhale"
+        case .inhaleTooShort: return "inhale was too short"
+        case .exhaleTooShort: return "exhale was too short"
+        case let .phasesImbalanced(ratio): return String(format: "phases too lopsided (%.1fx)", ratio)
+        case .noSegment: return "nothing was captured"
         }
     }
 

@@ -22,6 +22,13 @@ public final class BreathRecorder {
 
     public private(set) var isRecording = false
     public private(set) var phase: Phase = .idle
+    /// Fine-grained phase within the current take (armed/inhale/pause/exhale/capturing) — richer than
+    /// `phase`, which only distinguishes waiting-for-onset from capturing.
+    public private(set) var livePhase: CaptureAnalyzer.LivePhase = .waiting
+    /// Seconds elapsed since `livePhase` began (e.g. seconds into the current inhale).
+    public private(set) var phaseElapsed: Double = 0
+    /// Downsampled min/max waveform of the take captured so far, for a live scrolling display.
+    public private(set) var wavePeaks: [WavePeak] = []
     /// Smoothed input level in ~[0, 1] for a meter.
     public private(set) var level: Float = 0
     /// Seconds captured in the current take.
@@ -32,6 +39,9 @@ public final class BreathRecorder {
     public private(set) var eventCount = 0
     /// Takes auto-rejected by the structural guard this session (surfaced as "let's retake that").
     public private(set) var invalidTakes = 0
+    /// Why the most recently finalized take was rejected, or `nil` if it was accepted. Cleared when a
+    /// new take is armed.
+    public private(set) var lastTakeIssue: CaptureAnalyzer.TakeIssue?
     /// `true` when the last counted event fell within the clean-separation gap (UI "leave a gap" hint).
     public private(set) var gapTooClose = false
     /// Mean room-tone level from the most recent `fixedDuration` take — the noise floor for later steps.
@@ -103,18 +113,33 @@ public final class BreathRecorder {
         elapsed = 0
         gapTooClose = false
         errorMessage = nil
+        lastTakeIssue = nil
+        livePhase = .waiting
+        phaseElapsed = 0
+        wavePeaks = []
 
         let box = CaptureBox(analyzer: CaptureAnalyzer(sampleRate: sampleRate, detection: detection, noiseFloorRMS: noiseFloorRMS))
         box.armed = true
         self.box = box
 
-        input.installTap(onBus: 0, bufferSize: 4_096, format: format) { [box, weak self] buffer, _ in
+        // `AVAudioNodeTapBlock` carries no `@Sendable`/`NS_SWIFT_SENDABLE` annotation in the SDK header,
+        // so a closure literal written here would otherwise infer this class's MainActor isolation and
+        // trap at runtime the instant AVAudioEngine invokes it on its real-time render thread. `@Sendable`
+        // forces it non-isolated so it actually runs where AVFoundation calls it.
+        input.installTap(onBus: 0, bufferSize: 4_096, format: format) { @Sendable [box, weak self] buffer, _ in
             let mono = BreathRecorder.downmix(buffer)
             let request: FinalizeRequest? = box.lock.withLock {
-                box.level = BreathRecorder.rms(mono)
-                guard box.armed else { return nil }
+                // Between takes there's no analyzer envelope worth reading, so fall back to raw
+                // per-buffer RMS just to keep the meter alive; while armed, the analyzer's smoothed
+                // envelope (20ms window/10ms hop) reads far less jumpy than raw RMS.
+                guard box.armed else {
+                    box.level = BreathRecorder.rms(mono)
+                    return nil
+                }
                 box.buffer.append(contentsOf: mono)
+                box.foldIntoWaveform(mono)
                 let events = box.analyzer.ingest(mono)
+                box.level = box.analyzer.currentLevel
                 return box.consume(events)
             }
             Task { @MainActor in self?.publishSnapshot() }
@@ -166,7 +191,8 @@ public final class BreathRecorder {
         guard isRecording, let fileURL, let onSegment else { return }
         if isFixed { lastNoiseFloorRMS = request.meanFloor }
 
-        if !isTakeValid(request) {
+        if let issue = takeIssue(request) {
+            lastTakeIssue = issue
             invalidTakes += 1
             // Cycle takes auto-redo, but only up to a cap — past it, force-accept what was captured
             // (the offline grader filters bad fragments) so the session always makes progress.
@@ -176,6 +202,8 @@ public final class BreathRecorder {
                 publishSnapshot()
                 return
             }
+        } else {
+            lastTakeIssue = nil
         }
         cycleRetries = 0
 
@@ -203,17 +231,18 @@ public final class BreathRecorder {
 
     /// Structural validity guard. A `cycle` take must be exactly two phases, each ≥ `minPhaseFrames`
     /// and balanced — the analyzer/grader can't tell calm inhale from exhale, so this is the backstop
-    /// against a missing or false mid-pause. Every other take just needs a segment.
-    private func isTakeValid(_ request: FinalizeRequest) -> Bool {
+    /// against a missing or false mid-pause. Every other take just needs a segment. Returns the reason
+    /// the take failed, or `nil` if it's valid.
+    private func takeIssue(_ request: FinalizeRequest) -> CaptureAnalyzer.TakeIssue? {
         if isCycle {
-            guard request.reason != .incomplete, request.segments.count == 2 else { return false }
-            return CaptureAnalyzer.cycleSegmentsValid(
+            guard request.reason != .incomplete, request.segments.count == 2 else { return .noPauseDetected }
+            return CaptureAnalyzer.cycleIssue(
                 inhaleFrames: request.segments[0].samples.count,
                 exhaleFrames: request.segments[1].samples.count,
                 minPhaseFrames: minPhaseFrames
             )
         }
-        return !request.segments.isEmpty
+        return request.segments.isEmpty ? .noSegment : nil
     }
 
     private func arm() {
@@ -227,10 +256,14 @@ public final class BreathRecorder {
             box.segments.removeAll(keepingCapacity: true)
             box.hasOnset = false
             box.armed = true
+            box.resetWaveform()
         }
         eventCount = 0
         elapsed = 0
         gapTooClose = false
+        livePhase = .waiting
+        phaseElapsed = 0
+        wavePeaks = []
     }
 
     private func teardown() {
@@ -251,12 +284,17 @@ public final class BreathRecorder {
         guard isRecording, let box else { return }
         let snapshot = box.lock.withLock {
             (level: box.level, count: box.analyzer.eventCount, frames: box.buffer.count,
-             armed: box.armed, onset: box.hasOnset, gap: box.analyzer.lastGapWithinMin)
+             armed: box.armed, onset: box.hasOnset, gap: box.analyzer.lastGapWithinMin,
+             livePhase: box.analyzer.livePhase, phaseFrames: box.analyzer.phaseElapsedFrames,
+             peaks: box.wavePeaks)
         }
         level = snapshot.level
         eventCount = snapshot.count
         elapsed = Double(snapshot.frames) / sampleRate
         gapTooClose = snapshot.gap
+        livePhase = snapshot.livePhase
+        phaseElapsed = Double(snapshot.phaseFrames) / sampleRate
+        wavePeaks = snapshot.peaks
         if isFixed {
             phase = .capturing
         } else {
@@ -339,8 +377,24 @@ private struct FinalizeRequest: Sendable {
     let meanFloor: Float
 }
 
+/// One bucket of a downsampled waveform: the min/max sample over its frame range. Cheap to draw (one
+/// vertical segment per bucket) and cheap to build incrementally as audio arrives.
+public struct WavePeak: Sendable, Equatable {
+    public var min: Float
+    public var max: Float
+
+    public init(min: Float, max: Float) {
+        self.min = min
+        self.max = max
+    }
+}
+
 /// Mutable capture state, touched on the tap serial queue and (under `lock`) the main actor.
 private final class CaptureBox: @unchecked Sendable {
+    /// Frames folded into one `WavePeak` bucket (~11.6ms at 44.1kHz — ~86 buckets/s; a 33s max take is
+    /// ~2850 buckets, a few KB).
+    static let waveBucketFrames = 512
+
     let lock = NSLock()
     var analyzer: CaptureAnalyzer
     var buffer: [Float] = []
@@ -348,8 +402,35 @@ private final class CaptureBox: @unchecked Sendable {
     var armed = false
     var hasOnset = false
     var level: Float = 0
+    var wavePeaks: [WavePeak] = []
+    private var bucketMin: Float = .greatestFiniteMagnitude
+    private var bucketMax: Float = -.greatestFiniteMagnitude
+    private var bucketCount = 0
 
     init(analyzer: CaptureAnalyzer) { self.analyzer = analyzer }
+
+    /// Fold newly-ingested samples into the waveform's min/max buckets. Must be called holding `lock`.
+    func foldIntoWaveform(_ mono: [Float]) {
+        for sample in mono {
+            bucketMin = min(bucketMin, sample)
+            bucketMax = max(bucketMax, sample)
+            bucketCount += 1
+            if bucketCount >= Self.waveBucketFrames {
+                wavePeaks.append(WavePeak(min: bucketMin, max: bucketMax))
+                bucketMin = .greatestFiniteMagnitude
+                bucketMax = -.greatestFiniteMagnitude
+                bucketCount = 0
+            }
+        }
+    }
+
+    /// Clear the waveform for a fresh take. Must be called holding `lock`.
+    func resetWaveform() {
+        wavePeaks.removeAll(keepingCapacity: true)
+        bucketMin = .greatestFiniteMagnitude
+        bucketMax = -.greatestFiniteMagnitude
+        bucketCount = 0
+    }
 
     /// Process analyzer events: slice finished segments out of `buffer`, and on `takeEnded` disarm and
     /// return the finalize request. Must be called holding `lock`.
