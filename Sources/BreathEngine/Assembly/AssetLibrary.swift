@@ -10,6 +10,11 @@ public final class AssetLibrary {
     private let manifest: BreathManifest
     private let sampleRate: Double
     private var cache: [String: [Float]] = [:]
+    private var bankCache: [String: FragmentBank?] = [:]
+    private var grainPoolCache: [String: [[Float]]] = [:]
+    private var corePoolCache: [String: [[Float]]] = [:]
+    private var gapPoolCache: [String: [Int]] = [:]
+    private var fingerprintCache: [String: String] = [:]
 
     public init(baseURL: URL, manifest: BreathManifest, sampleRate: Double = AudioConstants.workingSampleRate) {
         self.baseURL = baseURL
@@ -21,12 +26,14 @@ public final class AssetLibrary {
     public func sourceClips(
         style: BreathStyle,
         type: BreathType,
-        rng: inout SeededRNG
+        rng: inout SeededRNG,
+        acceptedOneShot: Set<String>? = nil
     ) throws -> BreathSourceClips {
         guard let palette = manifest.palette(style: style, type: type) else {
             throw BreathError.missingStyle(style, type)
         }
-        let oneShot = try loadOptional(palette.oneShot, style: style, type: type, role: .oneShot, rng: &rng)
+        let oneShot = try loadOptional(palette.oneShot, style: style, type: type, role: .oneShot,
+                                       rng: &rng, acceptedOneShot: acceptedOneShot)
         return BreathSourceClips(oneShot: oneShot)
     }
 
@@ -35,10 +42,12 @@ public final class AssetLibrary {
         style: BreathStyle,
         type: BreathType,
         role: BreathRole,
-        rng: inout SeededRNG
+        rng: inout SeededRNG,
+        acceptedOneShot: Set<String>?
     ) throws -> [Float]? {
         guard !assets.isEmpty else { return nil }
-        return try loadOne(assets, style: style, type: type, role: role, rng: &rng)
+        return try loadOne(assets, style: style, type: type, role: role,
+                           rng: &rng, acceptedOneShot: acceptedOneShot)
     }
 
     private func loadOne(
@@ -46,13 +55,51 @@ public final class AssetLibrary {
         style: BreathStyle,
         type: BreathType,
         role: BreathRole,
-        rng: inout SeededRNG
+        rng: inout SeededRNG,
+        acceptedOneShot: Set<String>?
     ) throws -> [Float] {
         guard !assets.isEmpty else {
             throw BreathError.emptyRole(style, type, role)
         }
-        let pick = assets.count == 1 ? assets[0] : assets[Int.random(in: 0..<assets.count, using: &rng)]
+        // Restrict the one-shot pick to the bank's accepted takes (frc/rv partial-failure tolerance).
+        // Same single seeded draw, just over the accepted subset; an empty filter (no bank, or none
+        // accepted) leaves the full list, so the no-bank pick is byte-identical.
+        var pool = assets
+        if role == .oneShot, let acceptedOneShot, !acceptedOneShot.isEmpty {
+            let filtered = assets.filter { acceptedOneShot.contains($0.file) }
+            if !filtered.isEmpty { pool = filtered }
+        }
+        let pick = pool.count == 1 ? pool[0] : pool[Int.random(in: 0..<pool.count, using: &rng)]
         return try samples(for: pick.file)
+    }
+
+    /// The set of accepted one-shot-body take filenames in the bank for `(style, type)` — the takes
+    /// the frc/rv pick is allowed to draw from. `nil` when there's no bank or no accepted body.
+    public func oneShotBodyAcceptedFiles(style: BreathStyle, type: BreathType, expectedSig: String?) -> Set<String>? {
+        guard let bank = fragmentBank(style: style, type: type, expectedSig: expectedSig) else { return nil }
+        let files = Set(bank.acceptedFragments(kind: .oneShotBody).map(\.file))
+        return files.isEmpty ? nil : files
+    }
+
+    /// A content fingerprint of the bank's accepted fragments for `(style, type)` — folded into the
+    /// render cache key so a regrade (different accept set, or a rebuilt bank) invalidates stale
+    /// buffers. `"0"` when there's no bank. Cached.
+    public func bankFingerprint(style: BreathStyle, type: BreathType, expectedSig: String?) -> String {
+        let key = "\(style)|\(type.rawValue)"
+        if let cached = fingerprintCache[key] { return cached }
+        let fingerprint: String
+        if let bank = fragmentBank(style: style, type: type, expectedSig: expectedSig) {
+            let accepted = bank.fragments
+                .filter { $0.accept }
+                .map { "\($0.file):\($0.startFrame):\($0.endFrame):\($0.kind.rawValue)" }
+                .sorted()
+                .joined(separator: ",")
+            fingerprint = String(format: "%016llx", Variation.fnv1a(bank.preparedSig + "|" + accepted))
+        } else {
+            fingerprint = "0"
+        }
+        fingerprintCache[key] = fingerprint
+        return fingerprint
     }
 
     /// Decoded mono samples for a file (cached).
@@ -72,8 +119,104 @@ public final class AssetLibrary {
         return decoded
     }
 
-    /// Decode a file to mono Float32 at `targetRate`, resampling/downmixing as needed.
-    static func loadMonoSamples(url: URL, targetRate: Double) throws -> [Float] {
+    // MARK: - Fragment banks
+
+    /// Load (and cache) the fragment-bank sidecar for `(style, type)`, or `nil` when the manifest
+    /// names none, it can't be read, or its `preparedSig` doesn't match `expectedSig` — the engine
+    /// refuses a bank cut under an incompatible prepare configuration rather than rendering from
+    /// offsets that no longer line up with how it prepares sources.
+    public func fragmentBank(style: BreathStyle, type: BreathType, expectedSig: String?) -> FragmentBank? {
+        let key = "\(style)|\(type.rawValue)"
+        if let cached = bankCache[key] { return cached }
+        let bank = loadBank(style: style, type: type, expectedSig: expectedSig)
+        bankCache[key] = bank
+        return bank
+    }
+
+    private func loadBank(style: BreathStyle, type: BreathType, expectedSig: String?) -> FragmentBank? {
+        // The sidecar lives at a manifest-relative path (e.g. "fragments/calm_inhale.frags.json");
+        // reject traversal so a crafted manifest can't read outside the assets directory.
+        guard let palette = manifest.palette(style: style, type: type),
+              let name = palette.fragmentBank, !name.isEmpty, !name.contains("..") else { return nil }
+        guard let bank = try? FragmentBank.load(from: baseURL.appendingPathComponent(name)) else { return nil }
+        if let expectedSig, bank.preparedSig != expectedSig { return nil }
+        return bank
+    }
+
+    /// The accepted grain pool for a textured `(style, type)`: each accepted `grain` fragment sliced
+    /// from its take's prepared cache, in the bank's stable `(file, startFrame)` order. `nil` when
+    /// there's no usable bank or no accepted grain. Cached — the pool is immutable for an engine.
+    public func grainPool(style: BreathStyle, type: BreathType, expectedSig: String?) -> [[Float]]? {
+        let key = "\(style)|\(type.rawValue)"
+        if let cached = grainPoolCache[key] { return cached.isEmpty ? nil : cached }
+        guard let bank = fragmentBank(style: style, type: type, expectedSig: expectedSig) else {
+            grainPoolCache[key] = []
+            return nil
+        }
+        var pool: [[Float]] = []
+        for fragment in bank.acceptedFragments(kind: .grain) {
+            guard let signal = try? samples(for: fragment.preparedCacheFile),
+                  fragment.startFrame >= 0, fragment.startFrame < fragment.endFrame,
+                  fragment.endFrame <= signal.count else { continue }
+            pool.append(Array(signal[fragment.startFrame..<fragment.endFrame]))
+        }
+        grainPoolCache[key] = pool
+        return pool.isEmpty ? nil : pool
+    }
+
+    /// The accepted gulp-core pool for a counted/hybrid `(style, type)`: each accepted `gulpCore`
+    /// fragment re-cut and declicked from its take's prepared cache, exactly as the engine would
+    /// render it. `nil` when there's no usable bank or no accepted core. Cached.
+    public func gulpCorePool(style: BreathStyle, type: BreathType, expectedSig: String?) -> [[Float]]? {
+        let key = "\(style)|\(type.rawValue)"
+        if let cached = corePoolCache[key] { return cached.isEmpty ? nil : cached }
+        guard let bank = fragmentBank(style: style, type: type, expectedSig: expectedSig) else {
+            corePoolCache[key] = []
+            return nil
+        }
+        var cores: [[Float]] = []
+        for fragment in bank.acceptedFragments(kind: .gulpCore) {
+            guard let signal = try? samples(for: fragment.preparedCacheFile),
+                  fragment.startFrame >= 0, fragment.startFrame < fragment.endFrame,
+                  fragment.endFrame <= signal.count else { continue }
+            cores.append(UnitExtractor.declickedCore(Array(signal[fragment.startFrame..<fragment.endFrame]),
+                                                     sampleRate: sampleRate))
+        }
+        corePoolCache[key] = cores
+        return cores.isEmpty ? nil : cores
+    }
+
+    /// The accepted inter-onset rhythm-gap pool (sample counts) for a counted/hybrid `(style, type)`,
+    /// in the bank's stable order — the cadence cores are laid out at. `nil` when there's no usable
+    /// bank or no accepted gap. Cached.
+    public func rhythmGapPool(style: BreathStyle, type: BreathType, expectedSig: String?) -> [Int]? {
+        let key = "\(style)|\(type.rawValue)"
+        if let cached = gapPoolCache[key] { return cached.isEmpty ? nil : cached }
+        guard let bank = fragmentBank(style: style, type: type, expectedSig: expectedSig) else {
+            gapPoolCache[key] = []
+            return nil
+        }
+        let gaps = bank.acceptedFragments(kind: .gap).compactMap(\.gapToNext).filter { $0 > 0 }
+        gapPoolCache[key] = gaps
+        return gaps.isEmpty ? nil : gaps
+    }
+
+    /// The default event count for a banked counted render when the caller passes no count: a single
+    /// cadence take's worth of gulps (median gaps-per-take + 1), NOT the pooled cross-take total —
+    /// which would balloon the breath to the number of enrollment takes. Mirrors the no-bank default
+    /// of `rhythmGaps(oneShot[1]).count + 1`. `nil` when there's no usable bank or no accepted gap.
+    public func defaultCountedEvents(style: BreathStyle, type: BreathType, expectedSig: String?) -> Int? {
+        guard let bank = fragmentBank(style: style, type: type, expectedSig: expectedSig) else { return nil }
+        let perTake = Dictionary(grouping: bank.acceptedFragments(kind: .gap), by: \.file).mapValues(\.count)
+        let counts = perTake.values.sorted()
+        guard !counts.isEmpty else { return nil }
+        return counts[counts.count / 2] + 1
+    }
+
+    /// Decode a file to mono Float32 at `targetRate`, resampling/downmixing as needed. `nonisolated`
+    /// and `public` so the app-layer `breath-bank` builder decodes enrollment takes through the exact
+    /// same path the engine uses for its assets (no decode drift between build and render).
+    public nonisolated static func loadMonoSamples(url: URL, targetRate: Double) throws -> [Float] {
         let file: AVAudioFile
         do {
             file = try AVAudioFile(forReading: url)

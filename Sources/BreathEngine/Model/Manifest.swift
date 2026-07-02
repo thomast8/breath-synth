@@ -35,17 +35,23 @@ public struct RolePalette: Codable, Sendable, Equatable {
     public var loop: [BreathAsset]
     public var end: [BreathAsset]
     public var oneShot: [BreathAsset]
+    /// Optional filename of this (style, type)'s fragment-bank sidecar (graded sub-take
+    /// fragments). A missing JSON key decodes to `nil` → single-take behavior. Mirrors
+    /// `BreathManifest.noiseProfile`: the manifest names the file, the engine loads it as data.
+    public var fragmentBank: String?
 
     public init(
         start: [BreathAsset] = [],
         loop: [BreathAsset] = [],
         end: [BreathAsset] = [],
-        oneShot: [BreathAsset] = []
+        oneShot: [BreathAsset] = [],
+        fragmentBank: String? = nil
     ) {
         self.start = start
         self.loop = loop
         self.end = end
         self.oneShot = oneShot
+        self.fragmentBank = fragmentBank
     }
 }
 
@@ -90,7 +96,9 @@ public struct BreathManifest: Codable, Sendable, Equatable {
     /// Optional filename of a room-tone recording used as a denoise profile.
     public var noiseProfile: String?
 
-    public static let currentVersion = 1
+    /// v2 adds the optional per-(style,type) `RolePalette.fragmentBank` sidecar. v1 manifests
+    /// still load (every new field is optional), so the bump is purely additive.
+    public static let currentVersion = 2
 
     public init(
         version: Int = BreathManifest.currentVersion,

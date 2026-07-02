@@ -57,7 +57,8 @@ public enum BreathAssembler {
         seed: UInt64 = 0,
         mode: RenderMode = .textured,
         style: BreathStyle = "neutral",
-        noiseProfile: [Float]? = nil
+        noiseProfile: [Float]? = nil,
+        grainPool: [[Float]]? = nil
     ) -> [Float] {
         let sr = settings.sampleRate
         let totalFrames = max(1, Segments.frames(seconds: durationSec, sampleRate: sr))
@@ -78,7 +79,8 @@ public enum BreathAssembler {
                 deltas: deltas,
                 seed: seed,
                 style: style,
-                noiseProfile: noiseProfile
+                noiseProfile: noiseProfile,
+                grainPool: grainPool
             )
         case .oneShot, .counted:
             // `.counted` is assembled at the engine layer; falling through to the
@@ -176,43 +178,52 @@ public enum BreathAssembler {
         deltas: VariationDeltas,
         seed: UInt64,
         style: BreathStyle,
-        noiseProfile: [Float]?
+        noiseProfile: [Float]?,
+        grainPool: [[Float]]?
     ) -> [Float] {
-        let source = prepareSource(full, settings: settings, noiseProfile: noiseProfile)
-        guard source.count > 1 else { return [Float](repeating: 0, count: totalFrames) }
+        var body: [Float]
+        if let pool = grainPool, !pool.isEmpty {
+            // Banked path: fill the body from the cross-take accepted-grain pool instead of looping a
+            // single take's texture. The pool's grains are already energy-flat texture windows, so the
+            // downstream flatten/envelope/normalize below is identical to the single-texture path.
+            body = texturedLoopFromPool(pool: pool, totalFrames: totalFrames, settings: settings, seed: seed)
+        } else {
+            let source = prepareSource(full, settings: settings, noiseProfile: noiseProfile)
+            guard source.count > 1 else { return [Float](repeating: 0, count: totalFrames) }
 
-        // Timbre only: the loud, steady, energy-flat sustain of the breath. The
-        // recording's own dynamics (quiet preamble, end-loaded ramp) are excluded by
-        // the threshold in `flattenedTexture`, so they never re-enter the breath.
-        let envelope = rmsEnvelope(source, sampleRate: settings.sampleRate)
-        var texture = flattenedTexture(from: source, envelope: envelope, type: type, sampleRate: settings.sampleRate)
+            // Timbre only: the loud, steady, energy-flat sustain of the breath. The
+            // recording's own dynamics (quiet preamble, end-loaded ramp) are excluded by
+            // the threshold in `flattenedTexture`, so they never re-enter the breath.
+            let envelope = rmsEnvelope(source, sampleRate: settings.sampleRate)
+            var texture = flattenedTexture(from: source, envelope: envelope, type: type, sampleRate: settings.sampleRate)
 
-        // A forceful exhale opens with a glottal onset ("ungh") that, once looped, recurs and
-        // sounds wrong. Skip the leading attack so the looped texture is the sustained airflow only.
-        if style == "hyperventilation", type == .exhale {
-            let skip = min(texture.count / 3, Segments.frames(seconds: 0.22, sampleRate: settings.sampleRate))
-            if texture.count - skip > 1 { texture = ensureZeroEndpoints(Array(texture[skip...])) }
+            // A forceful exhale opens with a glottal onset ("ungh") that, once looped, recurs and
+            // sounds wrong. Skip the leading attack so the looped texture is the sustained airflow only.
+            if style == "hyperventilation", type == .exhale {
+                let skip = min(texture.count / 3, Segments.frames(seconds: 0.22, sampleRate: settings.sampleRate))
+                if texture.count - skip > 1 { texture = ensureZeroEndpoints(Array(texture[skip...])) }
+            }
+
+            // Per-render pitch/length variation (previously computed but never applied).
+            // The loop below re-fills to the exact target length, so duration stays exact.
+            if deltas.playbackRate > 0, abs(deltas.playbackRate - 1) > 1e-6 {
+                texture = ensureZeroEndpoints(Resample.byFactor(texture, deltas.playbackRate))
+            }
+            guard texture.count > 1 else { return [Float](repeating: 0, count: totalFrames) }
+
+            // Build the body to the exact length from the timbre slice. When the breath is
+            // longer than the texture we fill it with grains pulled from spread-out offsets
+            // (see `assembleTexturedLoop`) so long breaths don't develop a periodic loop
+            // "wobble". Grains are a few seconds with a generous crossfade so timbre shifts
+            // between them stay smooth.
+            let grain = min(texture.count, Segments.frames(seconds: 2.5, sampleRate: settings.sampleRate))
+            let requestedX = Segments.frames(seconds: max(settings.crossfadeSec, 0.7), sampleRate: settings.sampleRate)
+            let x = min(max(1, requestedX), max(1, grain - 1), max(1, totalFrames / 4))
+            var grainRNG = SeededRNG(seed: seed)
+            body = Crossfade.assembleTexturedLoop(
+                texture: texture, targetLen: totalFrames, grainLen: grain, crossfadeLen: x, rng: &grainRNG
+            )
         }
-
-        // Per-render pitch/length variation (previously computed but never applied).
-        // The loop below re-fills to the exact target length, so duration stays exact.
-        if deltas.playbackRate > 0, abs(deltas.playbackRate - 1) > 1e-6 {
-            texture = ensureZeroEndpoints(Resample.byFactor(texture, deltas.playbackRate))
-        }
-        guard texture.count > 1 else { return [Float](repeating: 0, count: totalFrames) }
-
-        // Build the body to the exact length from the timbre slice. When the breath is
-        // longer than the texture we fill it with grains pulled from spread-out offsets
-        // (see `assembleTexturedLoop`) so long breaths don't develop a periodic loop
-        // "wobble". Grains are a few seconds with a generous crossfade so timbre shifts
-        // between them stay smooth.
-        let grain = min(texture.count, Segments.frames(seconds: 2.5, sampleRate: settings.sampleRate))
-        let requestedX = Segments.frames(seconds: max(settings.crossfadeSec, 0.7), sampleRate: settings.sampleRate)
-        let x = min(max(1, requestedX), max(1, grain - 1), max(1, totalFrames / 4))
-        var grainRNG = SeededRNG(seed: seed)
-        var body = Crossfade.assembleTexturedLoop(
-            texture: texture, targetLen: totalFrames, grainLen: grain, crossfadeLen: x, rng: &grainRNG
-        )
         body = flattenLocalEnergy(body, sampleRate: settings.sampleRate)
 
         // A forceful exhale's airflow naturally sags as the lungs empty; even after the standard
@@ -231,6 +242,23 @@ public enum BreathAssembler {
         // Click-free, truly silent edges.
         body = applyEdgeFades(body, sampleRate: settings.sampleRate)
         return normalizePeak(body)
+    }
+
+    /// Cross-take variant of the single-texture loop: fill the body to length by drawing grains from
+    /// the accepted-grain `pool` (seeded), instead of looping one take's texture. Mirrors the
+    /// single-texture path's 2.5 s grain / ≥0.7 s crossfade geometry and its `seed`-keyed grain RNG,
+    /// so a given seed always draws the same grain succession (and cycles re-seed to decorrelate).
+    private static func texturedLoopFromPool(
+        pool: [[Float]], totalFrames: Int, settings: AssemblerSettings, seed: UInt64
+    ) -> [Float] {
+        let sr = settings.sampleRate
+        let grain = Segments.frames(seconds: 2.5, sampleRate: sr)
+        let requestedX = Segments.frames(seconds: max(settings.crossfadeSec, 0.7), sampleRate: sr)
+        let x = min(max(1, requestedX), max(1, grain - 1), max(1, totalFrames / 4))
+        var grainRNG = SeededRNG(seed: seed)
+        return Crossfade.assembleTexturedFromPool(
+            grains: pool, targetLen: totalFrames, grainLen: grain, crossfadeLen: x, rng: &grainRNG
+        )
     }
 
     /// Natural-length one-shot render (frc, rv). The source is prepped exactly like the
@@ -273,7 +301,9 @@ public enum BreathAssembler {
     /// gap between the breath and a trailing plosive is resolved (the engine's broad RMS envelope
     /// would bridge it); the breath is the longest contiguous above-threshold run, the plosive a
     /// separate shorter run that is excluded.
-    private static func trimToMainBody(_ samples: [Float], sampleRate: Double) -> [Float] {
+    /// Public so the `breath-bank` builder derives the frc/rv one-shot *body* fragment exactly as
+    /// the engine's `oneShotBranch` does.
+    public static func trimToMainBody(_ samples: [Float], sampleRate: Double) -> [Float] {
         guard samples.count > 1 else { return samples }
         let win = max(1, Int(0.015 * sampleRate))
         let hop = max(1, Int(0.005 * sampleRate))
@@ -321,8 +351,9 @@ public enum BreathAssembler {
     /// Shared source prep for every render mode: trim the outer silence, run the single
     /// low-cut clean-up, then optionally subtract the spectral noise profile. Factored
     /// out of `recordedShapeBranch` so the one-shot and counted paths see an identically
-    /// cleaned signal. Internal (not private) so the engine's counted path can reuse it.
-    static func prepareSource(
+    /// cleaned signal. Public so the app-layer `breath-bank` builder cuts fragments from the
+    /// *same* prepared signal the engine renders from (offset validity).
+    public static func prepareSource(
         _ full: [Float],
         settings: AssemblerSettings,
         noiseProfile: [Float]?
@@ -408,7 +439,9 @@ public enum BreathAssembler {
         return ensureZeroEndpoints(out)
     }
 
-    private static func rmsEnvelope(_ samples: [Float], sampleRate: Double) -> [Float] {
+    /// Public so the `breath-bank` builder reuses the engine's envelope for texture extraction and
+    /// fragment-quality features.
+    public static func rmsEnvelope(_ samples: [Float], sampleRate: Double) -> [Float] {
         guard !samples.isEmpty else { return [] }
         let window = max(32, Segments.frames(seconds: 0.050, sampleRate: sampleRate))
         let hop = max(1, Segments.frames(seconds: 0.025, sampleRate: sampleRate))
@@ -484,7 +517,9 @@ public enum BreathAssembler {
         return envelope.map { min(1, max(0, $0 / peak)) }
     }
 
-    private static func flattenedTexture(
+    /// Public so the `breath-bank` builder tiles calm grains from the *same* energy-flat texture the
+    /// engine's textured path produces (so pooled grains are level-comparable and crossfade cleanly).
+    public static func flattenedTexture(
         from source: [Float],
         envelope: [Float],
         type: BreathType,
