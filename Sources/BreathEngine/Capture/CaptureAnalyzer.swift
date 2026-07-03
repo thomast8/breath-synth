@@ -49,6 +49,10 @@ public struct CaptureAnalyzer {
         case phasesImbalanced(ratio: Double)
         /// A non-`cycle` take produced no segment at all.
         case noSegment
+        /// A `finalPhase` take never reached the deliberate pause before `maxTakeSec` — no hold-then-
+        /// release detected (a too-short *kept* final phase instead reuses `exhaleTooShort`, since
+        /// `finalPhase`'s one real-world consumer, FRC/RV, always keeps an exhale).
+        case noPauseBeforeRelease
     }
 
     // MARK: Tuning
@@ -103,6 +107,11 @@ public struct CaptureAnalyzer {
     private let refractoryFrames: Int
     private let countsEvents: Bool
     private let isCycle: Bool
+    /// `finalPhase` reuses `cycle`'s inhale→pause→exhale routing (`isCycle || finalPhaseOnly` gates
+    /// onset → `.inhale`) but suppresses the lead segment and relabels the kept phase `.whole`.
+    private let finalPhaseOnly: Bool
+    /// `.exhale` for `cycle`, `.whole` for `finalPhase`; unused (never reached) otherwise.
+    private let finalSegmentLabel: SegmentLabel
     private let isFixed: Bool
     private let targetEventsCount: Int?
     private let spectralGateProfile: SpectralGateProfile?
@@ -229,27 +238,36 @@ public struct CaptureAnalyzer {
 
         switch detection {
         case let .fixedDuration(seconds):
-            isFixed = true; isCycle = false; countsEvents = false
+            isFixed = true; isCycle = false; finalPhaseOnly = false; finalSegmentLabel = .whole; countsEvents = false
             maxFrames = toFrames(seconds)
             trailingFrames = 0; midPauseFrames = 0; minActiveFrames = 0; minGapFrames = 0
             refractoryFrames = 0; targetEventsCount = nil; spectralGateProfile = nil
             state = .capturing
         case let .cycle(minPhaseSec, midPauseSec, maxCycleSec, trailingSilenceSec):
-            isFixed = false; isCycle = true; countsEvents = false
+            isFixed = false; isCycle = true; finalPhaseOnly = false; finalSegmentLabel = .exhale; countsEvents = false
             trailingFrames = toFrames(trailingSilenceSec)
             midPauseFrames = toFrames(midPauseSec)
             maxFrames = toFrames(maxCycleSec)
             minActiveFrames = toFrames(minPhaseSec)
             minGapFrames = 0; refractoryFrames = 0; targetEventsCount = nil; spectralGateProfile = nil
         case let .single(minActiveSec, maxTakeSec, trailingSilenceSec):
-            isFixed = false; isCycle = false; countsEvents = false
+            isFixed = false; isCycle = false; finalPhaseOnly = false; finalSegmentLabel = .whole; countsEvents = false
             trailingFrames = toFrames(trailingSilenceSec)
             maxFrames = toFrames(maxTakeSec)
             minActiveFrames = toFrames(minActiveSec)
             midPauseFrames = 0; minGapFrames = 0; refractoryFrames = 0
             targetEventsCount = nil; spectralGateProfile = nil
+        case let .finalPhase(minLeadSec, midPauseSec, _, maxTakeSec, trailingSilenceSec):
+            // `minPhaseSec` (the kept final phase's minimum) isn't used inside the state machine — it's
+            // a post-hoc structural check the recorder makes from `CaptureDetection.minPhaseSec`.
+            isFixed = false; isCycle = false; finalPhaseOnly = true; finalSegmentLabel = .whole; countsEvents = false
+            trailingFrames = toFrames(trailingSilenceSec)
+            midPauseFrames = toFrames(midPauseSec)
+            maxFrames = toFrames(maxTakeSec)
+            minActiveFrames = toFrames(minLeadSec)
+            minGapFrames = 0; refractoryFrames = 0; targetEventsCount = nil; spectralGateProfile = nil
         case let .cleanEvents(minGapSec, maxTakeSec, trailingSilenceSec, eventMinDistSec, targetEvents, spectralGate):
-            isFixed = false; isCycle = false; countsEvents = true
+            isFixed = false; isCycle = false; finalPhaseOnly = false; finalSegmentLabel = .whole; countsEvents = true
             trailingFrames = toFrames(trailingSilenceSec)
             maxFrames = toFrames(maxTakeSec)
             minGapFrames = toFrames(minGapSec)
@@ -257,7 +275,7 @@ public struct CaptureAnalyzer {
             refractoryFrames = toFrames(eventMinDistSec)
             targetEventsCount = targetEvents; spectralGateProfile = spectralGate
         case let .naturalRhythm(minActiveSec, maxTakeSec, trailingSilenceSec, eventMinDistSec, spectralGate):
-            isFixed = false; isCycle = false; countsEvents = true
+            isFixed = false; isCycle = false; finalPhaseOnly = false; finalSegmentLabel = .whole; countsEvents = true
             trailingFrames = toFrames(trailingSilenceSec)
             maxFrames = toFrames(maxTakeSec)
             minActiveFrames = toFrames(minActiveSec)
@@ -326,12 +344,14 @@ public struct CaptureAnalyzer {
             events.append(.segmentReady(label: .whole, startFrame: segmentStartFrame, endFrame: end))
             events.append(.takeEnded(reason: .silence))
         case .inhale:
-            events.append(.segmentReady(label: .inhale, startFrame: segmentStartFrame, endFrame: end))
+            if !finalPhaseOnly {
+                events.append(.segmentReady(label: .inhale, startFrame: segmentStartFrame, endFrame: end))
+            }
             events.append(.takeEnded(reason: .incomplete))
         case .midPause:
             events.append(.takeEnded(reason: .incomplete))
         case .exhale:
-            events.append(.segmentReady(label: .exhale, startFrame: segmentStartFrame, endFrame: end))
+            events.append(.segmentReady(label: finalSegmentLabel, startFrame: segmentStartFrame, endFrame: end))
             events.append(.takeEnded(reason: .silence))
         }
         state = .done
@@ -390,7 +410,7 @@ public struct CaptureAnalyzer {
                     segmentStartFrame = onset
                     phaseStartFrame = onset
                     events.append(.onset)
-                    state = isCycle ? .inhale : .capturing
+                    state = (isCycle || finalPhaseOnly) ? .inhale : .capturing
                 }
             }
         case .capturing:
@@ -405,8 +425,11 @@ public struct CaptureAnalyzer {
         case .inhale:
             // Require a real phase's worth of airflow before a pause can split: a natural intra-breath
             // dip (which can exceed `midPauseFrames`) must not be mistaken for the inter-phase pause.
+            // `finalPhaseOnly` (e.g. FRC/RV's lead inhale) suppresses this segment — it's discarded.
             if !isActive, silenceFrames >= midPauseFrames, totalActiveFrames >= minActiveFrames {
-                events.append(.segmentReady(label: .inhale, startFrame: segmentStartFrame, endFrame: silenceStartFrame))
+                if !finalPhaseOnly {
+                    events.append(.segmentReady(label: .inhale, startFrame: segmentStartFrame, endFrame: silenceStartFrame))
+                }
                 phaseStartFrame = silenceStartFrame
                 state = .midPause
             } else if currentFrame >= maxFrames {
@@ -424,11 +447,11 @@ public struct CaptureAnalyzer {
             }
         case .exhale:
             if !isActive, silenceFrames >= trailingFrames {
-                events.append(.segmentReady(label: .exhale, startFrame: segmentStartFrame, endFrame: silenceStartFrame))
+                events.append(.segmentReady(label: finalSegmentLabel, startFrame: segmentStartFrame, endFrame: silenceStartFrame))
                 events.append(.takeEnded(reason: .silence))
                 state = .done
             } else if currentFrame >= maxFrames {
-                events.append(.segmentReady(label: .exhale, startFrame: segmentStartFrame, endFrame: currentFrame))
+                events.append(.segmentReady(label: finalSegmentLabel, startFrame: segmentStartFrame, endFrame: currentFrame))
                 events.append(.takeEnded(reason: .duration))
                 state = .done
             }

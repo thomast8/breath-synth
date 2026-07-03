@@ -5,8 +5,12 @@ import Foundation
 enum DetectionKind: Sendable {
     /// Inhale → pause → exhale; two labelled segments. Calm.
     case cycle
-    /// One continuous breath/exhale. FRC/RV.
+    /// One continuous breath/exhale, no separable lead phase.
     case single
+    /// Deliberate-pause phase split, keeping only the final phase. FRC/RV: an inhale must precede the
+    /// exhale being captured, so a brief hold-then-release gives the analyzer a real pause to split on
+    /// (see `CaptureDetection.finalPhase`).
+    case finalPhase
     /// Well-separated, counted events (cores). Packing/recovery separated.
     case cleanEvents
     /// Continuous events at natural cadence (gaps). Packing/recovery cadence.
@@ -73,18 +77,18 @@ enum EnrollmentScript {
         ),
         EnrollmentStep(
             title: "FRC exhale",
-            prompt: "Passive exhale to a relaxed (FRC) volume — let the air fall out, ~3.5–4.5 s. "
-                + "Breathe normally between takes; each exhale is captured on its own.",
-            demoReference: "frc_1.aifc", takes: 8, renderMode: .oneShot, detection: .single,
+            prompt: "Inhale, hold a beat, then let it fall out to a relaxed (FRC) volume, ~3.5–4.5 s. "
+                + "The pause tells the app where the exhale starts — breathe normally between takes.",
+            demoReference: "frc_1.aifc", takes: 8, renderMode: .oneShot, detection: .finalPhase,
             minSeconds: 3, maxSeconds: 6, targetEvents: nil,
             lanes: [CaptureLane(label: .whole, slug: "frc_exhale", style: "frc", type: .exhale,
                                 role: "oneShotBody", reference: "frc_1.aifc")]
         ),
         EnrollmentStep(
             title: "RV exhale",
-            prompt: "Full forced exhale all the way to residual volume — push it right out, ~8–9 s. "
-                + "Recover normally between takes.",
-            demoReference: "rv.aifc", takes: 8, renderMode: .oneShot, detection: .single,
+            prompt: "Inhale, hold a beat, then force it all the way out to residual volume, ~8–9 s. "
+                + "The pause tells the app where the exhale starts — recover normally between takes.",
+            demoReference: "rv.aifc", takes: 8, renderMode: .oneShot, detection: .finalPhase,
             minSeconds: 6, maxSeconds: 11, targetEvents: nil,
             lanes: [CaptureLane(label: .whole, slug: "rv_exhale", style: "rv", type: .exhale,
                                 role: "oneShotBody", reference: "rv.aifc")]

@@ -186,6 +186,47 @@ final class CaptureAnalyzerTests: XCTestCase {
             inhaleFrames: Int(0.6 * sr), exhaleFrames: Int(2.5 * sr), minPhaseFrames: minPhase))
     }
 
+    // MARK: finalPhase (FRC/RV) — Phase 3, reuses cycle's inhale→pause→exhale routing
+
+    func testFinalPhaseKeepsOnlyFinalSegmentAsWhole() {
+        let signal = silence(0.3) + tone(1.5) + silence(0.5) + tone(4.0) + silence(1.0)
+        let (events, _) = run(
+            .finalPhase(minLeadSec: 0.5, midPauseSec: 0.4, minPhaseSec: 3.0, maxTakeSec: 20, trailingSilenceSec: 0.8),
+            signal
+        )
+        let segs = segments(events)
+        XCTAssertEqual(segs.count, 1, "the lead phase must never be emitted")
+        XCTAssertEqual(segs[0].0, .whole)
+        let expectedStart = Int(0.3 * sr + 1.5 * sr + 0.5 * sr)  // lead + pause
+        XCTAssertEqual(segs[0].1, expectedStart, accuracy: tol)
+        XCTAssertEqual(endReason(events), .silence)
+    }
+
+    func testFinalPhaseContinuousNoDipIsIncomplete() {
+        let signal = silence(0.3) + tone(8.0)
+        let (events, _) = run(
+            .finalPhase(minLeadSec: 0.5, midPauseSec: 0.4, minPhaseSec: 3.0, maxTakeSec: 6, trailingSilenceSec: 0.8),
+            signal
+        )
+        XCTAssertTrue(segments(events).isEmpty, "no lead-phase segment should ever be emitted")
+        XCTAssertEqual(endReason(events), .incomplete)
+    }
+
+    func testFinalPhaseSubPauseDipDuringLeadBridgesWithoutFalseSplit() {
+        // A 0.2s dip mid-lead (< 0.4s midPauseSec) must not be mistaken for the deliberate pause; the
+        // lead phase should bridge it and keep listening for the real 0.5s pause that follows.
+        let signal = silence(0.3) + tone(1.5) + silence(0.2) + tone(0.5) + silence(0.5) + tone(3.5) + silence(1.0)
+        let (events, _) = run(
+            .finalPhase(minLeadSec: 0.5, midPauseSec: 0.4, minPhaseSec: 3.0, maxTakeSec: 20, trailingSilenceSec: 0.8),
+            signal
+        )
+        let segs = segments(events)
+        XCTAssertEqual(segs.count, 1, "the bridged dip must not produce an extra split")
+        XCTAssertEqual(segs[0].0, .whole)
+        XCTAssertEqual(segs[0].2 - segs[0].1, Int(3.5 * sr), accuracy: tol, "kept phase is the real final phase only, not the bridged lead")
+        XCTAssertEqual(endReason(events), .silence)
+    }
+
     // MARK: TakeIssue (Phase 1 — live rejection-reason detail)
 
     func testCycleIssueDistinguishesReasons() {

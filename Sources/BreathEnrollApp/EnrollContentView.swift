@@ -178,6 +178,7 @@ struct EnrollContentView: View {
         case .exhaleTooShort: return "exhale was too short"
         case let .phasesImbalanced(ratio): return String(format: "phases too lopsided (%.1fx)", ratio)
         case .noSegment: return "nothing was captured"
+        case .noPauseBeforeRelease: return "no pause detected before the release"
         }
     }
 

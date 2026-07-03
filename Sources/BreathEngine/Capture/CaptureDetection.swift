@@ -65,8 +65,24 @@ public enum CaptureDetection: Sendable, Equatable {
     /// Inhale → mid-pause → exhale: split into two labelled segments at the pause, labelled by order.
     /// Calm. The mid-pause (short silence) ends the inhale; trailing silence (long) ends the take.
     case cycle(minPhaseSec: Double, midPauseSec: Double, maxCycleSec: Double, trailingSilenceSec: Double)
-    /// One continuous breath/exhale → a single `.whole` segment ending on trailing silence. FRC/RV.
+    /// One continuous breath/exhale → a single `.whole` segment ending on trailing silence. Onset jumps
+    /// straight to capturing, so a natural pre-exhale inhale is captured as part of the same segment —
+    /// only correct for a genuine onset-to-silence consumer with no separable lead phase.
     case single(minActiveSec: Double, maxTakeSec: Double, trailingSilenceSec: Double)
+    /// Deliberate-pause phase split, keeping only the final phase: reuses `cycle`'s
+    /// inhale → mid-pause → exhale state machine internally, but the lead phase's segment is **never
+    /// emitted** — only the final phase, as `label: .whole` (so a single-lane consumer's routing is
+    /// unaffected). FRC/RV: an inhale inevitably precedes the exhale being captured (you must inhale
+    /// before you can let it out or force it out); `single` bakes that inhale into the segment
+    /// (`frc_exhale_*` takes ranged 4.56–8.1s against a 3–6s band on the same technique). A brief
+    /// deliberate hold before releasing gives the analyzer a real pause to split on, same as `cycle`.
+    /// No pause detected by `maxTakeSec` ends the take `.incomplete` — the recorder auto-redoes it, same
+    /// as `cycle`'s missing-exhale case.
+    /// - `minLeadSec`: minimum lead-phase (inhale) duration before a silence can be treated as the
+    ///   mid-pause, not a natural intra-breath dip — small, since the lead phase is discarded regardless.
+    /// - `minPhaseSec`: minimum duration of the kept final phase — a structural post-hoc check (see
+    ///   `CaptureAnalyzer.TakeIssue`), not enforced inside the state machine itself.
+    case finalPhase(minLeadSec: Double, midPauseSec: Double, minPhaseSec: Double, maxTakeSec: Double, trailingSilenceSec: Double)
     /// Well-separated events (cores): count them and flag onsets closer than `minGapSec`
     /// (separation feedback); one `.whole` segment. Packing/recovery separated.
     /// - `eventMinDistSec`: refractory spacing between counted events — the minimum real gap between

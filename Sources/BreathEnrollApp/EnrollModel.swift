@@ -153,6 +153,13 @@ final class EnrollModel {
         case .single:
             return .single(minActiveSec: max(0.3, step.minSeconds * 0.5),
                            maxTakeSec: step.maxSeconds + 3, trailingSilenceSec: 0.8)
+        case .finalPhase:
+            // minLeadSec small — the lead phase (a real inhale before the hold) is discarded regardless
+            // of how long it runs; midPauseSec matches calm's deliberate-pause split; maxTakeSec has
+            // margin for the lead + pause overhead on top of the final phase's own bound.
+            return .finalPhase(minLeadSec: 0.5, midPauseSec: 0.4,
+                               minPhaseSec: step.minSeconds, maxTakeSec: step.maxSeconds + 6,
+                               trailingSilenceSec: 0.8)
         case .cleanEvents:
             // Trailing silence must exceed the deliberate inter-event gap (events are well-separated),
             // so a slow gap doesn't end the take after the first event — only the real done-pause does.

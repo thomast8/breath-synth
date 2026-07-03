@@ -57,16 +57,20 @@ public final class BreathRecorder {
     @ObservationIgnored private var noiseFloorRMS: Float?
     @ObservationIgnored private var takes = 1
     @ObservationIgnored private var isCycle = false
+    /// `finalPhase` (FRC/RV's deliberate-pause split): structurally validated and auto-redone the same
+    /// way a `cycle` is, via the shared `takeRetries` counter below.
+    @ObservationIgnored private var isFinalPhase = false
     @ObservationIgnored private var isFixed = false
     @ObservationIgnored private var minPhaseFrames = 0
     @ObservationIgnored private var fileURL: (@MainActor (Int, SegmentLabel) -> URL)?
     @ObservationIgnored private var onSegment: (@MainActor (Int, SegmentLabel, URL, [Int], [CaptureAnalyzer.SpectralCandidate]) -> Void)?
     @ObservationIgnored private var onFinished: (@MainActor () -> Void)?
     @ObservationIgnored private var configObserver: NSObjectProtocol?
-    /// Consecutive auto-rejected cycle takes; after `maxCycleRetries` the next take is force-accepted
-    /// so a user who can't produce a balanced cycle is never trapped in an infinite redo.
-    @ObservationIgnored private var cycleRetries = 0
-    @ObservationIgnored private let maxCycleRetries = 3
+    /// Consecutive auto-rejected takes (any structurally-invalid cause: `cycle`, `finalPhase`); after
+    /// `maxTakeRetries` the next take is force-accepted so a user who can't produce a valid take is
+    /// never trapped in an infinite redo.
+    @ObservationIgnored private var takeRetries = 0
+    @ObservationIgnored private let maxTakeRetries = 3
 
     public init() {}
 
@@ -107,11 +111,12 @@ public final class BreathRecorder {
         self.onFinished = onFinished
         isFixed = detection.isFixedDuration
         isCycle = detection.isCycle
+        isFinalPhase = detection.isFinalPhase
         minPhaseFrames = Int((detection.minPhaseSec ?? 0) * sampleRate)
 
         takeIndex = 0
         invalidTakes = 0
-        cycleRetries = 0
+        takeRetries = 0
         eventCount = 0
         elapsed = 0
         gapTooClose = false
@@ -197,10 +202,11 @@ public final class BreathRecorder {
         if let issue = takeIssue(request) {
             lastTakeIssue = issue
             invalidTakes += 1
-            // Cycle takes auto-redo, but only up to a cap — past it, force-accept what was captured
-            // (the offline grader filters bad fragments) so the session always makes progress.
-            if isCycle, cycleRetries < maxCycleRetries {
-                cycleRetries += 1
+            // Structurally-invalid takes (cycle, finalPhase) auto-redo, but only up to a shared cap —
+            // past it, force-accept what was captured (the offline grader filters bad fragments) so the
+            // session always makes progress.
+            if (isCycle || isFinalPhase), takeRetries < maxTakeRetries {
+                takeRetries += 1
                 arm()
                 publishSnapshot()
                 return
@@ -208,7 +214,7 @@ public final class BreathRecorder {
         } else {
             lastTakeIssue = nil
         }
-        cycleRetries = 0
+        takeRetries = 0
 
         for segment in request.segments {
             let url = fileURL(takeIndex, segment.label)
@@ -234,8 +240,9 @@ public final class BreathRecorder {
 
     /// Structural validity guard. A `cycle` take must be exactly two phases, each ≥ `minPhaseFrames`
     /// and balanced — the analyzer/grader can't tell calm inhale from exhale, so this is the backstop
-    /// against a missing or false mid-pause. Every other take just needs a segment. Returns the reason
-    /// the take failed, or `nil` if it's valid.
+    /// against a missing or false mid-pause. A `finalPhase` take must have reached the deliberate pause
+    /// (exactly one kept segment) and that segment must be ≥ `minPhaseFrames`. Every other take just
+    /// needs a segment. Returns the reason the take failed, or `nil` if it's valid.
     private func takeIssue(_ request: FinalizeRequest) -> CaptureAnalyzer.TakeIssue? {
         if isCycle {
             guard request.reason != .incomplete, request.segments.count == 2 else { return .noPauseDetected }
@@ -244,6 +251,10 @@ public final class BreathRecorder {
                 exhaleFrames: request.segments[1].samples.count,
                 minPhaseFrames: minPhaseFrames
             )
+        }
+        if isFinalPhase {
+            guard request.reason != .incomplete, request.segments.count == 1 else { return .noPauseBeforeRelease }
+            return request.segments[0].samples.count < minPhaseFrames ? .exhaleTooShort : nil
         }
         return request.segments.isEmpty ? .noSegment : nil
     }
@@ -465,6 +476,14 @@ private final class CaptureBox: @unchecked Sendable {
 private extension CaptureDetection {
     var isFixedDuration: Bool { if case .fixedDuration = self { return true }; return false }
     var isCycle: Bool { if case .cycle = self { return true }; return false }
-    /// The minimum per-phase duration (cycle only) used by the structural validity guard.
-    var minPhaseSec: Double? { if case let .cycle(minPhaseSec, _, _, _) = self { return minPhaseSec }; return nil }
+    var isFinalPhase: Bool { if case .finalPhase = self { return true }; return false }
+    /// The minimum kept-phase duration (`cycle`'s per-phase minimum, or `finalPhase`'s final-phase
+    /// minimum) used by the structural validity guard.
+    var minPhaseSec: Double? {
+        switch self {
+        case let .cycle(minPhaseSec, _, _, _): return minPhaseSec
+        case let .finalPhase(_, _, minPhaseSec, _, _): return minPhaseSec
+        default: return nil
+        }
+    }
 }
