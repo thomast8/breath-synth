@@ -101,17 +101,21 @@ public enum BankBuilder {
                 orderedKeys.append(key)
             }
 
+            let eventSpacing = Segmenter.eventSpacing(forStyle: step.style)
             let refProfile = step.reference.flatMap { ref in
                 referenceProfile(
                     assetsDir.appendingPathComponent(ref),
-                    role: step.role, type: step.type, settings: settings, roomProfile: roomProfile
+                    role: step.role, type: step.type, settings: settings, roomProfile: roomProfile,
+                    minEventDistSec: eventSpacing
                 )
             }
-            // Gold cadence (gulp-core spacing) for the packing cadence gate — cores steps only.
-            let refCadence: [Int] = step.role == "cores"
+            // Gold cadence (gulp-core spacing) for the cadence gate — cores and gaps steps, both
+            // derived from the same `detectPeaks` (see `Segmenter.eventSpacing`), so the gold vector
+            // is reusable as-is for either role.
+            let refCadence: [Int] = step.role == "cores" || step.role == "gaps"
                 ? (step.reference.flatMap {
                     referenceCadence(assetsDir.appendingPathComponent($0), type: step.type,
-                                     settings: settings, roomProfile: roomProfile)
+                                     settings: settings, roomProfile: roomProfile, minEventDistSec: eventSpacing)
                   } ?? [])
                 : []
 
@@ -131,7 +135,8 @@ public enum BankBuilder {
                 let result = TakeGrading.gradeTake(
                     raw: raw, role: step.role, type: step.type, settings: settings,
                     roomToneProfile: roomProfile, goldCadence: refCadence,
-                    minSeconds: step.minSeconds, maxSeconds: step.maxSeconds, thresholds: thresholds
+                    minSeconds: step.minSeconds, maxSeconds: step.maxSeconds,
+                    minEventDistSec: eventSpacing, thresholds: thresholds
                 )
                 if let cache = result.cacheSignal {
                     cachesToWrite[FragmentBank.preparedCacheName(forTake: outName)] = cache
@@ -145,10 +150,15 @@ public enum BankBuilder {
             for rec in records {
                 if rec.raw.kind == .gap {
                     // Keep the segmenter's monotonic onset offsets so the bank's stable
-                    // `(file, startFrame)` order replays the recorded cadence sequence.
+                    // `(file, startFrame)` order replays the recorded cadence sequence. `clipped`/
+                    // `lengthOK`/`cadenceOK` are take-level facts identical across a take's gap
+                    // fragments, so every fragment of a bad-cadence take rejects together.
+                    let verdict = Grader.gradeCadenceTake(
+                        clipped: rec.clipped, lengthOK: rec.lengthOK, cadenceOK: rec.cadenceOK
+                    )
                     group.fragments.append(Fragment(
                         file: rec.outName, startFrame: rec.raw.startFrame, endFrame: rec.raw.endFrame, kind: .gap,
-                        accept: true, gapToNext: rec.raw.gapToNext
+                        accept: verdict.accept, reason: verdict.reason, gapToNext: rec.raw.gapToNext
                     ))
                     continue
                 }
@@ -250,7 +260,8 @@ public enum BankBuilder {
                     let raw = try AudioIO.decodeMono(url: assetsDir.appendingPathComponent(fragment.file), sampleRate: sr)
                     let out = Segmenter.segment(
                         rawTake: raw, role: fragment.kind == .grain ? "texture" : "cores",
-                        type: bank.type, settings: settings, roomToneProfile: roomProfile
+                        type: bank.type, settings: settings, roomToneProfile: roomProfile,
+                        minEventDistSec: Segmenter.eventSpacing(forStyle: style)
                     )
                     guard let cache = out.cacheSignal else { continue }
                     try AudioIO.writeMonoWAV(cache, sampleRate: sr, to: assetsDir.appendingPathComponent(cacheName))
@@ -312,12 +323,14 @@ public enum BankBuilder {
     /// compute the gold template identically.
     static func referenceProfile(
         _ url: URL, role: String, type: BreathType,
-        settings: AssemblerSettings, roomProfile: [Float]?
+        settings: AssemblerSettings, roomProfile: [Float]?,
+        minEventDistSec: Double = UnitExtractor.gulpMinDistSec
     ) -> [Float]? {
         guard FileManager.default.fileExists(atPath: url.path),
               let raw = try? AudioIO.decodeMono(url: url, sampleRate: settings.sampleRate) else { return nil }
         let out = Segmenter.segment(
-            rawTake: raw, role: role, type: type, settings: settings, roomToneProfile: roomProfile
+            rawTake: raw, role: role, type: type, settings: settings, roomToneProfile: roomProfile,
+            minEventDistSec: minEventDistSec
         )
         let profiles = out.fragments
             .filter { $0.kind != .gap }
@@ -328,12 +341,14 @@ public enum BankBuilder {
 
     /// The gold reference's packing cadence — its gulp-core inter-onset gaps — for the cadence gate.
     static func referenceCadence(
-        _ url: URL, type: BreathType, settings: AssemblerSettings, roomProfile: [Float]?
+        _ url: URL, type: BreathType, settings: AssemblerSettings, roomProfile: [Float]?,
+        minEventDistSec: Double = UnitExtractor.gulpMinDistSec
     ) -> [Int]? {
         guard FileManager.default.fileExists(atPath: url.path),
               let raw = try? AudioIO.decodeMono(url: url, sampleRate: settings.sampleRate) else { return nil }
         let out = Segmenter.segment(
-            rawTake: raw, role: "cores", type: type, settings: settings, roomToneProfile: roomProfile
+            rawTake: raw, role: "cores", type: type, settings: settings, roomToneProfile: roomProfile,
+            minEventDistSec: minEventDistSec
         )
         let gaps = out.fragments.filter { $0.kind == .gulpCore }.compactMap(\.gapToNext)
         return gaps.isEmpty ? nil : gaps
@@ -430,6 +445,8 @@ private struct Record {
     var outName: String
     var raw: Segmenter.Raw
     var features: Grader.Features?
+    /// Take-level clipping fact, carried directly since a `.gap` record has no `features` to hold it.
+    var clipped: Bool
     var lengthOK: Bool
     var dropoutOK: Bool = true
     var spacingOK: Bool = true
@@ -439,6 +456,7 @@ private struct Record {
         self.outName = outName
         self.raw = fragment.raw
         self.features = fragment.features
+        self.clipped = fragment.clipped
         self.lengthOK = fragment.lengthOK
         self.dropoutOK = fragment.dropoutOK
         self.spacingOK = fragment.spacingOK

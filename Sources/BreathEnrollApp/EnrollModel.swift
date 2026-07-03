@@ -187,8 +187,8 @@ final class EnrollModel {
                         guard let lane = laneByLabel[label] else { continue }
                         laneGroup.addTask {
                             await grader.grade(
-                                fileURL: url, role: lane.role, type: lane.type, reference: lane.reference,
-                                minSeconds: step.minSeconds, maxSeconds: step.maxSeconds
+                                fileURL: url, style: lane.style, role: lane.role, type: lane.type,
+                                reference: lane.reference, minSeconds: step.minSeconds, maxSeconds: step.maxSeconds
                             )
                         }
                     }

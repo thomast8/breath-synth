@@ -46,8 +46,10 @@ public enum UnitExtractor {
     /// Delegates to `gulpCoreRanges` so the identity a fragment bank relies on holds *by construction*
     /// on every path (detected events, no events, degenerate windows): a bank that stores the ranges
     /// and re-cuts `declickedCore(prepared[range])` reproduces this exactly.
-    public static func gulpCores(from source: [Float], sampleRate: Double) -> [[Float]] {
-        gulpCoreRanges(from: source, sampleRate: sampleRate)
+    public static func gulpCores(
+        from source: [Float], sampleRate: Double, minDistSec: Double = gulpMinDistSec
+    ) -> [[Float]] {
+        gulpCoreRanges(from: source, sampleRate: sampleRate, minDistSec: minDistSec)
             .map { declicked(Array(source[$0]), sampleRate: sampleRate) }
     }
 
@@ -55,8 +57,12 @@ public enum UnitExtractor {
     /// stores so a core can be re-cut from the cached prepared take. The identity is unconditional:
     /// `gulpCores(...)` is exactly `gulpCoreRanges(...).map { declickedCore(prepared[$0], ...) }`.
     /// A take with no detected events yields the whole-source range (or none when too short).
-    public static func gulpCoreRanges(from source: [Float], sampleRate: Double) -> [Range<Int>] {
-        let peaks = detectPeaks(source, sampleRate: sampleRate, minDistSec: gulpMinDistSec)
+    /// `minDistSec` defaults to the packing gulp spacing; recovery callers pass `hookMinDistSec` so a
+    /// double-sip's in/out halves merge into one event here too, matching `extract`'s existing merge.
+    public static func gulpCoreRanges(
+        from source: [Float], sampleRate: Double, minDistSec: Double = gulpMinDistSec
+    ) -> [Range<Int>] {
+        let peaks = detectPeaks(source, sampleRate: sampleRate, minDistSec: minDistSec)
         guard !peaks.isEmpty else { return source.count > 1 ? [0..<source.count] : [] }
         let ranges = coreRanges(forPeaks: peaks, count: source.count, sampleRate: sampleRate)
         return ranges.isEmpty ? (source.count > 1 ? [0..<source.count] : []) : ranges
@@ -82,9 +88,11 @@ public enum UnitExtractor {
     }
 
     /// The inter-onset gaps (in samples) between detected events — the recording's natural rhythm.
-    /// Returns `[]` when fewer than two events are found.
-    public static func rhythmGaps(from source: [Float], sampleRate: Double) -> [Int] {
-        let peaks = detectPeaks(source, sampleRate: sampleRate, minDistSec: gulpMinDistSec)
+    /// Returns `[]` when fewer than two events are found. `minDistSec`: see `gulpCoreRanges`.
+    public static func rhythmGaps(
+        from source: [Float], sampleRate: Double, minDistSec: Double = gulpMinDistSec
+    ) -> [Int] {
+        let peaks = detectPeaks(source, sampleRate: sampleRate, minDistSec: minDistSec)
         guard peaks.count >= 2 else { return [] }
         var gaps: [Int] = []
         for i in 1..<peaks.count { gaps.append(max(1, peaks[i] - peaks[i - 1])) }

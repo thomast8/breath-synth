@@ -72,18 +72,20 @@ public actor LiveTakeGrader {
     /// way the offline builder decodes a take, so a verdict here and the eventual `breath-bank build`
     /// verdict are computed from identical per-fragment facts (sibling sets differ, by design).
     public func grade(
-        fileURL: URL, role: String, type: BreathType, reference: String?,
+        fileURL: URL, style: String, role: String, type: BreathType, reference: String?,
         minSeconds: Double?, maxSeconds: Double?
     ) async -> TakeVerdict {
         guard let raw = try? AudioIO.decodeMono(url: fileURL, sampleRate: settings.sampleRate) else {
             return TakeVerdict(accept: false, reason: "unreadable", advisory: [], fragmentsAccepted: 0, fragmentsTotal: 0)
         }
 
-        let goldProfile = goldProfile(forReference: reference, role: role, type: type)
-        let goldCadence = goldCadence(forReference: reference, role: role, type: type)
+        let eventSpacing = Segmenter.eventSpacing(forStyle: style)
+        let goldProfile = goldProfile(forReference: reference, role: role, type: type, minEventDistSec: eventSpacing)
+        let goldCadence = goldCadence(forReference: reference, role: role, type: type, minEventDistSec: eventSpacing)
         let result = TakeGrading.gradeTake(
             raw: raw, role: role, type: type, settings: settings, roomToneProfile: roomProfile,
-            goldCadence: goldCadence, minSeconds: minSeconds, maxSeconds: maxSeconds, thresholds: thresholds
+            goldCadence: goldCadence, minSeconds: minSeconds, maxSeconds: maxSeconds,
+            minEventDistSec: eventSpacing, thresholds: thresholds
         )
 
         // Take-level facts reject regardless of any individual fragment's verdict.
@@ -101,9 +103,17 @@ public actor LiveTakeGrader {
         var newFeatures: [Grader.Features] = []
         for record in result.records {
             if record.raw.kind == .gap {
-                // Gap fragments carry no audio-based verdict here — Phase 5 grades cadence takes;
-                // Phase 4's live backstop only covers audio-bearing fragments.
-                accepted += 1
+                // Gap fragments carry no audio — clipped/length already passed (checked above, take-
+                // level); only cadence can still reject here, sharing `Grader.gradeCadenceTake` with
+                // the offline builder so both grade a gaps take identically.
+                let verdict = Grader.gradeCadenceTake(
+                    clipped: record.clipped, lengthOK: record.lengthOK, cadenceOK: record.cadenceOK
+                )
+                if verdict.accept {
+                    accepted += 1
+                } else if let reason = verdict.reason {
+                    failReasons.append(reason)
+                }
                 continue
             }
             guard let features = record.features else { continue }
@@ -140,24 +150,29 @@ public actor LiveTakeGrader {
         "\(role)|\(type.rawValue)|\(reference ?? "")"
     }
 
-    private func goldProfile(forReference reference: String?, role: String, type: BreathType) -> [Float]? {
+    private func goldProfile(
+        forReference reference: String?, role: String, type: BreathType, minEventDistSec: Double
+    ) -> [Float]? {
         guard let reference else { return nil }
         let key = Self.laneKey(role: role, type: type, reference: reference)
         if let cached = goldProfiles[key] { return cached }
         let profile = BankBuilder.referenceProfile(
             assetsDir.appendingPathComponent(reference), role: role, type: type,
-            settings: settings, roomProfile: roomProfile
+            settings: settings, roomProfile: roomProfile, minEventDistSec: minEventDistSec
         )
         goldProfiles[key] = profile
         return profile
     }
 
-    private func goldCadence(forReference reference: String?, role: String, type: BreathType) -> [Int] {
-        guard role == "cores", let reference else { return [] }
+    private func goldCadence(
+        forReference reference: String?, role: String, type: BreathType, minEventDistSec: Double
+    ) -> [Int] {
+        guard role == "cores" || role == "gaps", let reference else { return [] }
         let key = Self.laneKey(role: role, type: type, reference: reference)
         if let cached = goldCadences[key] { return cached }
         let cadence = BankBuilder.referenceCadence(
-            assetsDir.appendingPathComponent(reference), type: type, settings: settings, roomProfile: roomProfile
+            assetsDir.appendingPathComponent(reference), type: type, settings: settings,
+            roomProfile: roomProfile, minEventDistSec: minEventDistSec
         ) ?? []
         goldCadences[key] = cadence
         return cadence

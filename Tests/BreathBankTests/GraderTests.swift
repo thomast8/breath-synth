@@ -125,4 +125,18 @@ final class GraderTests: XCTestCase {
         // All gates passing (defaults) → the clean fragment is still accepted.
         XCTAssertTrue(Grader.grade(features(), siblings: s, gold: flatProfile, lengthOK: true).accept)
     }
+
+    // MARK: - gradeCadenceTake (Step 5.2 — take-level gate for role: "gaps")
+
+    func testGradeCadenceTakeOrdersClippedBeforeLengthBeforeCadence() {
+        XCTAssertEqual(Grader.gradeCadenceTake(clipped: true, lengthOK: false, cadenceOK: false).reason, "clipped")
+        XCTAssertEqual(Grader.gradeCadenceTake(clipped: false, lengthOK: false, cadenceOK: false).reason, "length")
+        XCTAssertEqual(Grader.gradeCadenceTake(clipped: false, lengthOK: true, cadenceOK: false).reason, "cadence_drift")
+    }
+
+    func testGradeCadenceTakeAcceptsWhenAllGatesPass() {
+        let v = Grader.gradeCadenceTake(clipped: false, lengthOK: true, cadenceOK: true)
+        XCTAssertTrue(v.accept)
+        XCTAssertNil(v.reason)
+    }
 }

@@ -118,4 +118,43 @@ final class SegmenterTests: XCTestCase {
             lastStart = f.startFrame
         }
     }
+
+    // MARK: - minEventDistSec (Step 5.1 — style-aware event spacing)
+
+    /// Recovery's hook-breath double-sip must merge at `hookMinDistSec`, not the packing-tuned
+    /// `gulpMinDistSec` default — aligning `Segmenter`'s bank-side geometry (cores and gaps) with the
+    /// engine's own one-take `UnitExtractor.extract` render path, which already merges at this floor.
+    func testCoresMinEventDistSecMergesRecoverySpacing() {
+        var sig = [Float]()
+        for i in 0..<4 {
+            sig += noise(seed: UInt64(400 + i), count: Int(0.1 * sr), amplitude: 0.4)
+            sig += [Float](repeating: 0, count: Int(0.5 * sr))   // 0.5s apart: merges under hook, splits under gulp
+        }
+        let gulpSpaced = Segmenter.segment(rawTake: sig, role: "cores", type: .inhale, settings: settings,
+                                           roomToneProfile: nil, minEventDistSec: UnitExtractor.gulpMinDistSec)
+        let hookSpaced = Segmenter.segment(rawTake: sig, role: "cores", type: .inhale, settings: settings,
+                                           roomToneProfile: nil, minEventDistSec: UnitExtractor.hookMinDistSec)
+        XCTAssertGreaterThan(gulpSpaced.fragments.count, hookSpaced.fragments.count,
+                             "the 0.22s floor must resolve more distinct cores than the 0.70s floor on the same audio")
+    }
+
+    func testGapsMinEventDistSecMergesRecoverySpacing() {
+        var sig = [Float]()
+        for i in 0..<4 {
+            sig += noise(seed: UInt64(500 + i), count: Int(0.1 * sr), amplitude: 0.4)
+            sig += [Float](repeating: 0, count: Int(0.5 * sr))
+        }
+        let gulpSpaced = Segmenter.segment(rawTake: sig, role: "gaps", type: .inhale, settings: settings,
+                                           roomToneProfile: nil, minEventDistSec: UnitExtractor.gulpMinDistSec)
+        let hookSpaced = Segmenter.segment(rawTake: sig, role: "gaps", type: .inhale, settings: settings,
+                                           roomToneProfile: nil, minEventDistSec: UnitExtractor.hookMinDistSec)
+        XCTAssertGreaterThan(gulpSpaced.fragments.count, hookSpaced.fragments.count,
+                             "the 0.22s floor must resolve more distinct gaps than the 0.70s floor on the same audio")
+    }
+
+    func testEventSpacingForStyle() {
+        XCTAssertEqual(Segmenter.eventSpacing(forStyle: "recovery"), UnitExtractor.hookMinDistSec)
+        XCTAssertEqual(Segmenter.eventSpacing(forStyle: "packing"), UnitExtractor.gulpMinDistSec)
+        XCTAssertEqual(Segmenter.eventSpacing(forStyle: "calm"), UnitExtractor.gulpMinDistSec)
+    }
 }

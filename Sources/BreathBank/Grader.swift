@@ -185,6 +185,21 @@ public enum Grader {
         return abs(me - ref) / ref
     }
 
+    /// Take-level grade for `role: "gaps"` fragments: these carry only timing (no audio, no
+    /// `Features`), so clipping → length → cadence is the whole gate — the same reason strings as
+    /// `grade`'s signal/technique stages, so `BuildSummary` reject reasons stay uniform. All of a
+    /// take's gap fragments share this one verdict (a bad-cadence take rejects wholesale, matching how
+    /// the render replays a take's gap sequence in order).
+    public static func gradeCadenceTake(clipped: Bool, lengthOK: Bool, cadenceOK: Bool) -> Verdict {
+        func verdict(_ accept: Bool, _ reason: String?) -> Verdict {
+            Verdict(accept: accept, reason: reason, qaScore: 0, anomalyScore: 0, templateDistance: 0)
+        }
+        if clipped { return verdict(false, "clipped") }
+        if !lengthOK { return verdict(false, "length") }
+        if !cadenceOK { return verdict(false, "cadence_drift") }
+        return verdict(true, nil)
+    }
+
     // MARK: - DSP helpers
 
     static func rms(_ samples: [Float]) -> Float {

@@ -58,7 +58,8 @@ public enum Segmenter {
         role: String,
         type: BreathType,
         settings: AssemblerSettings,
-        roomToneProfile: [Float]?
+        roomToneProfile: [Float]?,
+        minEventDistSec: Double = UnitExtractor.gulpMinDistSec
     ) -> Output {
         let sr = settings.sampleRate
         let prepared = BreathAssembler.prepareSource(rawTake, settings: settings, noiseProfile: roomToneProfile)
@@ -75,12 +76,12 @@ public enum Segmenter {
             )
             return Output(cacheSignal: nil, fragments: [frag])
         case "cores":
-            return gulpCoreFragments(prepared: prepared, sampleRate: sr)
+            return gulpCoreFragments(prepared: prepared, sampleRate: sr, minDistSec: minEventDistSec)
         case "gaps":
             // Carry a monotonically increasing onset position as the fragment offset so the bank's
             // stable `(file, startFrame)` order preserves the recorded cadence sequence. (Storing 0
             // for every gap would let the non-stable sort scramble the rhythm.)
-            let gaps = UnitExtractor.rhythmGaps(from: prepared, sampleRate: sr)
+            let gaps = UnitExtractor.rhythmGaps(from: prepared, sampleRate: sr, minDistSec: minEventDistSec)
             var frags: [Raw] = []
             var cursor = 0
             for gap in gaps {
@@ -91,6 +92,15 @@ public enum Segmenter {
         default:
             return Output(cacheSignal: nil, fragments: [])
         }
+    }
+
+    /// The event-spacing floor for a style's counted-event roles (`cores`/`gaps`), the single place the
+    /// style→spacing mapping lives. Recovery's hook breaths are a double-sip that must merge into one
+    /// event at `hookMinDistSec` — the same floor the engine's one-take `UnitExtractor.extract` render
+    /// path already uses — or its in/out halves double-count as separate cores/gaps. Every other
+    /// counted style (packing) uses the tighter `gulpMinDistSec` floor.
+    public static func eventSpacing(forStyle style: String) -> Double {
+        style == "recovery" ? UnitExtractor.hookMinDistSec : UnitExtractor.gulpMinDistSec
     }
 
     // MARK: - Per-role segmentation
@@ -120,8 +130,8 @@ public enum Segmenter {
         return Output(cacheSignal: texture, fragments: fragments)
     }
 
-    private static func gulpCoreFragments(prepared: [Float], sampleRate sr: Double) -> Output {
-        let ranges = UnitExtractor.gulpCoreRanges(from: prepared, sampleRate: sr)
+    private static func gulpCoreFragments(prepared: [Float], sampleRate sr: Double, minDistSec: Double) -> Output {
+        let ranges = UnitExtractor.gulpCoreRanges(from: prepared, sampleRate: sr, minDistSec: minDistSec)
         var fragments: [Raw] = []
         for (i, range) in ranges.enumerated() {
             let core = UnitExtractor.declickedCore(Array(prepared[range]), sampleRate: sr)
