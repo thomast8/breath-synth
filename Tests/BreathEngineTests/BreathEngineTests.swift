@@ -1,40 +1,46 @@
-import XCTest
+import Testing
+import Foundation
 @testable import BreathEngine
 
-final class SegmentsTests: XCTestCase {
+struct SegmentsTests {
+    @Test
     func testFramesRounding() {
-        XCTAssertEqual(Segments.frames(seconds: 1, sampleRate: 44_100), 44_100)
-        XCTAssertEqual(Segments.frames(seconds: 0.5, sampleRate: 44_100), 22_050)
-        XCTAssertEqual(Segments.frames(seconds: 0, sampleRate: 44_100), 0)
+        #expect(Segments.frames(seconds: 1, sampleRate: 44_100) == 44_100)
+        #expect(Segments.frames(seconds: 0.5, sampleRate: 44_100) == 22_050)
+        #expect(Segments.frames(seconds: 0, sampleRate: 44_100) == 0)
     }
 
+    @Test
     func testClampCrossfade() {
-        XCTAssertEqual(Segments.clampCrossfade(1000, loopLen: 500, startLen: 800, endLen: 800), 499)
-        XCTAssertEqual(Segments.clampCrossfade(100, loopLen: 500, startLen: 800, endLen: 800), 100)
-        XCTAssertEqual(Segments.clampCrossfade(0, loopLen: 500, startLen: 800, endLen: 800), 1)
+        #expect(Segments.clampCrossfade(1000, loopLen: 500, startLen: 800, endLen: 800) == 499)
+        #expect(Segments.clampCrossfade(100, loopLen: 500, startLen: 800, endLen: 800) == 100)
+        #expect(Segments.clampCrossfade(0, loopLen: 500, startLen: 800, endLen: 800) == 1)
     }
 }
 
-final class CrossfadeTests: XCTestCase {
+struct CrossfadeTests {
+    @Test
     func testFadeEndpoints() {
         let n = 256
         let fIn = Crossfade.fadeIn(n)
         let fOut = Crossfade.fadeOut(n)
-        XCTAssertEqual(fIn.first!, 0, accuracy: 1e-6)
-        XCTAssertEqual(fIn.last!, 1, accuracy: 1e-6)
-        XCTAssertEqual(fOut.first!, 1, accuracy: 1e-6)
-        XCTAssertEqual(fOut.last!, 0, accuracy: 1e-6)
+        #expect(abs(fIn.first! - 0) <= 1e-6)
+        #expect(abs(fIn.last! - 1) <= 1e-6)
+        #expect(abs(fOut.first! - 1) <= 1e-6)
+        #expect(abs(fOut.last! - 0) <= 1e-6)
     }
 
+    @Test
     func testEqualPowerInvariant() {
         let n = 512
         let fIn = Crossfade.fadeIn(n)
         let fOut = Crossfade.fadeOut(n)
         for i in 0..<n {
-            XCTAssertEqual(fIn[i] * fIn[i] + fOut[i] * fOut[i], 1, accuracy: 1e-5)
+            #expect(abs(fIn[i] * fIn[i] + fOut[i] * fOut[i] - 1) <= 1e-5)
         }
     }
 
+    @Test
     func testPlaceNoLoudnessDipForCorrelatedSignals() {
         // Mixing two DC-1 signals across an equal-power crossfade never dips below 1.
         let n = 300
@@ -42,28 +48,30 @@ final class CrossfadeTests: XCTestCase {
         let segment = [Float](repeating: 1, count: n)
         Crossfade.place(into: &out, segment: segment, at: 0, headCrossfade: n)
         for value in out {
-            XCTAssertGreaterThanOrEqual(value, 1 - 1e-4)
+            #expect(value >= 1 - 1e-4)
         }
     }
 
+    @Test
     func testAssembleTexturedLoopExactLengthAndWindow() {
         let texture = (0..<1000).map { sin(Float($0) * 0.01) }
         var rng = SeededRNG(seed: 7)
         let body = Crossfade.assembleTexturedLoop(texture: texture, targetLen: 3333, grainLen: 400, crossfadeLen: 100, rng: &rng)
-        XCTAssertEqual(body.count, 3333)
-        XCTAssertGreaterThan(body.map { abs($0) }.max()!, 0.01)
+        #expect(body.count == 3333)
+        #expect(body.map { abs($0) }.max()! > 0.01)
         // Deterministic: the same seed reproduces the same output.
         var rngA = SeededRNG(seed: 7)
         var rngB = SeededRNG(seed: 7)
         let a = Crossfade.assembleTexturedLoop(texture: texture, targetLen: 3333, grainLen: 400, crossfadeLen: 100, rng: &rngA)
         let b = Crossfade.assembleTexturedLoop(texture: texture, targetLen: 3333, grainLen: 400, crossfadeLen: 100, rng: &rngB)
-        XCTAssertEqual(a, b)
+        #expect(a == b)
         // When the target fits the texture, a single seam-free window is returned.
         var rngW = SeededRNG(seed: 1)
         let window = Crossfade.assembleTexturedLoop(texture: texture, targetLen: 400, grainLen: 400, crossfadeLen: 100, rng: &rngW)
-        XCTAssertEqual(window, Array(texture[0..<400]))
+        #expect(window == Array(texture[0..<400]))
     }
 
+    @Test
     func testAssembleTexturedLoopPullsFromMultipleOffsets() {
         // Ramp texture: each sample's value encodes its own offset. Probing the clean
         // (non-crossfade) region of successive grains therefore reveals which offset
@@ -79,37 +87,42 @@ final class CrossfadeTests: XCTestCase {
             let probe = k * stride + x + 10  // just past this grain's head-crossfade
             if probe < body.count { offsetsSeen.insert(Int((body[probe] * 1000).rounded())) }
         }
-        XCTAssertGreaterThan(offsetsSeen.count, 1, "grains should be pulled from multiple offsets")
+        #expect(offsetsSeen.count > 1, "grains should be pulled from multiple offsets")
     }
 }
 
-final class EnvelopeTests: XCTestCase {
+struct EnvelopeTests {
+    @Test
     func testEndpointsAreZero() {
         for type in BreathType.allCases {
             let curve = Envelope.curve(for: type, frames: 44_100, durationSec: 4)
-            XCTAssertEqual(curve.first!, 0, accuracy: 1e-7)
-            XCTAssertEqual(curve.last!, 0, accuracy: 1e-7)
+            #expect(abs(curve.first! - 0) <= 1e-7)
+            #expect(abs(curve.last! - 0) <= 1e-7)
         }
     }
 
+    @Test
     func testLength() {
-        XCTAssertEqual(Envelope.curve(for: .inhale, frames: 12_345, durationSec: 3).count, 12_345)
+        #expect(Envelope.curve(for: .inhale, frames: 12_345, durationSec: 3).count == 12_345)
     }
 
+    @Test
     func testLongBreathIsQuieter() {
-        XCTAssertEqual(Envelope.longBreathGainScale(durationSec: 4), 1, accuracy: 1e-6)
-        XCTAssertLessThan(Envelope.longBreathGainScale(durationSec: 30),
+        #expect(abs(Envelope.longBreathGainScale(durationSec: 4) - 1) <= 1e-6)
+        #expect(Envelope.longBreathGainScale(durationSec: 30) <
                           Envelope.longBreathGainScale(durationSec: 4))
     }
 
+    @Test
     func testInhaleRisesEarlyExhaleDecaysLate() {
         let inhale = Envelope.curve(for: .inhale, frames: 1000, durationSec: 4)
         let exhale = Envelope.curve(for: .exhale, frames: 1000, durationSec: 4)
         // Inhale energy is concentrated later than exhale (which peaks early).
-        XCTAssertLessThan(inhale[100], inhale[500])
-        XCTAssertGreaterThan(exhale[100], exhale[700])
+        #expect(inhale[100] < inhale[500])
+        #expect(exhale[100] > exhale[700])
     }
 
+    @Test
     func testPeakRegions() {
         // Inhale peaks in the later-middle; exhale peaks early. argmax survives only
         // if the curves broadly match their design intent.
@@ -117,90 +130,100 @@ final class EnvelopeTests: XCTestCase {
         let exhale = Envelope.curve(for: .exhale, frames: 1000, durationSec: 4)
         let iPeak = inhale.indices.max(by: { inhale[$0] < inhale[$1] })!
         let ePeak = exhale.indices.max(by: { exhale[$0] < exhale[$1] })!
-        XCTAssertTrue((300...800).contains(iPeak), "inhale peak at \(iPeak)")
-        XCTAssertTrue((50...450).contains(ePeak), "exhale peak at \(ePeak)")
+        #expect((300...800).contains(iPeak), "inhale peak at \(iPeak)")
+        #expect((50...450).contains(ePeak), "exhale peak at \(ePeak)")
     }
 }
 
-final class VariationTests: XCTestCase {
+struct VariationTests {
+    @Test
     func testDbToGain() {
-        XCTAssertEqual(Variation.dbToGain(0), 1, accuracy: 1e-9)
-        XCTAssertEqual(Variation.dbToGain(-6), 0.501, accuracy: 1e-3)
+        #expect(abs(Variation.dbToGain(0) - 1) <= 1e-9)
+        #expect(abs(Variation.dbToGain(-6) - 0.501) <= 1e-3)
     }
 
+    @Test
     func testSeededRNGDeterministic() {
         var a = SeededRNG(seed: 42)
         var b = SeededRNG(seed: 42)
-        for _ in 0..<100 { XCTAssertEqual(a.next(), b.next()) }
+        for _ in 0..<100 { #expect(a.next() == b.next()) }
         var d = SeededRNG(seed: 42)
         var e = SeededRNG(seed: 43)
-        XCTAssertNotEqual(d.next(), e.next())
+        #expect(d.next() != e.next())
     }
 
+    @Test
     func testDrawWithinRangeAndDeterministic() {
         let opts = VariationOptions(enabled: true, gainDb: 2, playbackRatePct: 2)
         var r1 = SeededRNG(seed: 7)
         var r2 = SeededRNG(seed: 7)
         let d1 = Variation.draw(opts, rng: &r1)
         let d2 = Variation.draw(opts, rng: &r2)
-        XCTAssertEqual(d1, d2)
-        XCTAssertGreaterThanOrEqual(d1.gainScalar, Variation.dbToGain(-2))
-        XCTAssertLessThanOrEqual(d1.gainScalar, Variation.dbToGain(2))
-        XCTAssertGreaterThanOrEqual(d1.playbackRate, 0.98)
-        XCTAssertLessThanOrEqual(d1.playbackRate, 1.02)
+        #expect(d1 == d2)
+        #expect(d1.gainScalar >= Variation.dbToGain(-2))
+        #expect(d1.gainScalar <= Variation.dbToGain(2))
+        #expect(d1.playbackRate >= 0.98)
+        #expect(d1.playbackRate <= 1.02)
     }
 
+    @Test
     func testStableSeedDependsOnSpec() {
         let a = BreathSpec(type: .inhale, durationSec: 4, style: "neutral")
         let b = BreathSpec(type: .inhale, durationSec: 4, style: "neutral")
         let c = BreathSpec(type: .inhale, durationSec: 8, style: "neutral")
-        XCTAssertEqual(Variation.stableSeed(for: a), Variation.stableSeed(for: b))
-        XCTAssertNotEqual(Variation.stableSeed(for: a), Variation.stableSeed(for: c))
+        #expect(Variation.stableSeed(for: a) == Variation.stableSeed(for: b))
+        #expect(Variation.stableSeed(for: a) != Variation.stableSeed(for: c))
     }
 
+    @Test
     func testStableSeedUsesClampedDuration() {
         // 0.1s and 1.0s both clamp to the 1.0s floor, so the seed is identical.
         let belowFloor = BreathSpec(type: .inhale, durationSec: 0.1, style: "neutral")
         let atFloor = BreathSpec(type: .inhale, durationSec: 1.0, style: "neutral")
-        XCTAssertEqual(Variation.stableSeed(for: belowFloor), Variation.stableSeed(for: atFloor))
+        #expect(Variation.stableSeed(for: belowFloor) == Variation.stableSeed(for: atFloor))
     }
 }
 
-final class ResampleTests: XCTestCase {
+struct ResampleTests {
+    @Test
     func testTargetLengthAndEndpoints() {
         let input = (0..<100).map { Float($0) }
         let out = Resample.toFrames(input, 250)
-        XCTAssertEqual(out.count, 250)
-        XCTAssertEqual(out.first!, input.first!, accuracy: 1e-6)
-        XCTAssertEqual(out.last!, input.last!, accuracy: 1e-6)
+        #expect(out.count == 250)
+        #expect(abs(out.first! - input.first!) <= 1e-6)
+        #expect(abs(out.last! - input.last!) <= 1e-6)
     }
 
+    @Test
     func testByFactor() {
         let input = [Float](repeating: 0.5, count: 1000)
-        XCTAssertEqual(Resample.byFactor(input, 1.02).count, 1020)  // lengthen
-        XCTAssertEqual(Resample.byFactor(input, 0.98).count, 980)   // shorten (pitch up)
+        #expect(Resample.byFactor(input, 1.02).count == 1020)  // lengthen
+        #expect(Resample.byFactor(input, 0.98).count == 980)   // shorten (pitch up)
     }
 }
 
-final class BiquadTests: XCTestCase {
+struct BiquadTests {
+    @Test
     func testHighpassReducesDC() {
         var samples = [Float](repeating: 1, count: 4_096)
         var filter = Biquad(kind: .highpass, sampleRate: 44_100, frequency: 300, q: 0.7)
         filter.process(&samples)
         let tailMean = samples.suffix(1_000).reduce(Float(0), +) / 1_000
-        XCTAssertLessThan(abs(tailMean), 0.01)
+        #expect(abs(tailMean) < 0.01)
     }
 
+    @Test
     func testLowpassReducesFastAlternatingSignal() {
         let input = (0..<4_096).map { Float($0.isMultiple(of: 2) ? 1 : -1) }
         var filtered = input
         var filter = Biquad(kind: .lowpass, sampleRate: 44_100, frequency: 300, q: 0.7)
         filter.process(&filtered)
-        XCTAssertLessThan(rms(filtered), rms(input) * 0.25)
+        #expect(rms(filtered) < rms(input) * 0.25)
     }
 }
 
-final class ManifestTests: XCTestCase {
+struct ManifestTests {
+    @Test
     func testCodableRoundTrip() throws {
         var manifest = BreathManifest()
         var style = StyleManifest()
@@ -208,8 +231,8 @@ final class ManifestTests: XCTestCase {
         manifest.styles["neutral"] = style
         let data = try JSONEncoder().encode(manifest)
         let decoded = try JSONDecoder().decode(BreathManifest.self, from: data)
-        XCTAssertEqual(decoded, manifest)
-        XCTAssertEqual(decoded.palette(style: "neutral", type: .inhale)?.loop.first?.file, "a.wav")
+        #expect(decoded == manifest)
+        #expect(decoded.palette(style: "neutral", type: .inhale)?.loop.first?.file == "a.wav")
     }
 }
 
@@ -219,11 +242,12 @@ private func rms(_ samples: [Float]) -> Float {
     return sqrt(sum / Float(samples.count))
 }
 
-final class AssemblerTests: XCTestCase {
+struct AssemblerTests {
     private func clips(sampleRate sr: Double) -> BreathSourceClips {
         BreathSourceClips(oneShot: [Float](repeating: 0.5, count: Int(1.2 * sr)))
     }
 
+    @Test
     func testLongBreathExactLength() {
         let settings = AssemblerSettings()
         let sr = settings.sampleRate
@@ -231,10 +255,11 @@ final class AssemblerTests: XCTestCase {
         let out = BreathAssembler.assemble(
             type: .exhale, durationSec: dur, clips: clips(sampleRate: sr), settings: settings
         )
-        XCTAssertEqual(out.count, Int((dur * sr).rounded()))
-        XCTAssertGreaterThan(out.map { abs($0) }.max()!, 0.01)
+        #expect(out.count == Int((dur * sr).rounded()))
+        #expect(out.map { abs($0) }.max()! > 0.01)
     }
 
+    @Test
     func testRecordedShapeModeRendersExactLengthFromFullBreath() {
         let sr = 1_000.0
         let settings = AssemblerSettings(sampleRate: sr, crossfadeSec: 0.1)
@@ -243,12 +268,13 @@ final class AssemblerTests: XCTestCase {
 
         let out = BreathAssembler.assemble(type: .inhale, durationSec: 8, clips: clips, settings: settings)
 
-        XCTAssertEqual(out.count, 8_000)
-        XCTAssertEqual(out.first!, 0, accuracy: 1e-6)
-        XCTAssertEqual(out.last!, 0, accuracy: 1e-6)
-        XCTAssertGreaterThan(rms(out), 0.02)
+        #expect(out.count == 8_000)
+        #expect(abs(out.first! - 0) <= 1e-6)
+        #expect(abs(out.last! - 0) <= 1e-6)
+        #expect(rms(out) > 0.02)
     }
 
+    @Test
     func testRecordedShapeModeCompressesEnvelopeForShortBreath() {
         let sr = 1_000.0
         let settings = AssemblerSettings(sampleRate: sr, crossfadeSec: 0.1)
@@ -260,12 +286,13 @@ final class AssemblerTests: XCTestCase {
         let middle = rms(Array(out[1_500..<2_500]))
         let tail = rms(Array(out[3_500..<4_000]))
 
-        XCTAssertEqual(out.count, 4_000)
-        XCTAssertLessThan(early, middle * 0.65)
-        XCTAssertLessThan(tail, middle * 0.65)
-        XCTAssertGreaterThan(middle, 0.02)
+        #expect(out.count == 4_000)
+        #expect(early < middle * 0.65)
+        #expect(tail < middle * 0.65)
+        #expect(middle > 0.02)
     }
 
+    @Test
     func testRecordedShapeModeSmoothsAttackAndReleaseWobbles() {
         let sr = 1_000.0
         let settings = AssemblerSettings(sampleRate: sr, crossfadeSec: 0.1)
@@ -278,10 +305,11 @@ final class AssemblerTests: XCTestCase {
         let attack = Array(envelope[0...peakIndex])
         let release = Array(envelope[peakIndex..<envelope.count])
 
-        XCTAssertTrue(isMostlyNondecreasing(attack, tolerance: 0.003), "attack RMS: \(attack)")
-        XCTAssertTrue(isMostlyNonincreasing(release, tolerance: 0.003), "release RMS: \(release)")
+        #expect(isMostlyNondecreasing(attack, tolerance: 0.003), "attack RMS: \(attack)")
+        #expect(isMostlyNonincreasing(release, tolerance: 0.003), "release RMS: \(release)")
     }
 
+    @Test
     func testRecordedShapeNearLengthModeSmoothsDirectFadeWobbles() {
         let sr = 1_000.0
         let settings = AssemblerSettings(sampleRate: sr, crossfadeSec: 0.1)
@@ -294,10 +322,11 @@ final class AssemblerTests: XCTestCase {
         let attack = Array(envelope[0...peakIndex])
         let release = Array(envelope[peakIndex..<envelope.count])
 
-        XCTAssertTrue(isMostlyNondecreasing(attack, tolerance: 0.003), "attack RMS: \(attack)")
-        XCTAssertTrue(isMostlyNonincreasing(release, tolerance: 0.003), "release RMS: \(release)")
+        #expect(isMostlyNondecreasing(attack, tolerance: 0.003), "attack RMS: \(attack)")
+        #expect(isMostlyNonincreasing(release, tolerance: 0.003), "release RMS: \(release)")
     }
 
+    @Test
     func testRecordedShapeInhaleOnsetIsPromptWithNoInteriorDip() {
         // The designed envelope gives every duration the same prompt onset: a long
         // inhale must become audible within the attack window (no multi-second
@@ -309,16 +338,16 @@ final class AssemblerTests: XCTestCase {
         let clips = BreathSourceClips(oneShot: full)
 
         let out = BreathAssembler.assemble(type: .inhale, durationSec: 12, clips: clips, settings: settings)
-        XCTAssertEqual(out.count, 12_000)
+        #expect(out.count == 12_000)
 
         // 0.1 s RMS chunks: chunk index == tenths of a second.
         let envelope = chunkRMS(out, chunkSize: 100)
         let peak = envelope.max()!
-        XCTAssertGreaterThan(peak, 0.02)
+        #expect(peak > 0.02)
 
         // RMS crosses 25% of peak well within the first 0.5 s (chunk 5).
         let crossing = envelope.firstIndex(where: { $0 >= 0.25 * peak })!
-        XCTAssertLessThan(crossing, 5, "onset crossing chunk \(crossing)")
+        #expect(crossing < 5, "onset crossing chunk \(crossing)")
 
         // No structural interior notch on the way up to the peak (guards the old
         // double-attack regression, a ~50% drawdown). The granular texture body has a
@@ -331,9 +360,10 @@ final class AssemblerTests: XCTestCase {
             running = max(running, envelope[i])
             worstDrawdown = max(worstDrawdown, (running - envelope[i]) / peak)
         }
-        XCTAssertLessThan(worstDrawdown, 0.15, "interior drawdown \(worstDrawdown) - attack RMS: \(envelope[0...peakIndex])")
+        #expect(worstDrawdown < 0.15, "interior drawdown \(worstDrawdown) - attack RMS: \(envelope[0...peakIndex])")
     }
 
+    @Test
     func testRecordedShapeRemovesLowFrequencyRumble() {
         // A synthetic "recording": a breath-shaped mid-band texture (600/1100/1900 Hz)
         // plus a strong 50 Hz room rumble. The recordedShape path's high-pass stages
@@ -359,10 +389,11 @@ final class AssemblerTests: XCTestCase {
         let lowEnergy = lowProbes.map { goertzelMagnitude(window, sampleRate: sr, frequency: $0) }.reduce(0, +) / Double(lowProbes.count)
         let midEnergy = midProbes.map { goertzelMagnitude(window, sampleRate: sr, frequency: $0) }.reduce(0, +) / Double(midProbes.count)
 
-        XCTAssertGreaterThan(midEnergy, 0, "mid-band energy should be present")
-        XCTAssertLessThan(lowEnergy / midEnergy, 0.5, "sub-120 Hz energy \(lowEnergy) vs mid \(midEnergy)")
+        #expect(midEnergy > 0, "mid-band energy should be present")
+        #expect(lowEnergy / midEnergy < 0.5, "sub-120 Hz energy \(lowEnergy) vs mid \(midEnergy)")
     }
 
+    @Test
     func testRecordedShapeSpectralDenoiseChangesSourceWhenEnabled() {
         // The `enableSpectralDenoise` branch in recordedShapeBranch must actually run and feed a
         // cleaned source into texture extraction: a skipped or no-op branch would make the
@@ -381,15 +412,16 @@ final class AssemblerTests: XCTestCase {
             settings: AssemblerSettings(sampleRate: sr, crossfadeSec: 0.1, enableSpectralDenoise: true)
         )
 
-        XCTAssertEqual(on.count, 6 * Int(sr))
-        XCTAssertEqual(on.count, off.count)
-        XCTAssertTrue(on.allSatisfy { $0.isFinite }, "denoised output must stay finite")
-        XCTAssertGreaterThan(rms(on), 0, "denoised breath should still be audible")
-        XCTAssertNotEqual(on, off, "enabling denoise must change the rendered output")
+        #expect(on.count == 6 * Int(sr))
+        #expect(on.count == off.count)
+        #expect(on.allSatisfy { $0.isFinite }, "denoised output must stay finite")
+        #expect(rms(on) > 0, "denoised breath should still be audible")
+        #expect(on != off, "enabling denoise must change the rendered output")
     }
 }
 
-final class SpectralDenoiseTests: XCTestCase {
+struct SpectralDenoiseTests {
+    @Test
     func testUnityGainReconstruction() {
         // With overSubtraction 0 the per-bin gain is max(mag, floorGain*mag) = mag, so denoise
         // is the identity transform. This isolates the STFT/overlap-add machinery: the interior
@@ -402,16 +434,17 @@ final class SpectralDenoiseTests: XCTestCase {
         ).map(+)
 
         let out = SpectralDenoise.denoise(signal, sampleRate: sr, overSubtraction: 0, floorGain: 0)
-        XCTAssertEqual(out.count, signal.count)
+        #expect(out.count == signal.count)
 
         let pad = 1_024 // skip the first/last frame where the window overlap is still ramping
         var maxErr: Float = 0
         for i in pad..<(n - pad) {
             maxErr = max(maxErr, abs(out[i] - signal[i]))
         }
-        XCTAssertLessThan(maxErr, 1e-3, "interior reconstruction error \(maxErr)")
+        #expect(maxErr < 1e-3, "interior reconstruction error \(maxErr)")
     }
 
+    @Test
     func testSuppressesSteadyNoisePreservesTone() {
         // A 1200 Hz tone present only in a central window (so the per-bin minimum statistics
         // capture the noise floor, not the tone) over steady broadband noise spanning the whole
@@ -444,12 +477,13 @@ final class SpectralDenoiseTests: XCTestCase {
         let noiseAfter = noiseEnergy(out)
         let toneAfter = toneEnergy(out)
 
-        XCTAssertGreaterThan(noiseBefore, 0)
-        XCTAssertGreaterThan(toneBefore, 0)
-        XCTAssertLessThan(noiseAfter / noiseBefore, 0.5, "noise band \(noiseAfter) vs \(noiseBefore)")
-        XCTAssertGreaterThan(toneAfter / toneBefore, 0.7, "tone \(toneAfter) vs \(toneBefore)")
+        #expect(noiseBefore > 0)
+        #expect(toneBefore > 0)
+        #expect(noiseAfter / noiseBefore < 0.5, "noise band \(noiseAfter) vs \(noiseBefore)")
+        #expect(toneAfter / toneBefore > 0.7, "tone \(toneAfter) vs \(toneBefore)")
     }
 
+    @Test
     func testDeterministic() {
         let sr = 16_000.0
         let n = 4_096
@@ -459,22 +493,24 @@ final class SpectralDenoiseTests: XCTestCase {
         ).map(+)
         let a = SpectralDenoise.denoise(signal, sampleRate: sr, overSubtraction: 1.8, floorGain: 0.05)
         let b = SpectralDenoise.denoise(signal, sampleRate: sr, overSubtraction: 1.8, floorGain: 0.05)
-        XCTAssertEqual(a, b)
+        #expect(a == b)
     }
 
+    @Test
     func testShortInputReturnedUnchanged() {
         // Inputs no longer than one analysis frame (1024) can't be denoised; pass them through
         // untouched rather than crash.
         let short = (0..<1_024).map { Float(0.1 * sin(2 * Double.pi * 500 * Double($0) / 16_000.0)) }
         let out = SpectralDenoise.denoise(short, sampleRate: 16_000, overSubtraction: 2.0, floorGain: 0.05)
-        XCTAssertEqual(out, short)
+        #expect(out == short)
     }
 
+    @Test
     func testAllSilenceStaysSilentAndFinite() {
         let silence = [Float](repeating: 0, count: 8_192)
         let out = SpectralDenoise.denoise(silence, sampleRate: 16_000, overSubtraction: 2.0, floorGain: 0.05)
-        XCTAssertEqual(out.count, silence.count)
-        XCTAssertTrue(out.allSatisfy { $0 == 0 }, "silence in, silence out (no NaN / denormal blowup)")
+        #expect(out.count == silence.count)
+        #expect(out.allSatisfy { $0 == 0 }, "silence in, silence out (no NaN / denormal blowup)")
     }
 }
 

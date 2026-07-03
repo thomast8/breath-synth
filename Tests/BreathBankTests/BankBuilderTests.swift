@@ -1,4 +1,5 @@
-import XCTest
+import Testing
+import Foundation
 import BreathBank
 import BreathEngine
 
@@ -6,7 +7,7 @@ import BreathEngine
 /// take) must produce a v2 manifest, a loadable bank, the prepared caches, and — the invariant PR5/6
 /// rely on — fragment offsets that slice the written cache back to the exact graded audio. Denoise is
 /// off so the prepared signal is deterministic.
-final class BankBuilderTests: XCTestCase {
+struct BankBuilderTests {
     private let sr = AudioConstants.workingSampleRate
     private var settings: AssemblerSettings { AssemblerSettings(enableSpectralDenoise: false) }
 
@@ -22,13 +23,15 @@ final class BankBuilderTests: XCTestCase {
     }
 
     private func assertClose(_ a: [Float], _ b: [Float], tol: Float = 1e-5, _ message: String = "") {
-        XCTAssertEqual(a.count, b.count, "length \(message)")
+        #expect(a.count == b.count, "length \(message)")
         guard a.count == b.count else { return }
         for i in a.indices where abs(a[i] - b[i]) > tol {
-            return XCTFail("sample \(i) differs by \(abs(a[i] - b[i])) \(message)")
+            Issue.record("sample \(i) differs by \(abs(a[i] - b[i])) \(message)")
+            return
         }
     }
 
+    @Test
     func testBuildCalmBankEndToEnd() throws {
         let cap = try tempDir()
         let out = try tempDir()
@@ -59,30 +62,30 @@ final class BankBuilderTests: XCTestCase {
         let summary = try BankBuilder.build(
             capturesDir: cap, assetsDir: cap, outDir: out, settings: settings, builtAt: "test"
         )
-        XCTAssertEqual(summary.banks.count, 1)
+        #expect(summary.banks.count == 1)
 
         // v2 manifest, room tone wired, fragment-bank sidecar named, takes listed.
         let manifest = try BreathManifest.load(from: out.appendingPathComponent("manifest.json"))
-        XCTAssertEqual(manifest.version, 2)
-        XCTAssertEqual(manifest.noiseProfile, "room_tone.wav")
-        let palette = try XCTUnwrap(manifest.palette(style: "calm", type: .inhale))
-        XCTAssertEqual(palette.fragmentBank, "fragments/calm_inhale.frags.json")
-        XCTAssertEqual(palette.oneShot.count, 4)
+        #expect(manifest.version == 2)
+        #expect(manifest.noiseProfile == "room_tone.wav")
+        let palette = try #require(manifest.palette(style: "calm", type: .inhale))
+        #expect(palette.fragmentBank == "fragments/calm_inhale.frags.json")
+        #expect(palette.oneShot.count == 4)
 
         // Bank loads; its preparedSig matches what the engine would compute from the same config.
         let bank = try FragmentBank.load(from: out.appendingPathComponent("fragments/calm_inhale.frags.json"))
         let roomProfile = SpectralDenoise.magnitudeProfile(
             from: try AudioIO.decodeMono(url: cap.appendingPathComponent("room_tone.wav")), sampleRate: sr
         )
-        XCTAssertEqual(bank.preparedSig,
+        #expect(bank.preparedSig ==
                        FragmentBank.preparedSignature(settings: settings, roomToneProfile: roomProfile))
 
         // The clipped take is fully rejected; a good take is fully accepted.
         let clippedFrags = bank.fragments.filter { $0.file == "calm_inhale_4.wav" }
-        XCTAssertFalse(clippedFrags.isEmpty)
-        XCTAssertTrue(clippedFrags.allSatisfy { !$0.accept && $0.reason == "clipped" })
+        #expect(!(clippedFrags.isEmpty))
+        #expect(clippedFrags.allSatisfy { !$0.accept && $0.reason == "clipped" })
         let goodFrags = bank.acceptedFragments(kind: .grain).filter { $0.file == "calm_inhale_1.wav" }
-        XCTAssertFalse(goodFrags.isEmpty)
+        #expect(!(goodFrags.isEmpty))
 
         // The invariant: slicing the written prepared cache at a fragment's offsets returns exactly
         // the graded grain audio (lossless WAV round-trip + correct bookkeeping).
@@ -91,14 +94,15 @@ final class BankBuilderTests: XCTestCase {
             rawTake: try AudioIO.decodeMono(url: cap.appendingPathComponent("calm_inhale_1.wav")),
             role: "texture", type: .inhale, settings: settings, roomToneProfile: roomProfile
         )
-        assertClose(cache, try XCTUnwrap(expected.cacheSignal), "prepared cache == segmenter texture")
+        assertClose(cache, try #require(expected.cacheSignal), "prepared cache == segmenter texture")
         for f in goodFrags {
             let slice = Array(cache[f.startFrame..<f.endFrame])
-            assertClose(slice, Array(try XCTUnwrap(expected.cacheSignal)[f.startFrame..<f.endFrame]),
+            assertClose(slice, Array(try #require(expected.cacheSignal)[f.startFrame..<f.endFrame]),
                         "grain \(f.startFrame)..<\(f.endFrame)")
         }
     }
 
+    @Test
     func testBuildPackingBankHasCoresAndGaps() throws {
         let cap = try tempDir()
         let out = try tempDir()
@@ -134,22 +138,22 @@ final class BankBuilderTests: XCTestCase {
         _ = try BankBuilder.build(capturesDir: cap, assetsDir: cap, outDir: out, settings: settings, builtAt: "test")
 
         let bank = try FragmentBank.load(from: out.appendingPathComponent("fragments/packing_inhale.frags.json"))
-        XCTAssertGreaterThanOrEqual(bank.acceptedFragments(kind: .gulpCore).count, 4)
-        XCTAssertGreaterThanOrEqual(bank.acceptedFragments(kind: .gap).count, 4)
+        #expect(bank.acceptedFragments(kind: .gulpCore).count >= 4)
+        #expect(bank.acceptedFragments(kind: .gap).count >= 4)
 
         // Counted styles read oneShot[0] (cores) and oneShot[1] (gaps): the builder orders them so.
         let manifest = try BreathManifest.load(from: out.appendingPathComponent("manifest.json"))
-        let palette = try XCTUnwrap(manifest.palette(style: "packing", type: .inhale))
-        XCTAssertEqual(palette.oneShot.first?.file, "pack_sep.wav")
-        XCTAssertEqual(palette.oneShot.dropFirst().first?.file, "pack_cad.wav")
-        XCTAssertEqual(manifest.styles["packing"]?.effectiveRender, .counted)
+        let palette = try #require(manifest.palette(style: "packing", type: .inhale))
+        #expect(palette.oneShot.first?.file == "pack_sep.wav")
+        #expect(palette.oneShot.dropFirst().first?.file == "pack_cad.wav")
+        #expect(manifest.styles["packing"]?.effectiveRender == .counted)
 
         // Cores slice their prepared cache; gaps carry only a frame count, no cache.
         let coreCache = try AudioIO.decodeMono(url: out.appendingPathComponent("pack_sep.prepared.wav"))
         for f in bank.acceptedFragments(kind: .gulpCore) {
-            XCTAssertEqual(f.file, "pack_sep.wav")
-            XCTAssertLessThanOrEqual(f.endFrame, coreCache.count)
+            #expect(f.file == "pack_sep.wav")
+            #expect(f.endFrame <= coreCache.count)
         }
-        XCTAssertFalse(FileManager.default.fileExists(atPath: out.appendingPathComponent("pack_cad.prepared.wav").path))
+        #expect(!(FileManager.default.fileExists(atPath: out.appendingPathComponent("pack_cad.prepared.wav").path)))
     }
 }

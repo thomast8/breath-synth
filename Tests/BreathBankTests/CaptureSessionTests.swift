@@ -1,8 +1,10 @@
-import XCTest
+import Testing
+import Foundation
 @testable import BreathBank
 import BreathEngine
 
-final class CaptureSessionTests: XCTestCase {
+struct CaptureSessionTests {
+    @Test
     func testRoundTrip() throws {
         let session = CaptureSession(roomTone: "room_tone.caf", steps: [
             .init(slug: "calm_inhale", style: "calm", type: .inhale, renderMode: .textured,
@@ -19,16 +21,17 @@ final class CaptureSessionTests: XCTestCase {
 
         try session.write(to: url)
         let loaded = try CaptureSession.load(from: url)
-        XCTAssertEqual(loaded.roomTone, "room_tone.caf")
-        XCTAssertEqual(loaded.steps.count, 2)
-        XCTAssertEqual(loaded.steps.first?.files, ["calm_inhale_1.caf", "calm_inhale_2.caf"])
-        XCTAssertEqual(loaded.steps.first?.type, .inhale)
-        XCTAssertEqual(loaded.steps.last?.renderMode, .counted)
-        XCTAssertNil(loaded.steps.last?.reference)
+        #expect(loaded.roomTone == "room_tone.caf")
+        #expect(loaded.steps.count == 2)
+        #expect(loaded.steps.first?.files == ["calm_inhale_1.caf", "calm_inhale_2.caf"])
+        #expect(loaded.steps.first?.type == .inhale)
+        #expect(loaded.steps.last?.renderMode == .counted)
+        #expect(loaded.steps.last?.reference == nil)
     }
 
     /// Incremental save writes captures.json mid-session, so a partial run (fewer takes than planned,
     /// later steps not reached) must round-trip cleanly — the builder simply grades what's there.
+    @Test
     func testPartialSessionRoundTrips() throws {
         let session = CaptureSession(roomTone: "room_tone.caf", steps: [
             // 2 of a planned 4 takes captured before the user hit "Finish & save now".
@@ -47,8 +50,8 @@ final class CaptureSessionTests: XCTestCase {
 
         try session.write(to: url)
         let loaded = try CaptureSession.load(from: url)
-        XCTAssertEqual(loaded.steps.first?.files.count, 2, "partial take count preserved")
-        XCTAssertEqual(loaded.steps.last?.files, [], "unreached step has no takes")
-        XCTAssertEqual(loaded.steps.first?.minSeconds, 8)
+        #expect(loaded.steps.first?.files.count == 2, "partial take count preserved")
+        #expect(loaded.steps.last?.files == [String](), "unreached step has no takes")
+        #expect(loaded.steps.first?.minSeconds == 8)
     }
 }

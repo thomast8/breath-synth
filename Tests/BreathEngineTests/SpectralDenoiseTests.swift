@@ -1,11 +1,13 @@
-import XCTest
+import Testing
+import Foundation
 @testable import BreathEngine
 
 /// Coverage for the externally-supplied noise-profile path: a room-tone profile measured
 /// from a separate (same-distribution) noise buffer via `SpectralDenoise.magnitudeProfile`,
 /// then fed back into `denoise(..., noiseProfile:)`. The existing `SpectralDenoiseTests`
 /// class (in BreathEngineTests.swift) covers the internal minimum-statistics estimate.
-final class SpectralDenoiseProfileTests: XCTestCase {
+struct SpectralDenoiseProfileTests {
+    @Test
     func testSuppliedProfileReducesNoiseRMS() {
         let sr = 16_000.0
         let n = 64_000
@@ -16,8 +18,8 @@ final class SpectralDenoiseProfileTests: XCTestCase {
         let profileSource = seededNoise(count: n, seed: 22, amplitude: 0.08)
 
         let profile = SpectralDenoise.magnitudeProfile(from: profileSource, sampleRate: sr)
-        XCTAssertEqual(profile.count, 1024 / 2 + 1, "profile should be one value per analysis bin")
-        XCTAssertGreaterThan(profile.reduce(0, +), 0, "profile should capture real noise energy")
+        #expect(profile.count == 1024 / 2 + 1, "profile should be one value per analysis bin")
+        #expect(profile.reduce(0, +) > 0, "profile should capture real noise energy")
 
         let out = SpectralDenoise.denoise(
             signal, sampleRate: sr, overSubtraction: 1.5, floorGain: 0.05, noiseProfile: profile
@@ -25,10 +27,11 @@ final class SpectralDenoiseProfileTests: XCTestCase {
 
         let before = rms(signal)
         let after = rms(out)
-        XCTAssertGreaterThan(before, 0)
-        XCTAssertLessThan(after / before, 0.8, "supplied profile should materially cut noise RMS (\(after) vs \(before))")
+        #expect(before > 0)
+        #expect(after / before < 0.8, "supplied profile should materially cut noise RMS (\(after) vs \(before))")
     }
 
+    @Test
     func testSuppliedProfilePreservesTone() {
         let sr = 16_000.0
         let n = 64_000
@@ -50,8 +53,8 @@ final class SpectralDenoiseProfileTests: XCTestCase {
         let win = 16_000..<(16_000 + Int(sr))
         let toneBefore = goertzelMagnitude(Array(signal[win]), sampleRate: sr, frequency: 1_000)
         let toneAfter = goertzelMagnitude(Array(out[win]), sampleRate: sr, frequency: 1_000)
-        XCTAssertGreaterThan(toneBefore, 0)
-        XCTAssertGreaterThan(toneAfter / toneBefore, 0.6, "tone bin should be largely preserved (\(toneAfter) vs \(toneBefore))")
+        #expect(toneBefore > 0)
+        #expect(toneAfter / toneBefore > 0.6, "tone bin should be largely preserved (\(toneAfter) vs \(toneBefore))")
     }
 
     // MARK: - Helpers (private to this file)

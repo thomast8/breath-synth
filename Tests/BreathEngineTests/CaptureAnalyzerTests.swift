@@ -1,10 +1,11 @@
-import XCTest
+import Testing
+import Foundation
 
 @testable import BreathEngine
 
 /// Synthetic-signal tests for the live capture detector. These are the floor for the auto-capture
 /// feature; the real ceiling is an end-to-end enroll → `breath-bank build` run.
-final class CaptureAnalyzerTests: XCTestCase {
+struct CaptureAnalyzerTests {
     private let sr = 44_100.0
     private var tol: Int { Int(0.07 * sr) }  // ~70 ms boundary tolerance (a few RMS hops)
 
@@ -60,159 +61,159 @@ final class CaptureAnalyzerTests: XCTestCase {
 
     // MARK: fixedDuration (room tone)
 
-    func testFixedDurationEndsAtDurationAndReportsFloor() {
+    @Test func fixedDurationEndsAtDurationAndReportsFloor() {
         let (events, analyzer) = run(.fixedDuration(seconds: 5), lowNoise(6, 0.01))
-        XCTAssertEqual(endReason(events), .duration)
+        #expect(endReason(events) == .duration)
         let segs = segments(events)
-        XCTAssertEqual(segs.count, 1)
-        XCTAssertEqual(segs[0].0, .whole)
-        XCTAssertEqual(segs[0].2, Int(5 * sr), accuracy: tol)
+        #expect(segs.count == 1)
+        #expect(segs[0].0 == .whole)
+        #expect(abs(segs[0].2 - Int(5 * sr)) <= tol)
         // Mean envelope of uniform ±0.01 noise ≈ 0.005; just assert it's a small positive floor.
-        XCTAssertGreaterThan(analyzer.meanFloorRMS(), 0)
-        XCTAssertLessThan(analyzer.meanFloorRMS(), 0.02)
+        #expect(analyzer.meanFloorRMS() > 0)
+        #expect(analyzer.meanFloorRMS() < 0.02)
     }
 
     // MARK: single (frc/rv)
 
-    func testSingleEndsOnTrailingSilenceWithTrimmedBoundaries() {
+    @Test func singleEndsOnTrailingSilenceWithTrimmedBoundaries() {
         let signal = silence(0.5) + tone(2.0) + silence(2.0)
         let (events, _) = run(.single(minActiveSec: 0.3, maxTakeSec: 10, trailingSilenceSec: 0.8), signal)
-        XCTAssertEqual(onsetCount(events), 1)
-        XCTAssertEqual(endReason(events), .silence)
+        #expect(onsetCount(events) == 1)
+        #expect(endReason(events) == .silence)
         let segs = segments(events)
-        XCTAssertEqual(segs.count, 1)
-        XCTAssertEqual(segs[0].0, .whole)
-        XCTAssertEqual(segs[0].1, Int(0.5 * sr), accuracy: tol)  // start at onset, lead silence dropped
-        XCTAssertEqual(segs[0].2, Int(2.5 * sr), accuracy: tol)  // end where signal stopped
+        #expect(segs.count == 1)
+        #expect(segs[0].0 == .whole)
+        #expect(abs(segs[0].1 - Int(0.5 * sr)) <= tol)  // start at onset, lead silence dropped
+        #expect(abs(segs[0].2 - Int(2.5 * sr)) <= tol)  // end where signal stopped
     }
 
-    func testSubFloorNoiseNeverOnsets() {
+    @Test func subFloorNoiseNeverOnsets() {
         let (events, _) = run(.single(minActiveSec: 0.3, maxTakeSec: 10, trailingSilenceSec: 0.8), lowNoise(3, 0.001))
-        XCTAssertEqual(onsetCount(events), 0)
-        XCTAssertNil(endReason(events))
+        #expect(onsetCount(events) == 0)
+        #expect(endReason(events) == nil)
     }
 
-    func testNoiseFloorGatesActivity() {
+    @Test func noiseFloorGatesActivity() {
         // Floor 0.01 → activity threshold 0.03. A 0.02 tone stays below it; a 0.1 tone trips onset.
         let quiet = silence(0.3) + tone(1.0, 0.02) + silence(1.2)
-        XCTAssertEqual(onsetCount(run(.single(minActiveSec: 0.2, maxTakeSec: 10, trailingSilenceSec: 0.8),
-                                      noiseFloor: 0.01, quiet).events), 0)
+        #expect(onsetCount(run(.single(minActiveSec: 0.2, maxTakeSec: 10, trailingSilenceSec: 0.8),
+                               noiseFloor: 0.01, quiet).events) == 0)
         let loud = silence(0.3) + tone(1.0, 0.1) + silence(1.2)
-        XCTAssertEqual(onsetCount(run(.single(minActiveSec: 0.2, maxTakeSec: 10, trailingSilenceSec: 0.8),
-                                      noiseFloor: 0.01, loud).events), 1)
+        #expect(onsetCount(run(.single(minActiveSec: 0.2, maxTakeSec: 10, trailingSilenceSec: 0.8),
+                               noiseFloor: 0.01, loud).events) == 1)
     }
 
     // MARK: cleanEvents (cores)
 
-    func testCleanEventsCountsWellSeparatedAndNotTooClose() {
+    @Test func cleanEventsCountsWellSeparatedAndNotTooClose() {
         let signal = silence(0.3) + impulses(6, spacingSec: 0.5) + silence(1.0)
         let (events, analyzer) = run(.cleanEvents(minGapSec: 0.4, maxTakeSec: 20, trailingSilenceSec: 0.8), signal)
-        XCTAssertEqual(analyzer.eventCount, 6)
-        XCTAssertEqual(endReason(events), .silence)
-        XCTAssertEqual(segments(events).count, 1)
-        XCTAssertEqual(segments(events).first?.0, .whole)
-        XCTAssertFalse(analyzer.lastGapWithinMin)  // 0.5 s spacing > 0.4 s min gap
+        #expect(analyzer.eventCount == 6)
+        #expect(endReason(events) == .silence)
+        #expect(segments(events).count == 1)
+        #expect(segments(events).first?.0 == .whole)
+        #expect(!(analyzer.lastGapWithinMin))  // 0.5 s spacing > 0.4 s min gap
     }
 
-    func testCleanEventsFlagsTooCloseGap() {
+    @Test func cleanEventsFlagsTooCloseGap() {
         let signal = silence(0.3) + impulses(5, spacingSec: 0.3) + silence(1.0)  // 0.3 < 0.4 min gap, > refractory
         let (_, analyzer) = run(.cleanEvents(minGapSec: 0.4, maxTakeSec: 20, trailingSilenceSec: 0.8), signal)
-        XCTAssertEqual(analyzer.eventCount, 5)
-        XCTAssertTrue(analyzer.lastGapWithinMin)
+        #expect(analyzer.eventCount == 5)
+        #expect(analyzer.lastGapWithinMin)
     }
 
-    func testCleanEventsLongGapsDoNotTruncate() {
+    @Test func cleanEventsLongGapsDoNotTruncate() {
         // Deliberate ~2 s separations must NOT end the take after the first event; only the final
         // pause (longer than trailingSilenceSec) does. Guards against truncating a separated take.
         let signal = silence(0.3) + impulses(5, spacingSec: 2.0) + silence(3.5)
         let (events, analyzer) = run(.cleanEvents(minGapSec: 0.4, maxTakeSec: 30, trailingSilenceSec: 3.0), signal)
-        XCTAssertEqual(analyzer.eventCount, 5)
-        XCTAssertEqual(endReason(events), .silence)
+        #expect(analyzer.eventCount == 5)
+        #expect(endReason(events) == .silence)
     }
 
-    func testRefractoryPreventsDoubleCount() {
+    @Test func refractoryPreventsDoubleCount() {
         let signal = silence(0.3) + impulses(8, spacingSec: 0.15) + silence(1.0)  // 0.15 < 0.22 refractory
         let (_, analyzer) = run(.cleanEvents(minGapSec: 0.1, maxTakeSec: 20, trailingSilenceSec: 0.8), signal)
-        XCTAssertLessThan(analyzer.eventCount, 8)
+        #expect(analyzer.eventCount < 8)
     }
 
     // MARK: naturalRhythm (gaps)
 
-    func testNaturalRhythmMeasuresIntervals() {
+    @Test func naturalRhythmMeasuresIntervals() {
         let spacing = 0.3
         let signal = silence(0.3) + impulses(5, spacingSec: spacing) + silence(1.0)
         let (events, analyzer) = run(.naturalRhythm(minActiveSec: 0.2, maxTakeSec: 20, trailingSilenceSec: 0.8), signal)
-        XCTAssertEqual(analyzer.eventCount, 5)
-        XCTAssertEqual(analyzer.intervalsFrames.count, 4)
+        #expect(analyzer.eventCount == 5)
+        #expect(analyzer.intervalsFrames.count == 4)
         for gap in analyzer.intervalsFrames {
-            XCTAssertEqual(gap, Int(spacing * sr), accuracy: tol)
+            #expect(abs(gap - Int(spacing * sr)) <= tol)
         }
-        XCTAssertEqual(endReason(events), .silence)
+        #expect(endReason(events) == .silence)
     }
 
     // MARK: cycle (calm)
 
-    func testCycleSplitsInhaleAndExhaleAtMidPause() {
+    @Test func cycleSplitsInhaleAndExhaleAtMidPause() {
         let signal = silence(0.3) + tone(1.5) + silence(0.6) + tone(1.5) + silence(1.0)
         let (events, _) = run(
             .cycle(minPhaseSec: 0.5, midPauseSec: 0.4, maxCycleSec: 20, trailingSilenceSec: 0.8), signal
         )
-        XCTAssertEqual(onsetCount(events), 1)
+        #expect(onsetCount(events) == 1)
         let segs = segments(events)
-        XCTAssertEqual(segs.map(\.0), [.inhale, .exhale])
-        XCTAssertEqual(segs[0].1, Int(0.3 * sr), accuracy: tol)  // inhale start
-        XCTAssertEqual(segs[0].2, Int(1.8 * sr), accuracy: tol)  // inhale end (mid-pause)
-        XCTAssertEqual(segs[1].1, Int(2.4 * sr), accuracy: tol)  // exhale start
-        XCTAssertEqual(segs[1].2, Int(3.9 * sr), accuracy: tol)  // exhale end
-        XCTAssertEqual(endReason(events), .silence)
+        #expect(segs.map(\.0) == [.inhale, .exhale])
+        #expect(abs(segs[0].1 - Int(0.3 * sr)) <= tol)  // inhale start
+        #expect(abs(segs[0].2 - Int(1.8 * sr)) <= tol)  // inhale end (mid-pause)
+        #expect(abs(segs[1].1 - Int(2.4 * sr)) <= tol)  // exhale start
+        #expect(abs(segs[1].2 - Int(3.9 * sr)) <= tol)  // exhale end
+        #expect(endReason(events) == .silence)
     }
 
-    func testCycleWithoutExhaleIsIncomplete() {
+    @Test func cycleWithoutExhaleIsIncomplete() {
         let signal = silence(0.3) + tone(1.0) + silence(3.0)  // no exhale
         let (events, _) = run(
             .cycle(minPhaseSec: 0.4, midPauseSec: 0.4, maxCycleSec: 2.0, trailingSilenceSec: 0.8), signal
         )
-        XCTAssertEqual(segments(events).map(\.0), [.inhale])
-        XCTAssertEqual(endReason(events), .incomplete)
+        #expect(segments(events).map(\.0) == [.inhale])
+        #expect(endReason(events) == .incomplete)
     }
 
-    func testCycleSegmentsValidGuard() {
+    @Test func cycleSegmentsValidGuard() {
         let minPhase = Int(0.5 * sr)
-        XCTAssertTrue(CaptureAnalyzer.cycleSegmentsValid(
+        #expect(CaptureAnalyzer.cycleSegmentsValid(
             inhaleFrames: Int(1.5 * sr), exhaleFrames: Int(1.5 * sr), minPhaseFrames: minPhase))
-        XCTAssertFalse(CaptureAnalyzer.cycleSegmentsValid(  // too short
-            inhaleFrames: Int(0.2 * sr), exhaleFrames: Int(1.5 * sr), minPhaseFrames: minPhase))
-        XCTAssertFalse(CaptureAnalyzer.cycleSegmentsValid(  // imbalanced (> 3:1)
-            inhaleFrames: Int(0.6 * sr), exhaleFrames: Int(2.5 * sr), minPhaseFrames: minPhase))
+        #expect(!(CaptureAnalyzer.cycleSegmentsValid(  // too short
+            inhaleFrames: Int(0.2 * sr), exhaleFrames: Int(1.5 * sr), minPhaseFrames: minPhase)))
+        #expect(!(CaptureAnalyzer.cycleSegmentsValid(  // imbalanced (> 3:1)
+            inhaleFrames: Int(0.6 * sr), exhaleFrames: Int(2.5 * sr), minPhaseFrames: minPhase)))
     }
 
     // MARK: finalPhase (FRC/RV) — Phase 3, reuses cycle's inhale→pause→exhale routing
 
-    func testFinalPhaseKeepsOnlyFinalSegmentAsWhole() {
+    @Test func finalPhaseKeepsOnlyFinalSegmentAsWhole() {
         let signal = silence(0.3) + tone(1.5) + silence(0.5) + tone(4.0) + silence(1.0)
         let (events, _) = run(
             .finalPhase(minLeadSec: 0.5, midPauseSec: 0.4, minPhaseSec: 3.0, maxTakeSec: 20, trailingSilenceSec: 0.8),
             signal
         )
         let segs = segments(events)
-        XCTAssertEqual(segs.count, 1, "the lead phase must never be emitted")
-        XCTAssertEqual(segs[0].0, .whole)
+        #expect(segs.count == 1, "the lead phase must never be emitted")
+        #expect(segs[0].0 == .whole)
         let expectedStart = Int(0.3 * sr + 1.5 * sr + 0.5 * sr)  // lead + pause
-        XCTAssertEqual(segs[0].1, expectedStart, accuracy: tol)
-        XCTAssertEqual(endReason(events), .silence)
+        #expect(abs(segs[0].1 - expectedStart) <= tol)
+        #expect(endReason(events) == .silence)
     }
 
-    func testFinalPhaseContinuousNoDipIsIncomplete() {
+    @Test func finalPhaseContinuousNoDipIsIncomplete() {
         let signal = silence(0.3) + tone(8.0)
         let (events, _) = run(
             .finalPhase(minLeadSec: 0.5, midPauseSec: 0.4, minPhaseSec: 3.0, maxTakeSec: 6, trailingSilenceSec: 0.8),
             signal
         )
-        XCTAssertTrue(segments(events).isEmpty, "no lead-phase segment should ever be emitted")
-        XCTAssertEqual(endReason(events), .incomplete)
+        #expect(segments(events).isEmpty, "no lead-phase segment should ever be emitted")
+        #expect(endReason(events) == .incomplete)
     }
 
-    func testFinalPhaseSubPauseDipDuringLeadBridgesWithoutFalseSplit() {
+    @Test func finalPhaseSubPauseDipDuringLeadBridgesWithoutFalseSplit() {
         // A 0.2s dip mid-lead (< 0.4s midPauseSec) must not be mistaken for the deliberate pause; the
         // lead phase should bridge it and keep listening for the real 0.5s pause that follows.
         let signal = silence(0.3) + tone(1.5) + silence(0.2) + tone(0.5) + silence(0.5) + tone(3.5) + silence(1.0)
@@ -221,41 +222,41 @@ final class CaptureAnalyzerTests: XCTestCase {
             signal
         )
         let segs = segments(events)
-        XCTAssertEqual(segs.count, 1, "the bridged dip must not produce an extra split")
-        XCTAssertEqual(segs[0].0, .whole)
-        XCTAssertEqual(segs[0].2 - segs[0].1, Int(3.5 * sr), accuracy: tol, "kept phase is the real final phase only, not the bridged lead")
-        XCTAssertEqual(endReason(events), .silence)
+        #expect(segs.count == 1, "the bridged dip must not produce an extra split")
+        #expect(segs[0].0 == .whole)
+        #expect(abs((segs[0].2 - segs[0].1) - Int(3.5 * sr)) <= tol, "kept phase is the real final phase only, not the bridged lead")
+        #expect(endReason(events) == .silence)
     }
 
     // MARK: TakeIssue (Phase 1 — live rejection-reason detail)
 
-    func testCycleIssueDistinguishesReasons() {
+    @Test func cycleIssueDistinguishesReasons() {
         let minPhase = Int(0.5 * sr)
-        XCTAssertNil(CaptureAnalyzer.cycleIssue(
-            inhaleFrames: Int(1.5 * sr), exhaleFrames: Int(1.5 * sr), minPhaseFrames: minPhase))
-        XCTAssertEqual(CaptureAnalyzer.cycleIssue(
-            inhaleFrames: Int(0.2 * sr), exhaleFrames: Int(1.5 * sr), minPhaseFrames: minPhase), .inhaleTooShort)
-        XCTAssertEqual(CaptureAnalyzer.cycleIssue(
-            inhaleFrames: Int(1.5 * sr), exhaleFrames: Int(0.2 * sr), minPhaseFrames: minPhase), .exhaleTooShort)
+        #expect(CaptureAnalyzer.cycleIssue(
+            inhaleFrames: Int(1.5 * sr), exhaleFrames: Int(1.5 * sr), minPhaseFrames: minPhase) == nil)
+        #expect(CaptureAnalyzer.cycleIssue(
+            inhaleFrames: Int(0.2 * sr), exhaleFrames: Int(1.5 * sr), minPhaseFrames: minPhase) == .inhaleTooShort)
+        #expect(CaptureAnalyzer.cycleIssue(
+            inhaleFrames: Int(1.5 * sr), exhaleFrames: Int(0.2 * sr), minPhaseFrames: minPhase) == .exhaleTooShort)
         // Both short: inhale takes priority (arbitrary but consistent single-reason choice).
-        XCTAssertEqual(CaptureAnalyzer.cycleIssue(
-            inhaleFrames: Int(0.1 * sr), exhaleFrames: Int(0.2 * sr), minPhaseFrames: minPhase), .inhaleTooShort)
+        #expect(CaptureAnalyzer.cycleIssue(
+            inhaleFrames: Int(0.1 * sr), exhaleFrames: Int(0.2 * sr), minPhaseFrames: minPhase) == .inhaleTooShort)
         // Imbalanced (> 3:1), both individually long enough.
         if case let .phasesImbalanced(ratio)? = CaptureAnalyzer.cycleIssue(
             inhaleFrames: Int(0.6 * sr), exhaleFrames: Int(2.5 * sr), minPhaseFrames: minPhase) {
-            XCTAssertEqual(ratio, 2.5 / 0.6, accuracy: 0.01)
+            #expect(abs(ratio - 2.5 / 0.6) <= 0.01)
         } else {
-            XCTFail("expected .phasesImbalanced")
+            Issue.record("expected .phasesImbalanced")
         }
         // cycleSegmentsValid stays a thin bool wrapper — regression guard for Step 1.1's refactor.
-        XCTAssertEqual(CaptureAnalyzer.cycleSegmentsValid(
-            inhaleFrames: Int(1.5 * sr), exhaleFrames: Int(1.5 * sr), minPhaseFrames: minPhase),
-            CaptureAnalyzer.cycleIssue(inhaleFrames: Int(1.5 * sr), exhaleFrames: Int(1.5 * sr), minPhaseFrames: minPhase) == nil)
+        #expect(CaptureAnalyzer.cycleSegmentsValid(
+            inhaleFrames: Int(1.5 * sr), exhaleFrames: Int(1.5 * sr), minPhaseFrames: minPhase)
+            == (CaptureAnalyzer.cycleIssue(inhaleFrames: Int(1.5 * sr), exhaleFrames: Int(1.5 * sr), minPhaseFrames: minPhase) == nil))
     }
 
     // MARK: LivePhase / phaseElapsedFrames (Phase 1 — live phase feedback)
 
-    func testLivePhaseTracksInhalePauseExhale() {
+    @Test func livePhaseTracksInhalePauseExhale() {
         let signal = silence(0.3) + tone(1.5) + silence(0.6) + tone(1.5) + silence(1.0)
         let detection = CaptureDetection.cycle(minPhaseSec: 0.5, midPauseSec: 0.4, maxCycleSec: 20, trailingSilenceSec: 0.8)
 
@@ -273,17 +274,17 @@ final class CaptureAnalyzerTests: XCTestCase {
 
         // Onset at ~0.3s; mid-pause doesn't trigger until ~1.8s of silence + 0.4s midPauseSec ≈ 2.2s;
         // exhale onset at ~2.4s. Checkpoints sit well inside each phase, clear of hop-boundary jitter.
-        XCTAssertEqual(analyzer(after: 1.0).livePhase, .inhale)
-        XCTAssertEqual(analyzer(after: 2.3).livePhase, .midPause)
-        XCTAssertEqual(analyzer(after: 3.0).livePhase, .exhale)
+        #expect(analyzer(after: 1.0).livePhase == .inhale)
+        #expect(analyzer(after: 2.3).livePhase == .midPause)
+        #expect(analyzer(after: 3.0).livePhase == .exhale)
 
         let midInhale = analyzer(after: 1.0).phaseElapsedFrames
         let laterInhale = analyzer(after: 1.5).phaseElapsedFrames
-        XCTAssertGreaterThan(laterInhale, midInhale)
+        #expect(laterInhale > midInhale)
 
         // Just after the exhale onset, elapsed-in-phase should be small — not carried over from inhale.
         let earlyExhale = analyzer(after: 2.5).phaseElapsedFrames
-        XCTAssertLessThan(earlyExhale, Int(0.3 * sr))
+        #expect(earlyExhale < Int(0.3 * sr))
     }
 
     // MARK: Real breath recordings — drive the detector with real audio (oracle = offline UnitExtractor)
@@ -305,17 +306,17 @@ final class CaptureAnalyzerTests: XCTestCase {
         return a.meanFloorRMS()
     }
 
-    func testRealPackingLiveCountTracksOffline() throws {
+    @Test func realPackingLiveCountTracksOffline() throws {
         let samples = try AssetLibrary.loadMonoSamples(url: assetURL("packing_1.aifc"), targetRate: sr)
         let offline = UnitExtractor.gulpCoreRanges(from: samples, sampleRate: sr).count
         let (_, analyzer) = run(.cleanEvents(minGapSec: 0.35, maxTakeSec: 60, trailingSilenceSec: 5),
                                 noiseFloor: try realRoomFloor(), samples)
         print("REAL packing_1 — offline=\(offline) live=\(analyzer.eventCount)")
-        XCTAssertGreaterThan(offline, 5)
-        XCTAssertEqual(analyzer.eventCount, offline, accuracy: 3)
+        #expect(offline > 5)
+        #expect(abs(analyzer.eventCount - offline) <= 3)
     }
 
-    func testRealRecoveryLiveCountTracksOffline() throws {
+    @Test func realRecoveryLiveCountTracksOffline() throws {
         let samples = try AssetLibrary.loadMonoSamples(url: assetURL("recovery.aifc"), targetRate: sr)
         let offline = UnitExtractor.gulpCoreRanges(from: samples, sampleRate: sr).count
         let (_, analyzer) = run(.naturalRhythm(minActiveSec: 0.5, maxTakeSec: 60, trailingSilenceSec: 5),
@@ -323,12 +324,13 @@ final class CaptureAnalyzerTests: XCTestCase {
         print("REAL recovery — offline=\(offline) live=\(analyzer.eventCount)")
         // The live count is a UX guidance metric, not authoritative (the offline builder re-segments).
         // On the double-sip recovery take it runs a little hot; assert only that it's in the ballpark.
-        XCTAssertGreaterThan(offline, 5)
-        XCTAssertGreaterThan(analyzer.eventCount, offline / 2)
-        XCTAssertLessThanOrEqual(analyzer.eventCount, offline * 2)
+        #expect(offline > 5)
+        #expect(analyzer.eventCount > offline / 2)
+        #expect(analyzer.eventCount <= offline * 2)
     }
 
-    func testRealCycleSplitsRealInhaleAndExhale() throws {
+    @Test(.disabled("gentle calm-cycle splitting needs real same-session recordings to calibrate"))
+    func realCycleSplitsRealInhaleAndExhale() throws {
         let inhale = try AssetLibrary.loadMonoSamples(url: assetURL("calm_inhale.aifc"), targetRate: sr)
         let exhale = try AssetLibrary.loadMonoSamples(url: assetURL("calm_exhale.aifc"), targetRate: sr)
         let signal = inhale + silence(1.2) + exhale + silence(1.5)
@@ -339,18 +341,17 @@ final class CaptureAnalyzerTests: XCTestCase {
         // The standalone calm palette inhale is gentle and sits close to the room_silence floor, so
         // the energy gate can't reliably resolve its phases here. The synthetic cycle test proves the
         // split logic given adequate SNR; calibrating gentle-breath onset/pause against the absolute
-        // floor needs real same-session enrollment recordings (close mic, quiet room). Documented, not
-        // asserted, so the suite never implies the gentle-cycle path is validated on real audio.
-        throw XCTSkip("gentle calm-cycle splitting needs real same-session recordings to calibrate")
+        // floor needs real same-session enrollment recordings (close mic, quiet room). Disabled above,
+        // not asserted, so the suite never implies the gentle-cycle path is validated on real audio.
     }
 
     // MARK: Consistency guard — live count agrees with the offline extractor
 
-    func testLiveCountMatchesOfflineUnitExtractor() {
+    @Test func liveCountMatchesOfflineUnitExtractor() {
         let buffer = silence(0.3) + impulses(7, spacingSec: 0.5) + silence(1.0)
         let (_, analyzer) = run(.cleanEvents(minGapSec: 0.4, maxTakeSec: 20, trailingSilenceSec: 0.8), buffer)
         let offline = UnitExtractor.gulpCoreRanges(from: buffer, sampleRate: sr).count
-        XCTAssertEqual(analyzer.eventCount, offline, accuracy: 1)
+        #expect(abs(analyzer.eventCount - offline) <= 1)
     }
 
     // MARK: Style-aware spectral gate (Step 2.4) — zero-true-event-loss against the gold assets
@@ -360,24 +361,24 @@ final class CaptureAnalyzerTests: XCTestCase {
     /// Packing gulps (sharp glottal clicks, energy skewed above 3 kHz) and recovery hooks (turbulent
     /// airflow concentrated in 300-3000 Hz) are spectrally near-opposite — see `SpectralGateProfile`'s
     /// doc comments for the measured cluster evidence behind `.gulp`/`.hook`.
-    func testGoldPackingAcceptedUnderGulpProfile() throws {
+    @Test func goldPackingAcceptedUnderGulpProfile() throws {
         for name in ["packing_1.aifc", "packing_2.aifc"] {
             let samples = try AssetLibrary.loadMonoSamples(url: assetURL(name), targetRate: sr)
             let (_, analyzer) = run(.cleanEvents(minGapSec: 0.22, maxTakeSec: 40, trailingSilenceSec: 3.0,
                                                  eventMinDistSec: UnitExtractor.gulpMinDistSec,
                                                  spectralGate: .gulp), samples)
             let rejected = analyzer.spectralCandidates.filter { !$0.accepted }
-            XCTAssertTrue(rejected.isEmpty, "\(name): \(rejected.count)/\(analyzer.spectralCandidates.count) real gulps rejected — \(rejected)")
+            #expect(rejected.isEmpty, "\(name): \(rejected.count)/\(analyzer.spectralCandidates.count) real gulps rejected — \(rejected)")
         }
     }
 
-    func testGoldRecoveryAcceptedUnderHookProfile() throws {
+    @Test func goldRecoveryAcceptedUnderHookProfile() throws {
         let samples = try AssetLibrary.loadMonoSamples(url: assetURL("recovery.aifc"), targetRate: sr)
         let (_, analyzer) = run(.naturalRhythm(minActiveSec: 0.5, maxTakeSec: 40, trailingSilenceSec: 3.0,
                                                eventMinDistSec: UnitExtractor.hookMinDistSec,
                                                spectralGate: .hook), samples)
         let rejected = analyzer.spectralCandidates.filter { !$0.accepted }
-        XCTAssertTrue(rejected.isEmpty, "recovery.aifc: \(rejected.count)/\(analyzer.spectralCandidates.count) real hooks rejected — \(rejected)")
+        #expect(rejected.isEmpty, "recovery.aifc: \(rejected.count)/\(analyzer.spectralCandidates.count) real hooks rejected — \(rejected)")
     }
 
     /// Synthetic band-limited bursts, approximated as a sum of sinusoids spanning `[lowHz, highHz]`
@@ -401,30 +402,30 @@ final class CaptureAnalyzerTests: XCTestCase {
     /// (broadband energy concentrated in 300-3000 Hz) is *not* what a packing gulp looks like
     /// (centroid well above 3 kHz), and vice versa. Guards against a future "unification" of the two
     /// profiles, which the measured gold data shows would be wrong for at least one style.
-    func testGulpAndHookProfilesDisagreeByDesign() {
+    @Test func gulpAndHookProfilesDisagreeByDesign() {
         let breathBandBurst = silence(0.3) + spectralBurst(lowHz: 300, highHz: 3000, sec: 0.3) + silence(1.5)
         let (_, gulpOnBreathBand) = run(.cleanEvents(minGapSec: 0.22, maxTakeSec: 10, trailingSilenceSec: 1.0,
                                                       spectralGate: .gulp), breathBandBurst)
-        XCTAssertEqual(gulpOnBreathBand.eventCount, 0, "a breath-band (recovery-shaped) burst must not pass .gulp")
+        #expect(gulpOnBreathBand.eventCount == 0, "a breath-band (recovery-shaped) burst must not pass .gulp")
         let (_, hookOnBreathBand) = run(.cleanEvents(minGapSec: 0.22, maxTakeSec: 10, trailingSilenceSec: 1.0,
                                                       spectralGate: .hook), breathBandBurst)
-        XCTAssertEqual(hookOnBreathBand.eventCount, 1, "a breath-band (recovery-shaped) burst must pass .hook")
+        #expect(hookOnBreathBand.eventCount == 1, "a breath-band (recovery-shaped) burst must pass .hook")
 
         let highBurst = silence(0.3) + spectralBurst(lowHz: 6000, highHz: 9000, sec: 0.3) + silence(1.5)
         let (_, gulpOnHigh) = run(.cleanEvents(minGapSec: 0.22, maxTakeSec: 10, trailingSilenceSec: 1.0,
                                                spectralGate: .gulp), highBurst)
-        XCTAssertEqual(gulpOnHigh.eventCount, 1, "a high-centroid (packing-shaped) burst must pass .gulp")
+        #expect(gulpOnHigh.eventCount == 1, "a high-centroid (packing-shaped) burst must pass .gulp")
         let (_, hookOnHigh) = run(.cleanEvents(minGapSec: 0.22, maxTakeSec: 10, trailingSilenceSec: 1.0,
                                                spectralGate: .hook), highBurst)
-        XCTAssertEqual(hookOnHigh.eventCount, 0, "a high-centroid (packing-shaped) burst must not pass .hook")
+        #expect(hookOnHigh.eventCount == 0, "a high-centroid (packing-shaped) burst must not pass .hook")
     }
 
     /// `spectralGate: nil` (the default) must leave width/refractory-only behavior untouched.
-    func testSpectralGateNilLeavesCountingUnaffected() {
+    @Test func spectralGateNilLeavesCountingUnaffected() {
         let signal = silence(0.3) + impulses(6, spacingSec: 0.5) + silence(1.0)
         let (_, analyzer) = run(.cleanEvents(minGapSec: 0.4, maxTakeSec: 20, trailingSilenceSec: 0.8,
                                              spectralGate: nil), signal)
-        XCTAssertEqual(analyzer.eventCount, 6)
-        XCTAssertTrue(analyzer.spectralCandidates.isEmpty)
+        #expect(analyzer.eventCount == 6)
+        #expect(analyzer.spectralCandidates.isEmpty)
     }
 }

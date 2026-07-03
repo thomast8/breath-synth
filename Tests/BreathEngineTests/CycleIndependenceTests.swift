@@ -1,4 +1,5 @@
-import XCTest
+import Testing
+import Foundation
 import AVFoundation
 @testable import BreathEngine
 
@@ -6,7 +7,7 @@ import AVFoundation
 /// not one buffer replayed — while cycle 0 still equals a plain single-cycle render (backward
 /// compatible). Driven through a synthetic single-take calm palette so it needs no fixtures on disk.
 @MainActor
-final class CycleIndependenceTests: XCTestCase {
+struct CycleIndependenceTests {
     private let sr = AudioConstants.workingSampleRate
 
     private func writeWAV(_ samples: [Float], to url: URL) throws {
@@ -38,6 +39,7 @@ final class CycleIndependenceTests: XCTestCase {
         return (try BreathEngine.load(assetsDirectory: dir), dir)
     }
 
+    @Test
     func testCyclesDecorrelateAndCycleZeroMatchesSingleRender() throws {
         let (engine, dir) = try makeEngine()
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -51,18 +53,18 @@ final class CycleIndependenceTests: XCTestCase {
         let c0 = try engine.renderCycleSamples(cycle, cycleIndex: 0)
         let c1 = try engine.renderCycleSamples(cycle, cycleIndex: 1)
         let c2 = try engine.renderCycleSamples(cycle, cycleIndex: 2)
-        XCTAssertEqual(c0.count, c1.count)
-        XCTAssertNotEqual(c0, c1, "consecutive cycles must differ")
-        XCTAssertNotEqual(c1, c2)
-        XCTAssertNotEqual(c0, c2)
+        #expect(c0.count == c1.count)
+        #expect(c0 != c1, "consecutive cycles must differ")
+        #expect(c1 != c2)
+        #expect(c0 != c2)
 
         // Cycle 0 equals a plain single-cycle render of the same seeds (backward compatible).
         let manual = try engine.renderSamples(BreathSpec(type: .inhale, durationSec: 6, style: "calm", seed: 5))
             + (try engine.renderSamples(BreathSpec(type: .inhale, durationSec: 6, style: "calm", seed: 9)))
-        XCTAssertEqual(c0, manual)
+        #expect(c0 == manual)
 
         // The multi-cycle buffer is exactly the three distinct cycles concatenated.
         let buffer = try engine.renderCycle(cycle)
-        XCTAssertEqual(Int(buffer.frameLength), c0.count + c1.count + c2.count)
+        #expect(Int(buffer.frameLength) == c0.count + c1.count + c2.count)
     }
 }

@@ -1,7 +1,8 @@
-import XCTest
+import Testing
+import Foundation
 @testable import BreathEngine
 
-final class OneShotAssemblerTests: XCTestCase {
+struct OneShotAssemblerTests {
     private let sr = 44_100.0
 
     /// A 1 kHz tone-burst source: 0.5 s of tone (above the 260 Hz low-cut) followed by
@@ -16,6 +17,7 @@ final class OneShotAssemblerTests: XCTestCase {
         return BreathSourceClips(oneShot: samples)
     }
 
+    @Test
     func testOneShotReturnsNaturalLengthNotRequestedDuration() {
         // Denoise off: this exercises the mode dispatch + natural-length clamp, not the
         // spectral denoiser (which would perturb the tone).
@@ -29,15 +31,16 @@ final class OneShotAssemblerTests: XCTestCase {
         // to a SINGLE copy of the tone (no looped repetition). A fixed settle pause is then appended.
         let settle = Int(0.45 * sr)
         let threeSecFrames = Int((3 * sr).rounded())
-        XCTAssertLessThan(out.count, threeSecFrames / 2, "one-shot should ignore the 3 s duration")
-        XCTAssertGreaterThan(out.count, Int(0.4 * sr), "one-shot should keep the natural tone length")
-        XCTAssertLessThan(out.count - settle, Int(0.8 * sr), "audible length is ~one copy of the tone, not a looped fill")
-        XCTAssertGreaterThan(rms(out), 0.01, "the tone should be audible")
-        XCTAssertLessThan(rms(Array(out.suffix(Int(0.3 * sr)))), 1e-6, "ends with a silent settle pause")
+        #expect(out.count < threeSecFrames / 2, "one-shot should ignore the 3 s duration")
+        #expect(out.count > Int(0.4 * sr), "one-shot should keep the natural tone length")
+        #expect(out.count - settle < Int(0.8 * sr), "audible length is ~one copy of the tone, not a looped fill")
+        #expect(rms(out) > 0.01, "the tone should be audible")
+        #expect(rms(Array(out.suffix(Int(0.3 * sr)))) < 1e-6, "ends with a silent settle pause")
     }
 
     /// One-shot trimming crops the quiet leading preamble (the head) but keeps the recording's quiet
     /// natural-decay tail. Same low level at both ends, treated asymmetrically: head dropped, tail kept.
+    @Test
     func testOneShotCropsLeadingSilenceAndKeepsDecayTail() {
         let settings = AssemblerSettings(sampleRate: sr, enableSpectralDenoise: false)
         func tone(_ amp: Double, _ i: Int) -> Float { Float(amp * sin(2 * Double.pi * 1_000 * Double(i) / sr)) }
@@ -56,26 +59,27 @@ final class OneShotAssemblerTests: XCTestCase {
 
         // Head cropped: the loud onset sits near the start, not 0.4 s of quiet preamble in.
         let a0 = Int(0.06 * sr), a1 = Int(0.12 * sr)
-        XCTAssertLessThan(a1, out.count)
-        XCTAssertGreaterThan(rms(Array(out[a0..<a1])), 0.1, "leading preamble should be cropped, loud onset near the start")
+        #expect(a1 < out.count)
+        #expect(rms(Array(out[a0..<a1])) > 0.1, "leading preamble should be cropped, loud onset near the start")
 
         // Decay tail kept: a window just past the loud body is low-but-nonzero (the quiet decay),
         // not the loud body (which would mean the head wasn't cropped) and not silence (tail cut).
         let bodyEnd = Int(0.55 * sr)
-        XCTAssertLessThan(bodyEnd, out.count)
+        #expect(bodyEnd < out.count)
         let tailWindow = Array(out[bodyEnd..<min(out.count, bodyEnd + Int(0.25 * sr))])
         let tailRMS = rms(tailWindow)
-        XCTAssertGreaterThan(tailRMS, 0.003, "natural decay tail should be retained past the body")
-        XCTAssertLessThan(tailRMS, 0.1, "that region is the quiet decay, not the loud body (head was cropped)")
-        XCTAssertEqual(out.last, 0, "endpoint stays click-free")
+        #expect(tailRMS > 0.003, "natural decay tail should be retained past the body")
+        #expect(tailRMS < 0.1, "that region is the quiet decay, not the loud body (head was cropped)")
+        #expect(out.last == 0, "endpoint stays click-free")
     }
 
+    @Test
     func testTexturedFillsRequestedDuration() {
         let settings = AssemblerSettings(sampleRate: sr, enableSpectralDenoise: false)
         let out = BreathAssembler.assemble(
             type: .exhale, durationSec: 3, clips: toneBurstClips(), settings: settings, mode: .textured
         )
-        XCTAssertEqual(out.count, Int((3 * sr).rounded()), "textured render fills the exact duration")
+        #expect(out.count == Int((3 * sr).rounded()), "textured render fills the exact duration")
     }
 
     private func rms(_ samples: [Float]) -> Float {
