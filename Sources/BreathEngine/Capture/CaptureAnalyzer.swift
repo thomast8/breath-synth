@@ -60,11 +60,25 @@ public struct CaptureAnalyzer {
     private static let windowSec = 0.020
     private static let hopSec = 0.010
     /// Active when the envelope exceeds `activityFloorK × noiseFloor` (room-tone-relative gate).
-    private static let activityFloorK: Float = 3.0
+    /// Calibrated against real quiet-room hardware captures (see PR #11): a genuinely gentle/calm
+    /// breath's envelope sustains 50ms+ above ~1.3-1.5× a typical room floor, while the room floor
+    /// itself never sustains even 30ms at that level — 3.0 sat well above every observed calm-breath
+    /// peak, silently requiring near-hyperventilation effort to trigger onset at all.
+    private static let activityFloorK: Float = 1.4
     /// Fallback activity floor when no room-tone level is known (~ -48 dBFS).
     private static let absActivityFloor: Float = 0.004
+    /// A room-tone reading above this level scales `activityFloorK × noiseFloor` up enough to likely
+    /// swallow a genuinely gentle breath (a calm inhale/exhale) — worth a "find a quieter room" prompt
+    /// rather than silently degrading onset/event detection. ~4× `absActivityFloor`'s assumed-quiet
+    /// fallback (~-36 dBFS vs. the fallback's ~-48 dBFS).
+    public static let noisyRoomFloorRMS: Float = 0.015
     /// Hysteresis: once active, stay active until the envelope drops below `threshold × releaseRatio`.
-    private static let releaseRatio: Float = 0.6
+    /// Raised alongside `activityFloorK`'s drop: at a lower `activityFloorK`, the release floor must
+    /// stay close to (not far below) the onset threshold so it clears the room floor's typical level —
+    /// otherwise a stray room-tone blip that crosses onset threshold gets "stuck" active until the
+    /// envelope dips all the way to a release floor sitting below normal room noise, silently resetting
+    /// any accumulated pause/trailing-silence progress each time it happens.
+    private static let releaseRatio: Float = 0.85
     /// An event peak must exceed this fraction of the take's running peak (matches `UnitExtractor`).
     private static let eventPeakFrac: Float = 0.12
     /// A cycle's two phases must be within this duration ratio to be accepted.
@@ -78,6 +92,10 @@ public struct CaptureAnalyzer {
     /// Once `targetEvents` (where set) is reached, the take ends on this much shorter trailing silence
     /// instead of the full `trailingSilenceSec` — above intra-event dips, far below a typical done-pause.
     private static let postTargetTrailingSec = 0.7
+    /// A `pairedEvents` style's brief dip *within* one sip's own motion bridges into the same sip rather
+    /// than starting a new one. Sits ~4x below the observed real in/out sip gap (0.73-0.78s, PR #11),
+    /// unlike the old distance-based merge which sat right on top of that gap and merged inconsistently.
+    private static let sipMergeGapSec = 0.20
     /// Raw-audio history to retain for the spectral event gate — covers the width gate's confirmation
     /// delay (`minEventWidthSec`) plus half the spectral analysis window, with margin.
     private static let rawRetentionSec = 0.4
@@ -120,6 +138,12 @@ public struct CaptureAnalyzer {
     private let postTargetTrailingFrames: Int
     private let rawRetentionFrames: Int
     private let spectralWindowFrames: Int
+    /// Onset detection is suppressed until `totalFrames` reaches this — see `CaptureDetection.cleanEvents`'s
+    /// `postArmBlackoutSec` doc. `0` (every non-counted detection) is a no-op.
+    private let blackoutFrames: Int
+    /// See `CaptureDetection.cleanEvents`'s `pairedEvents` doc. `false` for every non-counted detection.
+    private let pairedEvents: Bool
+    private let sipMergeGapFrames: Int
 
     // MARK: Sliding-RMS ring (squared samples)
 
@@ -150,6 +174,38 @@ public struct CaptureAnalyzer {
     private var pendingOnsetFrame: Int?
     /// An event-peak candidate awaiting width confirmation, at most one per activity run.
     private var pendingPeakFrame: Int?
+
+    // MARK: Pre-onset ambient (rolling noise floor + room-tone harvest — see `preOnsetFloorRMS`)
+
+    /// Envelope hops seen while `.armed` (waiting for onset), oldest-dropped past `armedEnvCap` — this
+    /// take's own pre-breath ambient, sampled continuously so it's available the moment onset confirms
+    /// (rather than needing a separate measurement pass). ~30s cap is far past any realistic wait.
+    private var armedEnvSamples: [Float] = []
+    private static let armedEnvCap = 3000
+    /// Frozen once onset confirms: the 20th percentile of `armedEnvSamples` — deliberately a low
+    /// percentile, not a mean, because the armed window can genuinely contain a between-takes breath
+    /// (the blackout window exists for exactly that) and a mean would count that breath as "ambient,"
+    /// inflating the floor. A short wait (under `minPreOnsetFloorHops`) isn't enough hops for a
+    /// percentile to mean anything, so it stays `nil` rather than report a noisy estimate.
+    public private(set) var preOnsetFloorRMS: Float?
+    private static let minPreOnsetFloorHops = 150  // 1.5s at the 10ms hop rate
+
+    // MARK: Sip alternator (pairedEvents styles only — see `detectSip`)
+
+    /// Parity of the sip currently in progress or most recently completed: even = inhale, odd = exhale.
+    private var sipCount = 0
+    /// Frame the in-progress sip's activity run first started, or `nil` between sips.
+    private var sipStartFrame: Int?
+    private var sipPeakFrame = 0
+    private var sipPeakEnv: Float = 0
+    private var sipEvaluated = false
+    private var sipConfirmed = false
+    /// Frame the in-progress sip's activity run ended, pending confirmation it's a real gap (not a
+    /// brief bridgeable dip) — `nil` while the sip is still active or no sip is pending finalize.
+    private var sipEndFrame: Int?
+    /// The current pair's inhale-sip start frame, recorded so the exhale-sip can compute the pair's
+    /// anchor-to-anchor interval for `intervalsFrames`.
+    private var breathAnchorFrame: Int?
 
     // MARK: Raw-sample retention (spectral event gate; populated only when `spectralGateProfile != nil`)
 
@@ -193,7 +249,11 @@ public struct CaptureAnalyzer {
     public var livePhase: LivePhase {
         switch state {
         case .armed, .done: return .waiting
-        case .capturing: return .capturing
+        case .capturing:
+            // A `pairedEvents` style has a real alternating inhale/exhale motion even though the state
+            // machine itself has no inhale/exhale sub-state for counted styles — sip parity stands in.
+            guard pairedEvents else { return .capturing }
+            return sipCount % 2 == 0 ? .inhale : .exhale
         case .inhale: return .inhale
         case .midPause: return .midPause
         case .exhale: return .exhale
@@ -212,6 +272,15 @@ public struct CaptureAnalyzer {
 
     /// The most recent envelope value — a smoothed level for the UI meter.
     public var currentLevel: Float { prevEnv }
+
+    /// The envelope level this take's onset/activity gate is set to — lets a UI meter scale itself
+    /// relative to "how close to triggering" instead of assuming a fixed absolute amplitude range,
+    /// which reads as nearly empty for a genuinely gentle breath and reasonable for a loud one.
+    public var currentActivityThreshold: Float { activityThreshold }
+
+    /// This take's post-arm onset blackout window, in seconds (`0` for every non-counted detection) —
+    /// lets a UI show a "breathe now" countdown instead of a silently-ignored waiting period.
+    public var blackoutSec: Double { Double(blackoutFrames) / sampleRate }
 
     /// Mean envelope over everything ingested — used on a `fixedDuration` (room-tone) take as the
     /// session noise floor for later steps' activity/event gating.
@@ -235,13 +304,15 @@ public struct CaptureAnalyzer {
         postTargetTrailingFrames = toFrames(Self.postTargetTrailingSec)
         rawRetentionFrames = toFrames(Self.rawRetentionSec)
         spectralWindowFrames = toFrames(Self.spectralWindowSec)
+        sipMergeGapFrames = toFrames(Self.sipMergeGapSec)
 
         switch detection {
         case let .fixedDuration(seconds):
             isFixed = true; isCycle = false; finalPhaseOnly = false; finalSegmentLabel = .whole; countsEvents = false
             maxFrames = toFrames(seconds)
             trailingFrames = 0; midPauseFrames = 0; minActiveFrames = 0; minGapFrames = 0
-            refractoryFrames = 0; targetEventsCount = nil; spectralGateProfile = nil
+            refractoryFrames = 0; targetEventsCount = nil; spectralGateProfile = nil; blackoutFrames = 0
+            pairedEvents = false
             state = .capturing
         case let .cycle(minPhaseSec, midPauseSec, maxCycleSec, trailingSilenceSec):
             isFixed = false; isCycle = true; finalPhaseOnly = false; finalSegmentLabel = .exhale; countsEvents = false
@@ -249,14 +320,16 @@ public struct CaptureAnalyzer {
             midPauseFrames = toFrames(midPauseSec)
             maxFrames = toFrames(maxCycleSec)
             minActiveFrames = toFrames(minPhaseSec)
-            minGapFrames = 0; refractoryFrames = 0; targetEventsCount = nil; spectralGateProfile = nil
+            minGapFrames = 0; refractoryFrames = 0; targetEventsCount = nil; spectralGateProfile = nil; blackoutFrames = 0
+            pairedEvents = false
         case let .single(minActiveSec, maxTakeSec, trailingSilenceSec):
             isFixed = false; isCycle = false; finalPhaseOnly = false; finalSegmentLabel = .whole; countsEvents = false
             trailingFrames = toFrames(trailingSilenceSec)
             maxFrames = toFrames(maxTakeSec)
             minActiveFrames = toFrames(minActiveSec)
             midPauseFrames = 0; minGapFrames = 0; refractoryFrames = 0
-            targetEventsCount = nil; spectralGateProfile = nil
+            targetEventsCount = nil; spectralGateProfile = nil; blackoutFrames = 0
+            pairedEvents = false
         case let .finalPhase(minLeadSec, midPauseSec, _, maxTakeSec, trailingSilenceSec):
             // `minPhaseSec` (the kept final phase's minimum) isn't used inside the state machine — it's
             // a post-hoc structural check the recorder makes from `CaptureDetection.minPhaseSec`.
@@ -265,8 +338,9 @@ public struct CaptureAnalyzer {
             midPauseFrames = toFrames(midPauseSec)
             maxFrames = toFrames(maxTakeSec)
             minActiveFrames = toFrames(minLeadSec)
-            minGapFrames = 0; refractoryFrames = 0; targetEventsCount = nil; spectralGateProfile = nil
-        case let .cleanEvents(minGapSec, maxTakeSec, trailingSilenceSec, eventMinDistSec, targetEvents, spectralGate):
+            minGapFrames = 0; refractoryFrames = 0; targetEventsCount = nil; spectralGateProfile = nil; blackoutFrames = 0
+            pairedEvents = false
+        case let .cleanEvents(minGapSec, maxTakeSec, trailingSilenceSec, eventMinDistSec, targetEvents, spectralGate, postArmBlackoutSec, paired):
             isFixed = false; isCycle = false; finalPhaseOnly = false; finalSegmentLabel = .whole; countsEvents = true
             trailingFrames = toFrames(trailingSilenceSec)
             maxFrames = toFrames(maxTakeSec)
@@ -274,14 +348,18 @@ public struct CaptureAnalyzer {
             minActiveFrames = 0; midPauseFrames = 0
             refractoryFrames = toFrames(eventMinDistSec)
             targetEventsCount = targetEvents; spectralGateProfile = spectralGate
-        case let .naturalRhythm(minActiveSec, maxTakeSec, trailingSilenceSec, eventMinDistSec, spectralGate):
+            self.blackoutFrames = postArmBlackoutSec > 0 ? toFrames(postArmBlackoutSec) : 0
+            pairedEvents = paired
+        case let .naturalRhythm(minActiveSec, maxTakeSec, trailingSilenceSec, eventMinDistSec, spectralGate, postArmBlackoutSec, paired):
             isFixed = false; isCycle = false; finalPhaseOnly = false; finalSegmentLabel = .whole; countsEvents = true
             trailingFrames = toFrames(trailingSilenceSec)
             maxFrames = toFrames(maxTakeSec)
             minActiveFrames = toFrames(minActiveSec)
             minGapFrames = 0; midPauseFrames = 0
             refractoryFrames = toFrames(eventMinDistSec)
+            self.blackoutFrames = postArmBlackoutSec > 0 ? toFrames(postArmBlackoutSec) : 0
             targetEventsCount = nil; spectralGateProfile = spectralGate
+            pairedEvents = paired
         }
     }
 
@@ -372,6 +450,7 @@ public struct CaptureAnalyzer {
                 events.append(.takeEnded(reason: .duration))
                 state = .done
             }
+            print("[CAL-ROOM] frame=\(currentFrame) env=\(String(format: "%.5f", env))")
             prevPrevEnv = prevEnv; prevEnv = env
             return
         }
@@ -395,10 +474,20 @@ public struct CaptureAnalyzer {
         let becameActive = !wasActive && isActive
         if becameActive { currentRunStartFrame = max(0, currentFrame - windowSamples) }
 
+        if state == .armed {
+            armedEnvSamples.append(env)
+            if armedEnvSamples.count > Self.armedEnvCap { armedEnvSamples.removeFirst() }
+            print("[CAL-ARMED] frame=\(currentFrame) env=\(String(format: "%.5f", env)) threshold=\(String(format: "%.5f", activityThreshold)) active=\(isActive)")
+        }
+
         switch state {
         case .armed:
             // Onset is confirmed only once its containing run has lasted `onsetWidthFrames` — a click
             // that ends before that stays un-onset and the take keeps listening for a real one.
+            // `blackoutFrames` additionally suppresses onset altogether for a moment right after
+            // arming — the counted-event styles' between-takes exhale/re-inhale, with nothing like
+            // `finalPhase`'s discarded lead phase to absorb it (see `CaptureDetection.cleanEvents`).
+            if currentFrame < blackoutFrames { break }
             if becameActive {
                 pendingOnsetFrame = currentRunStartFrame
             }
@@ -409,12 +498,21 @@ public struct CaptureAnalyzer {
                     pendingOnsetFrame = nil
                     segmentStartFrame = onset
                     phaseStartFrame = onset
+                    if armedEnvSamples.count >= Self.minPreOnsetFloorHops {
+                        preOnsetFloorRMS = Self.percentile(armedEnvSamples, 0.2)
+                    }
                     events.append(.onset)
                     state = (isCycle || finalPhaseOnly) ? .inhale : .capturing
                 }
             }
         case .capturing:
-            if countsEvents { detectEventPeak(env: env, currentFrame: currentFrame, into: &events) }
+            if countsEvents {
+                if pairedEvents {
+                    detectSip(env: env, currentFrame: currentFrame, into: &events)
+                } else {
+                    detectEventPeak(env: env, currentFrame: currentFrame, into: &events)
+                }
+            }
             let targetHit = targetEventsCount.map { eventCount >= $0 } ?? false
             let requiredTrailing = targetHit ? postTargetTrailingFrames : trailingFrames
             if currentFrame >= maxFrames {
@@ -482,10 +580,12 @@ public struct CaptureAnalyzer {
             let threshold = max(activityThreshold, Self.eventPeakFrac * runningPeak)
             if prevEnv >= threshold, prevEnv >= prevPrevEnv, prevEnv > env {
                 pendingPeakFrame = max(0, currentFrame - hopSamples)
+                print("[CAL-EVENT] candidate frame=\(pendingPeakFrame!) prevEnv=\(String(format: "%.4f", prevEnv)) threshold=\(String(format: "%.4f", threshold)) runningPeak=\(String(format: "%.4f", runningPeak))")
             }
         }
         guard let candidate = pendingPeakFrame else { return }
         if !isActive {
+            print("[CAL-EVENT] rejected frame=\(candidate) reason=run-ended-too-soon")
             pendingPeakFrame = nil  // the run that contained this candidate ended too soon — a click
             return
         }
@@ -496,9 +596,15 @@ public struct CaptureAnalyzer {
         // typing roll wide enough to pass the width gate, nearby speech). Discarded exactly like a
         // width-gate rejection — no event, no interval, `lastPeakFrame` untouched so it can't distort
         // the refractory spacing between two genuine events either side of it.
-        if spectralGateProfile != nil, !isCandidateBreathShaped(candidate) { return }
+        if spectralGateProfile != nil, !isCandidateBreathShaped(candidate) {
+            print("[CAL-EVENT] rejected frame=\(candidate) reason=spectral-gate")
+            return
+        }
 
-        if let last = lastPeakFrame, candidate - last < refractoryFrames { return }
+        if let last = lastPeakFrame, candidate - last < refractoryFrames {
+            print("[CAL-EVENT] rejected frame=\(candidate) reason=refractory gap=\(candidate - last) needed=\(refractoryFrames)")
+            return
+        }
         if let last = lastPeakFrame {
             let gap = candidate - last
             intervalsFrames.append(gap)
@@ -506,9 +612,74 @@ public struct CaptureAnalyzer {
         } else {
             lastGapWithinMin = false
         }
+        print("[CAL-EVENT] CONFIRMED frame=\(candidate) index=\(eventCount) runningPeak=\(String(format: "%.4f", runningPeak))")
         lastPeakFrame = candidate
         events.append(.eventDetected(index: eventCount))
         eventCount += 1
+    }
+
+    /// `pairedEvents` counterpart to `detectEventPeak`: recovery's hook breath is physiologically a
+    /// strict alternation (inhale-sip, then exhale-sip, always in that order — you cannot inhale twice
+    /// without exhaling between). Rather than merging a hook's two sips into one event by distance (the
+    /// same ~0.7-0.85s gap can mean "same hook's second sip" or "next hook's first sip" depending on the
+    /// person's cadence — real hardware data this session showed gaps landing right on that boundary,
+    /// so merging succeeded or failed unpredictably), this counts each confirmed *activity run* as one
+    /// sip, toggles alternating parity on every sip, and completes one breath (`eventDetected`) every
+    /// second sip. A brief dip below `sipMergeGapFrames` inside one sip's own motion bridges into the
+    /// same sip rather than starting a new one.
+    private mutating func detectSip(env: Float, currentFrame: Int, into events: inout [Event]) {
+        if let target = targetEventsCount, eventCount >= target { return }
+
+        if isActive {
+            if sipEndFrame != nil {
+                sipEndFrame = nil  // a brief dip bridged back within the merge window — same sip continues
+            } else if sipStartFrame == nil {
+                sipStartFrame = currentRunStartFrame
+                sipPeakFrame = currentRunStartFrame
+                sipPeakEnv = env
+                sipEvaluated = false
+                sipConfirmed = false
+            }
+            if let start = sipStartFrame {
+                if env > sipPeakEnv { sipPeakEnv = env; sipPeakFrame = currentFrame }
+                if !sipEvaluated, currentFrame - start >= minEventWidthFrames {
+                    sipEvaluated = true
+                    sipConfirmed = spectralGateProfile == nil || isCandidateBreathShaped(sipPeakFrame)
+                }
+            }
+        } else if sipStartFrame != nil, sipEndFrame == nil {
+            sipEndFrame = silenceStartFrame
+        }
+
+        if let start = sipStartFrame, let end = sipEndFrame, currentFrame - end >= sipMergeGapFrames {
+            if sipConfirmed { finalizeSip(startFrame: start, currentFrame: currentFrame, into: &events) }
+            sipStartFrame = nil; sipPeakFrame = 0; sipEvaluated = false; sipConfirmed = false; sipEndFrame = nil
+        }
+    }
+
+    /// One completed, width/spectral-confirmed sip: on the pair's first (even parity) sip, just anchor
+    /// it; on the second (odd parity) sip, the pair is complete — record its anchor-to-anchor interval
+    /// and emit the breath. An unconfirmed sip never reaches here, so parity only advances on real sips.
+    ///
+    /// Deliberately does *not* touch `phaseStartFrame`: `livePhase`'s inhale/exhale label for a paired
+    /// style comes from `sipCount` parity alone (see `livePhase`), not from `phaseStartFrame` — that
+    /// field's only live consumer for a paired counted style is `phaseFloorHint`'s take-length-floor
+    /// readout, which needs elapsed time since the *take's* onset. Resetting it here (as an earlier
+    /// version of this method did, mirroring `cycle`'s real phase-transition resets) instead reset the
+    /// clock on every sip, making that readout count up from ~0 after each inhale/exhale instead of
+    /// accumulating toward the take's length floor — reported on real hardware as the "needs ≥Xs"
+    /// counter resetting mid-take on "Recovery — natural rhythm."
+    private mutating func finalizeSip(startFrame: Int, currentFrame: Int, into events: inout [Event]) {
+        if sipCount % 2 == 0 {
+            breathAnchorFrame = startFrame
+        } else if let anchor = breathAnchorFrame {
+            let gap = startFrame - anchor
+            intervalsFrames.append(gap)
+            lastGapWithinMin = minGapFrames > 0 && gap < minGapFrames
+            events.append(.eventDetected(index: eventCount))
+            eventCount += 1
+        }
+        sipCount += 1
     }
 
     /// Why a `cycle` take's two phase durations (frames) fail the plausible-split guard, or `nil` if
@@ -529,6 +700,12 @@ public struct CaptureAnalyzer {
     /// ``cycleIssue(inhaleFrames:exhaleFrames:minPhaseFrames:)`` for callers that only need the bool.
     public static func cycleSegmentsValid(inhaleFrames: Int, exhaleFrames: Int, minPhaseFrames: Int) -> Bool {
         cycleIssue(inhaleFrames: inhaleFrames, exhaleFrames: exhaleFrames, minPhaseFrames: minPhaseFrames) == nil
+    }
+
+    /// Whether a room-tone reading (`BreathRecorder.lastNoiseFloorRMS`) is loud enough to warrant a
+    /// "find a quieter room" prompt before technique capture starts — see ``noisyRoomFloorRMS``.
+    public static func isRoomTooNoisy(_ meanFloorRMS: Float) -> Bool {
+        meanFloorRMS > noisyRoomFloorRMS
     }
 
     /// Spectral breath-shape check for a width-confirmed event candidate, reusing the same
@@ -554,5 +731,15 @@ public struct CaptureAnalyzer {
             frame: candidate, flatness: flat, bandRatio: ratio, centroidHz: centroid,
             windowFrameCount: window.count, windowRMS: rms, accepted: accepted))
         return accepted
+    }
+
+    /// The value at `fraction` (0...1) through a sorted copy of `values` — a low fraction (e.g. 0.2)
+    /// reads the quiet end of a mixed-content window (ambient + occasional breath) without needing to
+    /// separate the two explicitly, since the breath only ever occupies a minority of the samples.
+    private static func percentile(_ values: [Float], _ fraction: Double) -> Float {
+        guard !values.isEmpty else { return 0 }
+        let sorted = values.sorted()
+        let index = min(sorted.count - 1, max(0, Int(Double(sorted.count - 1) * fraction)))
+        return sorted[index]
     }
 }

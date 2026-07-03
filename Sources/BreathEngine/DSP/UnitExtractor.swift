@@ -10,10 +10,15 @@ import Foundation
 ///   take (the deliberately-separated packs) are laid out at another take's natural rhythm.
 public enum UnitExtractor {
     /// Adjacent event segments + detected count. Tiny input or <2 events returns `([source], 1)`.
-    /// Min-distance between detected events. Recovery hooks are a double sip ~0.5 s apart that must
-    /// merge into one event (0.7 s); packing gulps can follow much faster, so the hybrid path uses a
-    /// small distance to catch the true cadence.
-    public static let hookMinDistSec = 0.70
+    /// Min-distance between detected events. Recovery hooks are a double sip that must merge into one
+    /// event; packing gulps can follow much faster, so the hybrid path uses a small distance to catch
+    /// the true cadence. Real-hardware data (PR #11): one user's own in/out sip gap measured 0.73–0.78s
+    /// — right on top of the old 0.70s floor, so the merge succeeded or failed depending on which side
+    /// of that boundary a given hook happened to land, undercounting inconsistently. 0.85s clears that
+    /// with margin while staying well under an observed real between-breath gap (1.77s) — still leaves
+    /// no room for someone who does genuinely back-to-back hooks with almost no gap; there's no single
+    /// constant that serves both extremes, so this trades toward the failure mode actually observed.
+    public static let hookMinDistSec = 0.85
     public static let gulpMinDistSec = 0.22
 
     public static func extract(
