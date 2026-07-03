@@ -16,7 +16,7 @@ import Observation
 @MainActor
 @Observable
 public final class BreathRecorder {
-    public enum Phase: Sendable { case idle, waitingForOnset, capturing }
+    public enum Phase: Sendable { case idle, waitingForOnset, capturing, reviewing }
 
     // MARK: Observable UI state
 
@@ -37,7 +37,8 @@ public final class BreathRecorder {
     public private(set) var takeIndex = 0
     /// Live count of detected events in the current take (cleanEvents / naturalRhythm).
     public private(set) var eventCount = 0
-    /// Takes auto-rejected by the structural guard this session (surfaced as "let's retake that").
+    /// Takes auto-rejected this session — either the structural guard or (once reviewing) a live-grade
+    /// `.redo` verdict — surfaced as "let's retake that".
     public private(set) var invalidTakes = 0
     /// Why the most recently finalized take was rejected, or `nil` if it was accepted. Cleared when a
     /// new take is armed.
@@ -65,10 +66,17 @@ public final class BreathRecorder {
     @ObservationIgnored private var fileURL: (@MainActor (Int, SegmentLabel) -> URL)?
     @ObservationIgnored private var onSegment: (@MainActor (Int, SegmentLabel, URL, [Int], [CaptureAnalyzer.SpectralCandidate]) -> Void)?
     @ObservationIgnored private var onFinished: (@MainActor () -> Void)?
+    /// Async per-take grade the app can hook in; `nil` (the default) skips review entirely — a
+    /// structurally-valid take is emitted immediately, exactly as before this existed.
+    @ObservationIgnored private var onTakeReview: (@MainActor (_ takeIndex: Int, _ segments: [(label: SegmentLabel, url: URL)]) async -> TakeReview)?
+    /// `true` while a written-but-unemitted take awaits its `onTakeReview` verdict. The box stays
+    /// disarmed for the whole wait (set false by `CaptureBox.consume` on `takeEnded`), so mic input
+    /// during review can't start a take — the between-takes recovery breath can't false-trigger onset.
+    @ObservationIgnored private var reviewing = false
     @ObservationIgnored private var configObserver: NSObjectProtocol?
-    /// Consecutive auto-rejected takes (any structurally-invalid cause: `cycle`, `finalPhase`); after
-    /// `maxTakeRetries` the next take is force-accepted so a user who can't produce a valid take is
-    /// never trapped in an infinite redo.
+    /// Consecutive auto-rejected takes (any structurally-invalid cause: `cycle`, `finalPhase`, or a
+    /// live-grade `.redo`); after `maxTakeRetries` the next take is force-accepted so a user who can't
+    /// produce a valid take is never trapped in an infinite redo.
     @ObservationIgnored private var takeRetries = 0
     @ObservationIgnored private let maxTakeRetries = 3
 
@@ -88,7 +96,8 @@ public final class BreathRecorder {
             _ takeIndex: Int, _ label: SegmentLabel, _ url: URL, _ intervalsFrames: [Int],
             _ spectralCandidates: [CaptureAnalyzer.SpectralCandidate]
         ) -> Void,
-        onFinished: @escaping @MainActor () -> Void
+        onFinished: @escaping @MainActor () -> Void,
+        onTakeReview: (@MainActor (_ takeIndex: Int, _ segments: [(label: SegmentLabel, url: URL)]) async -> TakeReview)? = nil
     ) throws {
         guard !isRecording else { return }
         let authorization = AVCaptureDevice.authorizationStatus(for: .audio)
@@ -109,6 +118,8 @@ public final class BreathRecorder {
         self.fileURL = fileURL
         self.onSegment = onSegment
         self.onFinished = onFinished
+        self.onTakeReview = onTakeReview
+        reviewing = false
         isFixed = detection.isFixedDuration
         isCycle = detection.isCycle
         isFinalPhase = detection.isFinalPhase
@@ -183,9 +194,12 @@ public final class BreathRecorder {
         if let request { finalize(request) }
     }
 
-    /// Manual override: discard the in-progress take and re-listen for the same take index.
+    /// Manual override: discard the in-progress take and re-listen for the same take index. Also
+    /// invalidates any pending `onTakeReview` wait — its verdict, whenever it arrives, will see
+    /// `reviewing == false` and drop (`TakeGate.resolve`'s staleness guard).
     public func cancelTake() {
         guard isRecording else { return }
+        reviewing = false
         arm()
         publishSnapshot()
     }
@@ -196,26 +210,38 @@ public final class BreathRecorder {
     // MARK: Take lifecycle (main actor)
 
     private func finalize(_ request: FinalizeRequest) {
-        guard isRecording, let fileURL, let onSegment else { return }
+        guard isRecording, let fileURL, onSegment != nil else { return }
         if isFixed { lastNoiseFloorRMS = request.meanFloor }
 
-        if let issue = takeIssue(request) {
-            lastTakeIssue = issue
-            invalidTakes += 1
-            // Structurally-invalid takes (cycle, finalPhase) auto-redo, but only up to a shared cap —
-            // past it, force-accept what was captured (the offline grader filters bad fragments) so the
-            // session always makes progress.
-            if (isCycle || isFinalPhase), takeRetries < maxTakeRetries {
-                takeRetries += 1
-                arm()
-                publishSnapshot()
-                return
-            }
-        } else {
-            lastTakeIssue = nil
+        let issue = takeIssue(request)
+        lastTakeIssue = issue
+        if issue != nil { invalidTakes += 1 }
+
+        // Only `cycle`/`finalPhase` gate on their structural issue; every other kind's `takeIssue` only
+        // ever returns `.noSegment`, which is unreachable in practice (every other state's `flush()`
+        // always emits a segment before `takeEnded`) — preserved as a defensive non-gating fallback,
+        // matching this check's original behavior before the shared retry cap existed.
+        let retryEligible = isCycle || isFinalPhase
+        let structurallyValid = issue == nil || !retryEligible
+        // Nothing to review or write if a flush produced no segments at all — accept it as before.
+        let decision: TakeGate.Decision = request.segments.isEmpty
+            ? .emit
+            : TakeGate.decide(structurallyValid: structurallyValid, retries: takeRetries,
+                              maxRetries: maxTakeRetries, hasReviewer: onTakeReview != nil)
+
+        if decision == .redoNow {
+            takeRetries += 1
+            arm()
+            publishSnapshot()
+            return
         }
         takeRetries = 0
 
+        // Write now regardless of `.emit` vs `.review` — only firing `onSegment` (which registers the
+        // take with the app / `captures.json`) is conditional. The deterministic `fileURL(takeIndex,
+        // label)` means a later `.redo` overwrites these same files in place: no orphan, no duplicate
+        // registration, since `onSegment` never fires for a take that gets redone.
+        var written: [(label: SegmentLabel, url: URL)] = []
         for segment in request.segments {
             let url = fileURL(takeIndex, segment.label)
             do {
@@ -225,7 +251,47 @@ public final class BreathRecorder {
                 teardown()
                 return
             }
-            onSegment(takeIndex, segment.label, url, request.intervals, request.spectralCandidates)
+            written.append((segment.label, url))
+        }
+
+        if decision == .emit {
+            emit(written, request: request)
+            return
+        }
+
+        // .review — hold for the app's async grade. The box is already disarmed (set by
+        // `CaptureBox.consume` on `takeEnded`), so no new take can start while this waits.
+        reviewing = true
+        phase = .reviewing
+        let reviewIndex = takeIndex
+        Task { @MainActor [weak self] in
+            guard let self, let onTakeReview = self.onTakeReview else { return }
+            let verdict = await onTakeReview(reviewIndex, written)
+            // `takeIndex` cannot have moved during the wait — the box stays disarmed the whole time,
+            // so nothing else can call `finalize`/`emit` to advance it. Safe to reuse `written` as-is.
+            let stale = !(self.isRecording && self.reviewing)
+            switch TakeGate.resolve(verdict: verdict, isStale: stale) {
+            case .drop:
+                break
+            case .redo:
+                self.reviewing = false
+                self.invalidTakes += 1
+                self.takeRetries += 1
+                self.arm()
+                self.publishSnapshot()
+            case .emit:
+                self.reviewing = false
+                self.emit(written, request: request)
+            }
+        }
+    }
+
+    /// Fire `onSegment` for already-written segments and advance the session — the shared tail of the
+    /// immediate-accept and post-review-accept paths.
+    private func emit(_ written: [(label: SegmentLabel, url: URL)], request: FinalizeRequest) {
+        guard let onSegment else { return }
+        for (label, url) in written {
+            onSegment(takeIndex, label, url, request.intervals, request.spectralCandidates)
         }
         takeIndex += 1
         if takeIndex >= takes {
@@ -290,12 +356,16 @@ public final class BreathRecorder {
         engine.stop()
         box = nil
         isRecording = false
+        reviewing = false
         phase = .idle
         level = 0
     }
 
     private func publishSnapshot() {
         guard isRecording, let box else { return }
+        // Hold-for-review: the box is disarmed for the whole wait, same as between ordinary takes, so
+        // the ~11Hz tap snapshot below would otherwise stomp `phase` back to `.waitingForOnset`.
+        if reviewing { return }
         let snapshot = box.lock.withLock {
             (level: box.level, count: box.analyzer.eventCount, frames: box.buffer.count,
              armed: box.armed, onset: box.hasOnset, gap: box.analyzer.lastGapWithinMin,

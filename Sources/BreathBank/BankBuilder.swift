@@ -114,7 +114,6 @@ public enum BankBuilder {
                                      settings: settings, roomProfile: roomProfile)
                   } ?? [])
                 : []
-            let minCoreSpacing = Int(thresholds.minCoreSpacingSec * sr)
 
             // Pass 1: segment every take, stage its files, compute per-fragment features.
             var records: [Record] = []
@@ -129,43 +128,16 @@ public enum BankBuilder {
                 takesToWrite[outName] = raw
                 group.record(takeName: outName, role: step.role)
 
-                let clipped = Grader.clippingRun(raw, peak: thresholds.clipPeak, minRun: thresholds.clipRunSamples)
-                let durationSec = Double(raw.count) / sr
-                let lengthOK = lengthWithinBounds(durationSec, min: step.minSeconds, max: step.maxSeconds)
-
-                let out = Segmenter.segment(
-                    rawTake: raw, role: step.role, type: step.type,
-                    settings: settings, roomToneProfile: roomProfile
+                let result = TakeGrading.gradeTake(
+                    raw: raw, role: step.role, type: step.type, settings: settings,
+                    roomToneProfile: roomProfile, goldCadence: refCadence,
+                    minSeconds: step.minSeconds, maxSeconds: step.maxSeconds, thresholds: thresholds
                 )
-                if let cache = out.cacheSignal {
+                if let cache = result.cacheSignal {
                     cachesToWrite[FragmentBank.preparedCacheName(forTake: outName)] = cache
                 }
-                // Take-level packing cadence vs the gold reference (applies to all this take's cores).
-                let takeCoreGaps = out.fragments.filter { $0.kind == .gulpCore }.compactMap(\.gapToNext)
-                let cadenceOK = refCadence.isEmpty || takeCoreGaps.isEmpty
-                    ? true
-                    : Grader.rhythmDistance(takeCoreGaps, refCadence) <= thresholds.maxRhythmDistance
-                for fragment in out.fragments {
-                    let features: Grader.Features?
-                    if fragment.kind == .gap {
-                        features = nil
-                    } else {
-                        var f = Grader.features(raw: fragment.audio, sampleRate: sr,
-                                                roomToneProfile: roomProfile, thresholds: thresholds)
-                        f.clipped = clipped   // clipping is a take-level verdict, not a fragment one
-                        features = f
-                    }
-                    // Per-kind quality gates the Grader can't see from features alone.
-                    let dropoutOK = fragment.kind != .oneShotBody
-                        || !Grader.dropoutRun(BreathAssembler.rmsEnvelope(fragment.audio, sampleRate: sr),
-                                              sampleRate: sr, minGapSec: thresholds.dropoutMinGapSec)
-                    let spacingOK = fragment.kind != .gulpCore
-                        || (fragment.gapToNext.map { $0 >= minCoreSpacing } ?? true)
-                    records.append(Record(
-                        outName: outName, raw: fragment, features: features, lengthOK: lengthOK,
-                        dropoutOK: dropoutOK, spacingOK: spacingOK,
-                        cadenceOK: fragment.kind == .gulpCore ? cadenceOK : true
-                    ))
+                for fragRecord in result.records {
+                    records.append(Record(outName: outName, fragment: fragRecord))
                 }
             }
 
@@ -334,16 +306,11 @@ public enum BankBuilder {
             .compactMap(\.features)
     }
 
-    private static func lengthWithinBounds(_ seconds: Double, min: Double?, max: Double?) -> Bool {
-        if let min, seconds < min { return false }
-        if let max, seconds > max { return false }
-        return true
-    }
-
     /// The grading template for one step's role: segment the gold reference the same way and average
     /// its fragment spectra into one 513-bin profile. `nil` when there's no reference (→ no template
-    /// rejection) or it yields no usable fragment.
-    private static func referenceProfile(
+    /// rejection) or it yields no usable fragment. Shared with `LiveTakeGrader` (same module) so both
+    /// compute the gold template identically.
+    static func referenceProfile(
         _ url: URL, role: String, type: BreathType,
         settings: AssemblerSettings, roomProfile: [Float]?
     ) -> [Float]? {
@@ -360,7 +327,7 @@ public enum BankBuilder {
     }
 
     /// The gold reference's packing cadence — its gulp-core inter-onset gaps — for the cadence gate.
-    private static func referenceCadence(
+    static func referenceCadence(
         _ url: URL, type: BreathType, settings: AssemblerSettings, roomProfile: [Float]?
     ) -> [Int]? {
         guard FileManager.default.fileExists(atPath: url.path),
@@ -467,6 +434,16 @@ private struct Record {
     var dropoutOK: Bool = true
     var spacingOK: Bool = true
     var cadenceOK: Bool = true
+
+    init(outName: String, fragment: TakeGrading.FragmentRecord) {
+        self.outName = outName
+        self.raw = fragment.raw
+        self.features = fragment.features
+        self.lengthOK = fragment.lengthOK
+        self.dropoutOK = fragment.dropoutOK
+        self.spacingOK = fragment.spacingOK
+        self.cadenceOK = fragment.cadenceOK
+    }
 }
 
 /// Per-(style, type) accumulator: the bank's fragments plus the take ordering for the manifest's

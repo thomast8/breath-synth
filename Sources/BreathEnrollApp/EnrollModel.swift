@@ -20,6 +20,18 @@ final class EnrollModel {
         case finished
     }
 
+    /// Live per-take grading state for the UI, driven by `reviewTake`. Resets to `.idle` at the start
+    /// of every technique step.
+    enum LiveCheck: Equatable {
+        case idle
+        case checking(take: Int)
+        case passed(take: Int)
+        case redoing(take: Int, reason: String)
+        /// Grading didn't finish before `liveGradeDeadlineSec`, or no grader exists yet — the take was
+        /// accepted unchecked; the offline build re-checks everything regardless.
+        case keptUnchecked(take: Int)
+    }
+
     let steps = EnrollmentScript.steps
     /// The engine recorder — the view binds to its published state (phase, level, takeIndex, count).
     let recorder = BreathRecorder()
@@ -43,6 +55,19 @@ final class EnrollModel {
     private(set) var roomToneFile: String?
     /// Room-tone noise floor for this session, fed to every later step's detection.
     @ObservationIgnored private var roomFloor: Float?
+    /// Created once room tone completes (needs its profile + floor); grades every technique take live.
+    @ObservationIgnored private var liveGrader: LiveTakeGrader?
+    private(set) var liveCheck: LiveCheck = .idle
+    /// Measured (this session, real fixture): grading a packing `cores` take costs ~7-11s (denoise STFT
+    /// dominates, not fixed overhead — a short frc/rv `oneShotBody` take grades in ~1.5-3s). 15s clears
+    /// the worst observed case (10.7s, a 32s take) with real margin; a timeout still falls back to
+    /// accept, so a slow grade never blocks the session, only skips this take's live check.
+    private let liveGradeDeadlineSec = 15.0
+    /// Redo policy is app-catalog data, not engine or grader logic: only signal-defect gates trigger an
+    /// auto-redo. Person-dependent gates (off_technique/cadence_drift/outlier) are advisory-only —
+    /// auto-redoing a person against the bundled gold's spectrum/cadence would recreate the blind
+    /// retry loop that motivated this whole feature.
+    private let redoReasons: Set<String> = ["clipped", "length", "dropout", "low_snr", "merged_gulp"]
 
     /// First error to surface — a model-level start error, else a recorder write error.
     var displayError: String? { errorMessage ?? recorder.errorMessage }
@@ -71,6 +96,8 @@ final class EnrollModel {
         spectralDiagnostics = [:]
         roomToneFile = nil
         roomFloor = nil
+        liveGrader = nil
+        liveCheck = .idle
         stage = .roomTone
         errorMessage = nil
     }
@@ -90,6 +117,11 @@ final class EnrollModel {
                 onFinished: { [weak self] in
                     guard let self else { return }
                     self.roomFloor = self.recorder.lastNoiseFloorRMS
+                    if let dir = self.outputDir, let roomToneFile = self.roomToneFile {
+                        self.liveGrader = LiveTakeGrader(
+                            roomToneURL: dir.appendingPathComponent(roomToneFile), assetsDir: self.assetsDir
+                        )
+                    }
                     self.writeSessionManifest()   // captures.json now exists (room tone recorded)
                     self.stage = .technique(step: 0)
                 }
@@ -104,6 +136,7 @@ final class EnrollModel {
     func startStepCapture() {
         guard let dir = outputDir, let step = currentStep, !recorder.isRecording else { return }
         stopReference()  // never let demo playback bleed into the mic
+        liveCheck = .idle
         let stepIndex = currentStepIndex
         let slugByLabel = Dictionary(uniqueKeysWithValues: step.lanes.map { ($0.label, $0.slug) })
         do {
@@ -122,12 +155,67 @@ final class EnrollModel {
                     }
                     self.writeSessionManifest()   // persist after every segment so a quit/crash can't lose the run
                 },
-                onFinished: { [weak self] in self?.advance(fromStep: stepIndex) }
+                onFinished: { [weak self] in self?.advance(fromStep: stepIndex) },
+                onTakeReview: { [weak self] takeIndex, segments in
+                    await self?.reviewTake(takeIndex: takeIndex, segments: segments, step: step) ?? .accept
+                }
             )
             errorMessage = nil
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+
+    /// Grade every segment of a just-written take concurrently, racing the deadline. A timeout falls
+    /// back to accept — the offline build is authoritative and never skips a check, so a slow live
+    /// grade only costs this take its live signal, not correctness. Only signal-defect gates (see
+    /// `redoReasons`) trigger `.redo`; person-dependent gates are advisory-only.
+    private func reviewTake(
+        takeIndex: Int, segments: [(label: SegmentLabel, url: URL)], step: EnrollmentStep
+    ) async -> TakeReview {
+        guard let grader = liveGrader else {
+            liveCheck = .keptUnchecked(take: takeIndex)
+            return .accept
+        }
+        liveCheck = .checking(take: takeIndex)
+        let laneByLabel = Dictionary(uniqueKeysWithValues: step.lanes.map { ($0.label, $0) })
+
+        let verdicts: [LiveTakeGrader.TakeVerdict]? = await withTaskGroup(of: [LiveTakeGrader.TakeVerdict]?.self) { group in
+            group.addTask {
+                await withTaskGroup(of: LiveTakeGrader.TakeVerdict?.self) { laneGroup in
+                    for (label, url) in segments {
+                        guard let lane = laneByLabel[label] else { continue }
+                        laneGroup.addTask {
+                            await grader.grade(
+                                fileURL: url, role: lane.role, type: lane.type, reference: lane.reference,
+                                minSeconds: step.minSeconds, maxSeconds: step.maxSeconds
+                            )
+                        }
+                    }
+                    var results: [LiveTakeGrader.TakeVerdict] = []
+                    for await verdict in laneGroup { if let verdict { results.append(verdict) } }
+                    return results
+                }
+            }
+            group.addTask { [liveGradeDeadlineSec] in
+                try? await Task.sleep(nanoseconds: UInt64(liveGradeDeadlineSec * 1_000_000_000))
+                return nil
+            }
+            let first = await group.next() ?? nil
+            group.cancelAll()
+            return first
+        }
+
+        guard let verdicts else {
+            liveCheck = .keptUnchecked(take: takeIndex)
+            return .accept
+        }
+        if let worst = verdicts.first(where: { !$0.accept && redoReasons.contains($0.reason ?? "") }) {
+            liveCheck = .redoing(take: takeIndex, reason: worst.reason ?? "quality")
+            return .redo
+        }
+        liveCheck = .passed(take: takeIndex)
+        return .accept
     }
 
     /// Manual override: finalize the take in progress now.

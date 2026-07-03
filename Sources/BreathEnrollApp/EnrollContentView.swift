@@ -120,36 +120,71 @@ struct EnrollContentView: View {
     }
 
     @ViewBuilder private func captureStatus(_ step: EnrollmentStep) -> some View {
-        Text("Take \(min(model.recorder.takeIndex + 1, step.takes)) of \(step.takes)")
-            .font(.title3.weight(.medium).monospacedDigit())
-        Text(phaseLabel(step))
-            .font(.callout).foregroundStyle(.secondary)
-        levelMeter
-        EnrollWaveformView(peaks: model.recorder.wavePeaks)
-            .frame(maxWidth: 480, minHeight: 80, maxHeight: 100)
-        if step.detection == .cleanEvents || step.detection == .naturalRhythm {
-            let target = step.targetEvents.map { " / ~\($0)" } ?? ""
-            Text("\(model.recorder.eventCount)\(target) detected")
-                .font(.callout.monospacedDigit())
-            if let target = step.targetEvents, model.recorder.eventCount >= target {
-                Text("Got all \(target) — wrapping up").font(.caption).foregroundStyle(.green)
-            } else if model.recorder.gapTooClose {
-                Text("Leave a clearer gap between events").font(.caption).foregroundStyle(.orange)
+        if model.recorder.phase == .reviewing {
+            ProgressView()
+            Text("Checking take \(model.recorder.takeIndex + 1)…")
+                .font(.callout).foregroundStyle(.secondary)
+        } else {
+            Text("Take \(min(model.recorder.takeIndex + 1, step.takes)) of \(step.takes)")
+                .font(.title3.weight(.medium).monospacedDigit())
+            Text(phaseLabel(step))
+                .font(.callout).foregroundStyle(.secondary)
+            levelMeter
+            EnrollWaveformView(peaks: model.recorder.wavePeaks)
+                .frame(maxWidth: 480, minHeight: 80, maxHeight: 100)
+            if step.detection == .cleanEvents || step.detection == .naturalRhythm {
+                let target = step.targetEvents.map { " / ~\($0)" } ?? ""
+                Text("\(model.recorder.eventCount)\(target) detected")
+                    .font(.callout.monospacedDigit())
+                if let target = step.targetEvents, model.recorder.eventCount >= target {
+                    Text("Got all \(target) — wrapping up").font(.caption).foregroundStyle(.green)
+                } else if model.recorder.gapTooClose {
+                    Text("Leave a clearer gap between events").font(.caption).foregroundStyle(.orange)
+                }
+            }
+            if let issue = model.recorder.lastTakeIssue {
+                Text("Retaking — \(retakeReason(issue))")
+                    .font(.caption).foregroundStyle(.orange)
             }
         }
-        if let issue = model.recorder.lastTakeIssue {
-            Text("Retaking — \(retakeReason(issue))")
-                .font(.caption).foregroundStyle(.orange)
-        }
+        liveCheckBadge
         HStack(spacing: 16) {
             Button { model.stopCurrentTake() } label: {
                 Label("Stop take", systemImage: "stop.circle")
             }
+            .disabled(model.recorder.phase == .reviewing)
             Button { model.redoCurrentTake() } label: {
                 Label("Redo", systemImage: "arrow.counterclockwise")
             }
         }
         .controlSize(.large)
+    }
+
+    /// Live per-take grading verdict, once available — a quick "kept/redoing/unchecked" signal
+    /// separate from `lastTakeIssue`'s structural retake messaging above.
+    @ViewBuilder private var liveCheckBadge: some View {
+        switch model.liveCheck {
+        case .idle, .checking:
+            EmptyView()
+        case .passed:
+            Text("Live check passed").font(.caption).foregroundStyle(.green)
+        case let .redoing(_, reason):
+            Text("That one \(friendlyLiveCheckReason(reason)) — going again")
+                .font(.caption).foregroundStyle(.orange)
+        case .keptUnchecked:
+            Text("Kept as-is — the final build re-checks").font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    private func friendlyLiveCheckReason(_ reason: String) -> String {
+        switch reason {
+        case "clipped": return "clipped"
+        case "length": return "was the wrong length"
+        case "dropout": return "had a mid-breath dropout"
+        case "low_snr": return "was too quiet against the room"
+        case "merged_gulp": return "had gulps too close together"
+        default: return "didn't pass the quality check"
+        }
     }
 
     /// Phase-specific status text, including a running per-phase timer — replaces the old static
