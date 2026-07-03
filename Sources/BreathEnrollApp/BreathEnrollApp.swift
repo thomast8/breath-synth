@@ -9,6 +9,14 @@ import SwiftUI
 /// palette and carries the microphone entitlement, build with `scripts/make-enroll-app.sh`.
 @main
 struct BreathEnrollApp: App {
+    init() {
+        // TEMPORARY (Phase 4 hardware verification diagnostics): stdout is fully-buffered when piped
+        // to a file/log rather than a TTY, so print() calls never surface until process exit. Force
+        // line buffering so the [PHASE4]/[PHASE4-CAL] diagnostic prints appear in real time. Remove
+        // with the prints.
+        setvbuf(stdout, nil, _IOLBF, 0)
+    }
+
     var body: some Scene {
         WindowGroup("Breath Enroll") {
             EnrollContentView()

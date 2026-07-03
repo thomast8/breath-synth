@@ -13,6 +13,12 @@ struct EnrollContentView: View {
             Divider()
             content
             Spacer(minLength: 0)
+            if let notice = model.stepInsertedNotice {
+                Text(notice)
+                    .foregroundStyle(.orange)
+                    .font(.callout)
+                    .multilineTextAlignment(.center)
+            }
             if let error = model.displayError {
                 Text(error)
                     .foregroundStyle(.red)
@@ -32,6 +38,16 @@ struct EnrollContentView: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             Spacer()
+            if model.outputDir != nil {
+                Menu("Jump to step") {
+                    ForEach(Array(model.steps.enumerated()), id: \.offset) { index, step in
+                        Button(step.title) { model.jumpToStep(index) }
+                    }
+                }
+                .font(.caption)
+                .disabled(model.recorder.isRecording)
+                .help("Skip straight to any technique step — useful for testing one step at a time.")
+            }
             if case .technique = model.stage {
                 Button("Finish & save now") { model.finishEarly() }
                     .font(.caption)
@@ -63,23 +79,61 @@ struct EnrollContentView: View {
         .frame(maxWidth: .infinity)
     }
 
-    private var roomToneView: some View {
-        VStack(spacing: 16) {
-            Text("Step 1 — Room tone").font(.headline)
-            Text("Sit still and stay silent. Recording stops itself after "
-                 + "\(Int(EnrollmentScript.roomToneSeconds)) seconds. "
-                 + "This captures your room's background to grade recording quality (never reused between sessions).")
-                .multilineTextAlignment(.center).foregroundStyle(.secondary)
-            levelMeter
-            if model.recorder.isRecording {
-                let left = max(0, EnrollmentScript.roomToneSeconds - model.recorder.elapsed)
-                Text("Recording room tone… \(fmt(left)) s left").font(.callout.monospacedDigit())
-            } else {
-                Button { model.startRoomTone() } label: {
-                    Label("Start room tone", systemImage: "record.circle")
+    @ViewBuilder private var roomToneView: some View {
+        if model.roomToneReady {
+            roomToneResultView
+        } else {
+            VStack(spacing: 16) {
+                Text("Step 1 — Room tone").font(.headline)
+                Text("Sit still and stay silent. Recording stops itself after "
+                     + "\(Int(EnrollmentScript.roomToneSeconds)) seconds. "
+                     + "This captures your room's background to grade recording quality (never reused between sessions).")
+                    .multilineTextAlignment(.center).foregroundStyle(.secondary)
+                levelMeter
+                if model.recorder.isRecording {
+                    let left = max(0, EnrollmentScript.roomToneSeconds - model.recorder.elapsed)
+                    Text("Recording room tone… \(fmt(left)) s left").font(.callout.monospacedDigit())
+                } else {
+                    Button { model.startRoomTone() } label: {
+                        Label("Start room tone", systemImage: "record.circle")
+                    }
+                    .controlSize(.large).tint(.red)
                 }
-                .controlSize(.large).tint(.red)
             }
+            .frame(maxWidth: .infinity)
+        }
+    }
+
+    /// Confirm-or-redo screen shown once room tone completes — a loud reading scales every later
+    /// step's activity threshold up, silently degrading onset/event detection, so it's worth a look
+    /// before committing to technique capture.
+    private var roomToneResultView: some View {
+        VStack(spacing: 16) {
+            Text("Room tone captured").font(.headline)
+            if let dbfs = model.roomToneDbfs {
+                Text(String(format: "%.0f dBFS", dbfs))
+                    .font(.title2.monospacedDigit())
+                    .foregroundStyle(model.roomTooNoisy ? .orange : .green)
+            }
+            if model.roomTooNoisy {
+                Text("This room reads louder than usual — a quieter space makes gentle breaths "
+                     + "(especially calm breathing) much easier for the app to detect. "
+                     + "You can continue anyway, but consider finding a quieter spot first.")
+                    .multilineTextAlignment(.center).foregroundStyle(.orange).padding(.horizontal)
+            } else {
+                Text("Quiet enough — good to go.")
+                    .foregroundStyle(.secondary)
+            }
+            HStack(spacing: 16) {
+                Button { model.redoRoomTone() } label: {
+                    Label("Redo room tone", systemImage: "arrow.counterclockwise")
+                }
+                Button { model.confirmRoomTone() } label: {
+                    Label("Continue", systemImage: "arrow.right.circle")
+                }
+                .tint(model.roomTooNoisy ? .orange : .accentColor)
+            }
+            .controlSize(.large)
         }
         .frame(maxWidth: .infinity)
     }
@@ -105,6 +159,10 @@ struct EnrollContentView: View {
     @ViewBuilder private func armControls(_ step: EnrollmentStep) -> some View {
         Text("\(step.takes) take\(step.takes == 1 ? "" : "s") · ~\(fmt(step.minSeconds))–\(fmt(step.maxSeconds)) s each")
             .font(.caption).foregroundStyle(.tertiary)
+        if step.detection == .cycle || step.detection == .finalPhase {
+            Text("Each phase must last at least \(fmt(step.minSeconds))s to count.")
+                .font(.caption2).foregroundStyle(.tertiary)
+        }
         if step.demoReference != nil {
             Button {
                 model.isPlayingReference ? model.stopReference() : model.playReference()
@@ -129,6 +187,7 @@ struct EnrollContentView: View {
                 .font(.title3.weight(.medium).monospacedDigit())
             Text(phaseLabel(step))
                 .font(.callout).foregroundStyle(.secondary)
+            phaseFloorHint(step)
             levelMeter
             EnrollWaveformView(peaks: model.recorder.wavePeaks)
                 .frame(maxWidth: 480, minHeight: 80, maxHeight: 100)
@@ -152,10 +211,16 @@ struct EnrollContentView: View {
             Button { model.stopCurrentTake() } label: {
                 Label("Stop take", systemImage: "stop.circle")
             }
-            .disabled(model.recorder.phase == .reviewing)
+            // Before onset, there's nothing captured yet to finalize — flush() is a no-op in that
+            // state, which read as the button silently doing nothing. Only enable it once there's
+            // actually something to stop.
+            .disabled(model.recorder.phase != .capturing)
+            .help("Finalize this take right now with whatever's been captured so far, then move on.")
             Button { model.redoCurrentTake() } label: {
-                Label("Redo", systemImage: "arrow.counterclockwise")
+                Label("Redo this take", systemImage: "arrow.counterclockwise")
             }
+            .help("Discard this take-in-progress and start listening again for the same take — "
+                  + "doesn't touch any earlier take you've already completed.")
         }
         .controlSize(.large)
     }
@@ -187,18 +252,60 @@ struct EnrollContentView: View {
         }
     }
 
+    /// Live readout of the current phase's elapsed time against the step's structural floor
+    /// (`minSeconds` — each phase of a `cycle`, the kept phase of a `finalPhase`) — the number a
+    /// rejected take's "too short" message refers to, shown while it still matters instead of after.
+    @ViewBuilder private func phaseFloorHint(_ step: EnrollmentStep) -> some View {
+        let phase = model.recorder.livePhase
+        let appliesNow = (step.detection == .cycle && (phase == .inhale || phase == .exhale))
+            || (step.detection == .finalPhase && phase == .exhale)
+        if appliesNow {
+            let elapsed = model.recorder.phaseElapsed
+            let floor = step.minSeconds
+            let met = elapsed >= floor
+            Text(met ? "✓ long enough (≥\(fmt(floor))s)" : "\(fmt(elapsed))s so far — needs ≥\(fmt(floor))s")
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(met ? .green : .secondary)
+        } else if step.detection == .naturalRhythm && (phase == .capturing || phase == .inhale || phase == .exhale) {
+            // No fixed target count by design (it's continuous cadence, not discrete events), so the
+            // only "are we there yet" signal worth showing is the whole-take length floor/ceiling —
+            // the same band the live grader's length check uses (`step.minSeconds`/`maxSeconds`).
+            // `.inhale`/`.exhale` here means a *paired* style (recovery) — its sip alternator reports
+            // those instead of `.capturing`, but the same length band still applies.
+            // `phaseElapsed` (not `elapsed`) — it's relative to the confirmed onset, so it correctly
+            // excludes the post-arm blackout window instead of counting that dead time as capture time.
+            let elapsed = model.recorder.phaseElapsed
+            let floor = step.minSeconds
+            let met = elapsed >= floor
+            Text(met ? "✓ long enough (≥\(fmt(floor))s) — wrap up whenever"
+                     : "\(fmt(elapsed))s so far — needs ≥\(fmt(floor))s")
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(met ? .green : .secondary)
+        }
+    }
+
     /// Phase-specific status text, including a running per-phase timer — replaces the old static
     /// "Capturing… (inhale, pause, exhale)" that never changed for the whole take.
     private func phaseLabel(_ step: EnrollmentStep) -> String {
         let elapsed = fmt(model.recorder.phaseElapsed)
         switch model.recorder.livePhase {
         case .waiting:
-            return step.detection == .cycle ? "Ready — inhale when you are" : "Ready — begin when you are"
+            if model.recorder.blackoutRemaining > 0 {
+                // This window suppresses onset AND (Problem 2a) samples the pre-onset ambient floor —
+                // "Breathe now" read as an instruction to act, when it's actually settle-and-measure time.
+                return "Settling & calibrating… \(fmt(model.recorder.blackoutRemaining))s before it starts listening"
+            }
+            let isPairedRecovery = step.lanes.first?.style == "recovery"
+            return (step.detection == .cycle || isPairedRecovery) ? "Ready — inhale when you are" : "Ready — begin when you are"
         case .inhale:
+            // A paired counted style (recovery's hook breath) reports .inhale/.exhale from its sip
+            // alternator, not a real timed phase like cycle/finalPhase — no elapsed timer for those.
+            if step.detection == .cleanEvents || step.detection == .naturalRhythm { return "Inhale…" }
             return "Inhaling… \(elapsed)s"
         case .midPause:
             return "Pause — now exhale"
         case .exhale:
+            if step.detection == .cleanEvents || step.detection == .naturalRhythm { return "Exhale…" }
             return "Exhaling… \(elapsed)s"
         case .capturing:
             return "Capturing… \(elapsed)s"
@@ -235,10 +342,18 @@ struct EnrollContentView: View {
                 RoundedRectangle(cornerRadius: 4).fill(.quaternary)
                 RoundedRectangle(cornerRadius: 4)
                     .fill(model.recorder.isRecording ? Color.green : Color.gray)
-                    .frame(width: geo.size.width * CGFloat(min(1, model.recorder.level * 4)))
+                    .frame(width: geo.size.width * CGFloat(meterFraction))
             }
         }
         .frame(maxWidth: 360, maxHeight: 10)
+    }
+
+    /// Scales the meter to "how close to the take's onset/activity gate" rather than a fixed absolute
+    /// amplitude — a fixed multiplier reads as nearly empty for gentle calm breathing and fine for a
+    /// loud forced exhale, since the two differ by an order of magnitude in raw level.
+    private var meterFraction: Double {
+        let threshold = max(Double(model.recorder.activityThreshold), 0.004)
+        return min(1, Double(model.recorder.level) / (threshold * 2.5))
     }
 
     private func fmt(_ value: Double) -> String { String(format: "%.1f", value) }

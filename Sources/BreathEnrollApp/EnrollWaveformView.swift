@@ -23,12 +23,17 @@ struct EnrollWaveformView: View {
 
             let drawn = Self.downsample(peaks, to: Self.maxColumns)
             guard !drawn.isEmpty else { return }
+            // Auto-gain to the take's own observed peak: a fixed ±1.0 scale (right for a loud forced
+            // exhale) draws a genuinely gentle calm breath as a near-flat line, since its raw amplitude
+            // sits an order of magnitude lower. Filling to 85% of half-height keeps a little headroom.
+            let peakAmplitude = drawn.reduce(Float(0)) { max($0, max(abs($1.min), abs($1.max))) }
+            let gain: Float = peakAmplitude > 0.0005 ? 0.85 / peakAmplitude : 1
             let columnWidth = size.width / CGFloat(drawn.count)
             var wave = Path()
             for (index, peak) in drawn.enumerated() {
                 let x = CGFloat(index) * columnWidth + columnWidth / 2
-                let top = midY - CGFloat(max(peak.max, 0.00001)) * midY
-                let bottom = midY - CGFloat(min(peak.min, -0.00001)) * midY
+                let top = midY - CGFloat(max(peak.max * gain, 0.00001)) * midY
+                let bottom = midY - CGFloat(min(peak.min * gain, -0.00001)) * midY
                 wave.move(to: CGPoint(x: x, y: top))
                 wave.addLine(to: CGPoint(x: x, y: bottom))
             }

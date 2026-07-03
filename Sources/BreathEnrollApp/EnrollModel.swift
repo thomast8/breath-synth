@@ -32,7 +32,9 @@ final class EnrollModel {
         case keptUnchecked(take: Int)
     }
 
-    let steps = EnrollmentScript.steps
+    /// Mutable (not `let`): the packing-core-isolation check can insert `packingSeparatedFallback`
+    /// mid-session — `advance(fromStep:)`'s `step + 1 < steps.count` already tolerates a growing array.
+    private(set) var steps = EnrollmentScript.steps
     /// The engine recorder — the view binds to its published state (phase, level, takeIndex, count).
     let recorder = BreathRecorder()
 
@@ -48,13 +50,31 @@ final class EnrollModel {
 
     /// slug → captured filenames (in order).
     private(set) var captured: [String: [String]] = [:]
+    /// Inter-event gaps (frames) accumulated across the current step's takes so far — reset per step in
+    /// `startStepCapture()`. Used only by `checkPackingCoreIsolation` right now.
+    @ObservationIgnored private var currentStepIntervalsFrames: [Int] = []
+    /// Set once, right after `packingSeparatedFallback` gets inserted — the UI shows it and clears it.
+    private(set) var stepInsertedNotice: String?
     /// Take filename → that take's spectral-gate candidate diagnostics (only takes with a
     /// `spectralGate` profile populate this — see `writeSessionManifest`'s sidecar write). Field data
     /// for future threshold re-tuning; not read by the current build pipeline.
     private(set) var spectralDiagnostics: [String: [CaptureAnalyzer.SpectralCandidate]] = [:]
     private(set) var roomToneFile: String?
-    /// Room-tone noise floor for this session, fed to every later step's detection.
-    @ObservationIgnored private var roomFloor: Float?
+    /// Room-tone noise floor for this session, fed to every later step's detection. Not
+    /// `@ObservationIgnored` (unlike most engine-mirroring state here) — `roomTooNoisy`/`roomToneDbfs`
+    /// are computed from it and the confirm-or-redo screen needs to react when it's set.
+    private var roomFloor: Float?
+    /// Seeded from `roomFloor` once room tone completes, then refreshed after every step from the
+    /// recorder's own rolling floor (`BreathRecorder.currentNoiseFloorRMS`) — each take's own pre-onset
+    /// ambient blends in over the session instead of freezing at the one upfront reading.
+    @ObservationIgnored private var rollingFloor: Float?
+    /// `true` once room tone has been recorded and is awaiting confirm-or-redo (stays on `.roomTone`
+    /// stage instead of auto-advancing) — a loud reading scales every later step's activity threshold
+    /// up, silently degrading onset/event detection, so it's worth a look before technique capture.
+    private(set) var roomToneReady = false
+    var roomTooNoisy: Bool { roomFloor.map(CaptureAnalyzer.isRoomTooNoisy) ?? false }
+    /// The room-tone reading in dBFS, for display (`nil` before room tone completes).
+    var roomToneDbfs: Double? { roomFloor.map { $0 > 0 ? 20 * log10(Double($0)) : -.infinity } }
     /// Created once room tone completes (needs its profile + floor); grades every technique take live.
     @ObservationIgnored private var liveGrader: LiveTakeGrader?
     private(set) var liveCheck: LiveCheck = .idle
@@ -96,6 +116,8 @@ final class EnrollModel {
         spectralDiagnostics = [:]
         roomToneFile = nil
         roomFloor = nil
+        rollingFloor = nil
+        roomToneReady = false
         liveGrader = nil
         liveCheck = .idle
         stage = .roomTone
@@ -104,7 +126,10 @@ final class EnrollModel {
 
     // MARK: - Capture
 
-    /// Capture the mandatory room tone (fixed 5 s, auto-stop), then advance to the first technique.
+    /// Capture the mandatory room tone (fixed 5 s, auto-stop). Lands on a confirm-or-redo screen
+    /// (`roomToneReady`) rather than auto-advancing — a loud room scales every later step's activity
+    /// threshold up, so it's worth surfacing before technique capture rather than only discovering it
+    /// through mysteriously-unresponsive onset detection.
     func startRoomTone() {
         guard let dir = outputDir, !recorder.isRecording else { return }
         do {
@@ -122,8 +147,8 @@ final class EnrollModel {
                             roomToneURL: dir.appendingPathComponent(roomToneFile), assetsDir: self.assetsDir
                         )
                     }
+                    self.roomToneReady = true
                     self.writeSessionManifest()   // captures.json now exists (room tone recorded)
-                    self.stage = .technique(step: 0)
                 }
             )
             errorMessage = nil
@@ -132,24 +157,46 @@ final class EnrollModel {
         }
     }
 
+    /// Accept the room-tone reading (whether or not it flagged as noisy) and advance to technique capture.
+    func confirmRoomTone() {
+        guard roomToneReady else { return }
+        rollingFloor = roomFloor
+        stage = .technique(step: 0)
+    }
+
+    /// Discard the room-tone reading and re-listen; `startRoomTone()` overwrites `room_tone.caf` in
+    /// place (same deterministic filename), so no orphan or duplicate `captures.json` entry results.
+    func redoRoomTone() {
+        roomToneReady = false
+        roomToneFile = nil
+        roomFloor = nil
+        liveGrader = nil
+    }
+
     /// Begin auto-capturing the current technique's N takes (self-paced; auto-advances + auto-stops).
     func startStepCapture() {
         guard let dir = outputDir, let step = currentStep, !recorder.isRecording else { return }
         stopReference()  // never let demo playback bleed into the mic
         liveCheck = .idle
+        stepInsertedNotice = nil
+        currentStepIntervalsFrames = []
         let stepIndex = currentStepIndex
-        let slugByLabel = Dictionary(uniqueKeysWithValues: step.lanes.map { ($0.label, $0.slug) })
+        // A hybrid step (packing) has multiple lanes sharing one `label` — the same captured file
+        // serving both a "cores" and a "gaps" role — so this can't be `uniqueKeysWithValues`; every
+        // lane sharing a label points at the same physical file, so the first slug is as good as any.
+        let slugByLabel = Dictionary(step.lanes.map { ($0.label, $0.slug) }, uniquingKeysWith: { first, _ in first })
         do {
             try recorder.start(
                 takes: step.takes,
                 detection: detection(for: step),
-                noiseFloorRMS: roomFloor,
+                noiseFloorRMS: rollingFloor,
                 fileURL: { i, label in
                     dir.appendingPathComponent("\(slugByLabel[label] ?? "take")_\(i + 1).caf")
                 },
-                onSegment: { [weak self] _, label, url, _, spectralCandidates in
+                onSegment: { [weak self] _, label, url, intervalsFrames, spectralCandidates in
                     guard let self, let slug = slugByLabel[label] else { return }
                     self.captured[slug, default: []].append(url.lastPathComponent)
+                    self.currentStepIntervalsFrames.append(contentsOf: intervalsFrames)
                     if !spectralCandidates.isEmpty {
                         self.spectralDiagnostics[url.lastPathComponent] = spectralCandidates
                     }
@@ -173,23 +220,29 @@ final class EnrollModel {
     private func reviewTake(
         takeIndex: Int, segments: [(label: SegmentLabel, url: URL)], step: EnrollmentStep
     ) async -> TakeReview {
+        print("[PHASE4] reviewTake start: take=\(takeIndex) step=\(step.title) segments=\(segments.map { "\($0.label.rawValue):\($0.url.lastPathComponent)" })")
         guard let grader = liveGrader else {
+            print("[PHASE4] no liveGrader — keptUnchecked")
             liveCheck = .keptUnchecked(take: takeIndex)
             return .accept
         }
         liveCheck = .checking(take: takeIndex)
-        let laneByLabel = Dictionary(uniqueKeysWithValues: step.lanes.map { ($0.label, $0) })
+        // A hybrid step (packing) has multiple lanes sharing one `label` — the same captured file
+        // graded once per role ("cores" and "gaps") — so this groups rather than assumes uniqueness.
+        let lanesByLabel = Dictionary(grouping: step.lanes, by: \.label)
+        let reviewStart = DispatchTime.now()
 
         let verdicts: [LiveTakeGrader.TakeVerdict]? = await withTaskGroup(of: [LiveTakeGrader.TakeVerdict]?.self) { group in
             group.addTask {
                 await withTaskGroup(of: LiveTakeGrader.TakeVerdict?.self) { laneGroup in
                     for (label, url) in segments {
-                        guard let lane = laneByLabel[label] else { continue }
-                        laneGroup.addTask {
-                            await grader.grade(
-                                fileURL: url, style: lane.style, role: lane.role, type: lane.type,
-                                reference: lane.reference, minSeconds: step.minSeconds, maxSeconds: step.maxSeconds
-                            )
+                        for lane in lanesByLabel[label] ?? [] {
+                            laneGroup.addTask {
+                                await grader.grade(
+                                    fileURL: url, style: lane.style, role: lane.role, type: lane.type,
+                                    reference: lane.reference, minSeconds: step.minSeconds, maxSeconds: step.maxSeconds
+                                )
+                            }
                         }
                     }
                     var results: [LiveTakeGrader.TakeVerdict] = []
@@ -206,14 +259,19 @@ final class EnrollModel {
             return first
         }
 
+        let elapsedSec = Double(DispatchTime.now().uptimeNanoseconds - reviewStart.uptimeNanoseconds) / 1_000_000_000
         guard let verdicts else {
+            print("[PHASE4] TIMEOUT after \(String(format: "%.2f", elapsedSec))s (deadline=\(liveGradeDeadlineSec)s) — keptUnchecked, take=\(takeIndex)")
             liveCheck = .keptUnchecked(take: takeIndex)
             return .accept
         }
+        print("[PHASE4] graded in \(String(format: "%.2f", elapsedSec))s — verdicts: \(verdicts.map { "accept=\($0.accept) reason=\($0.reason ?? "-") advisory=\($0.advisory) frags=\($0.fragmentsAccepted)/\($0.fragmentsTotal)" })")
         if let worst = verdicts.first(where: { !$0.accept && redoReasons.contains($0.reason ?? "") }) {
+            print("[PHASE4] DECISION: redo, take=\(takeIndex), reason=\(worst.reason ?? "quality")")
             liveCheck = .redoing(take: takeIndex, reason: worst.reason ?? "quality")
             return .redo
         }
+        print("[PHASE4] DECISION: accept (passed), take=\(takeIndex)")
         liveCheck = .passed(take: takeIndex)
         return .accept
     }
@@ -251,13 +309,20 @@ final class EnrollModel {
         case .cleanEvents:
             // Trailing silence must exceed the deliberate inter-event gap (events are well-separated),
             // so a slow gap doesn't end the take after the first event — only the real done-pause does.
+            // postArmBlackoutSec: gives the between-takes exhale/re-inhale (packing/recovery have no
+            // discarded-lead-phase structure like cycle/finalPhase) a window to happen without bleeding
+            // into the next take as onset noise. pairedEvents: recovery's hook breath is a strict
+            // inhale-sip/exhale-sip alternation (see `CaptureDetection.cleanEvents`'s doc); packing's
+            // single-click gulp has no such structure.
             return .cleanEvents(minGapSec: 0.35, maxTakeSec: step.maxSeconds + 8, trailingSilenceSec: 3.0,
                                 eventMinDistSec: eventMinDistSec(for: step), targetEvents: step.targetEvents,
-                                spectralGate: spectralGateProfile(for: step))
+                                spectralGate: spectralGateProfile(for: step), postArmBlackoutSec: 5.0,
+                                pairedEvents: step.lanes.first?.style == "recovery")
         case .naturalRhythm:
             return .naturalRhythm(minActiveSec: 1.0, maxTakeSec: step.maxSeconds + 5, trailingSilenceSec: 1.0,
                                   eventMinDistSec: eventMinDistSec(for: step),
-                                  spectralGate: spectralGateProfile(for: step))
+                                  spectralGate: spectralGateProfile(for: step), postArmBlackoutSec: 5.0,
+                                  pairedEvents: step.lanes.first?.style == "recovery")
         }
     }
 
@@ -275,7 +340,40 @@ final class EnrollModel {
         step.lanes.first?.style == "recovery" ? .hook : .gulp
     }
 
+    /// Dev/testing shortcut: jump straight to any technique step instead of walking the whole script.
+    /// Room tone need not have run yet — the analyzer just falls back to `absActivityFloor` — but if it
+    /// has, `roomFloor`/`liveGrader` (both already session-scoped, not step-scoped) carry over untouched.
+    func jumpToStep(_ index: Int) {
+        guard steps.indices.contains(index), !recorder.isRecording else { return }
+        stopReference()
+        liveCheck = .idle
+        stage = .technique(step: index)
+    }
+
+    /// Gulps closer together than this can't isolate cleanly (`UnitExtractor.coreRanges`'s fixed
+    /// `[-0.08s, +0.35s]` window around each event bleeds into a neighbor closer than 0.43s); a small
+    /// margin above that keeps this a "clearly fine" bar rather than a razor's-edge one.
+    private static let packingCoreIsolationSec = 0.45
+
+    /// After "Packing" (natural rhythm) finishes, checks whether its own gulps were spaced widely enough
+    /// to double as clean cores (see PR #11's real-data finding: natural packing cadence usually clears
+    /// this, unlike recovery's reliably-tighter hook cadence). If not, inserts `packingSeparatedFallback`
+    /// right after this step instead of assuming every session needs it up front.
+    private func checkPackingCoreIsolation(justCompletedStepIndex index: Int) {
+        guard steps.indices.contains(index),
+              steps[index].lanes.contains(where: { $0.slug == "packing_cadence" }) else { return }
+        defer { currentStepIntervalsFrames = [] }
+        guard let minGapFrames = currentStepIntervalsFrames.min() else { return }
+        let minGapSec = Double(minGapFrames) / recorder.sampleRate
+        guard minGapSec < Self.packingCoreIsolationSec else { return }
+        steps.insert(EnrollmentScript.packingSeparatedFallback, at: index + 1)
+        stepInsertedNotice = "Your natural packing rhythm ran a bit tight (\(String(format: "%.2f", minGapSec))s "
+            + "between some gulps) for clean isolated samples, so a quick separated round got added next."
+    }
+
     private func advance(fromStep step: Int) {
+        rollingFloor = recorder.currentNoiseFloorRMS ?? rollingFloor
+        checkPackingCoreIsolation(justCompletedStepIndex: step)
         if step + 1 < steps.count {
             stage = .technique(step: step + 1)
         } else {
