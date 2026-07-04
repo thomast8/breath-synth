@@ -31,3 +31,6 @@ Assets/breaths/*.prepared.wav
 # Local secrets — API keys come from the environment, never committed
 .env
 *.local
+
+# Playwright MCP debug artifacts (this session's browser-testing tool output)
+.playwright-mcp/
