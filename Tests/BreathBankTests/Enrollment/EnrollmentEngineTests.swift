@@ -181,12 +181,14 @@ struct EnrollmentEngineTests {
         await consumer.value  // the stream's `finish()` (on session completion) ends the for-await loop
 
         let events = await collector.events
-        #expect(events.count == 4, "\(events)")
-        guard events.count == 4 else { return }
+        #expect(events.count == 6, "\(events)")
+        guard events.count == 6 else { return }
         #expect(events[0] == .takeVerdict(takeIndex: 0, check: .keptUnchecked(take: 0)))
-        #expect(events[1] == .stepComplete(nextStepIndex: 1, insertedFallbackNotice: nil))
-        #expect(events[2] == .takeVerdict(takeIndex: 0, check: .keptUnchecked(take: 0)))
-        #expect(events[3] == .sessionFinished)
+        #expect(events[1] == .segmentWritten(takeIndex: 0, laneSlug: "stepA", filename: "stepA_1.wav"))
+        #expect(events[2] == .stepComplete(nextStepIndex: 1, insertedFallbackNotice: nil))
+        #expect(events[3] == .takeVerdict(takeIndex: 0, check: .keptUnchecked(take: 0)))
+        #expect(events[4] == .segmentWritten(takeIndex: 0, laneSlug: "stepB", filename: "stepB_1.wav"))
+        #expect(events[5] == .sessionFinished)
     }
 
     // MARK: Packing core-isolation fallback insertion

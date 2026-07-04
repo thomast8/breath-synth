@@ -34,6 +34,10 @@ public actor EnrollmentEngine {
     /// `TakeCaptureEngine`, refreshed inside `feed()`, and are fine to poll at a fixed rate instead).
     public enum Event: Sendable, Equatable {
         case roomToneReady(filename: String)
+        /// One written segment (a `CaptureLane`'s file for this take) — `laneSlug` resolves against
+        /// `currentStep`'s lanes for style/type/role/reference/renderMode. Fires once per lane sharing a
+        /// take (a hybrid step like packing shares one physical file across two lanes/roles).
+        case segmentWritten(takeIndex: Int, laneSlug: String, filename: String)
         case takeVerdict(takeIndex: Int, check: LiveCheck)
         case stepComplete(nextStepIndex: Int, insertedFallbackNotice: String?)
         case sessionFinished
@@ -150,11 +154,11 @@ public actor EnrollmentEngine {
             fileURL: { i, label in
                 dir.appendingPathComponent("\(slugByLabel[label] ?? "take")_\(i + 1).wav")
             },
-            onSegment: { [weak self] _, label, url, intervalsFrames, spectralCandidates in
+            onSegment: { [weak self] takeIndex, label, url, intervalsFrames, spectralCandidates in
                 guard let self, let slug = slugByLabel[label] else { return }
                 await self.recordSegment(
-                    slug: slug, filename: url.lastPathComponent, intervalsFrames: intervalsFrames,
-                    spectralCandidates: spectralCandidates)
+                    takeIndex: takeIndex, slug: slug, filename: url.lastPathComponent,
+                    intervalsFrames: intervalsFrames, spectralCandidates: spectralCandidates)
             },
             onFinished: { [weak self] in await self?.advance(fromStep: stepIndex) },
             onTakeReview: { [weak self] takeIndex, segments in
@@ -169,7 +173,7 @@ public actor EnrollmentEngine {
     /// `onSegment`'s persistence tail — files a captured segment and writes `captures.json` after every
     /// one so a quit/crash can't lose the run, exactly as `EnrollModel` did synchronously.
     private func recordSegment(
-        slug: String, filename: String, intervalsFrames: [Int],
+        takeIndex: Int, slug: String, filename: String, intervalsFrames: [Int],
         spectralCandidates: [CaptureAnalyzer.SpectralCandidate]
     ) async {
         captured[slug, default: []].append(filename)
@@ -178,6 +182,7 @@ public actor EnrollmentEngine {
             spectralDiagnostics[filename] = spectralCandidates
         }
         writeSessionManifest()
+        eventContinuation?.yield(.segmentWritten(takeIndex: takeIndex, laneSlug: slug, filename: filename))
     }
 
     /// Pool a take's harvested quiet stretch toward the session's room-tone file, writing it once the
