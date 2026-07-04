@@ -8,7 +8,7 @@ timing/DSP primitive and technique/mode catalogs live in the CLI/app layer.
 ## Build / test / run
 
 ```sh
-swift build
+swift build                        # or: make build  →  dist/breath, dist/breath-debug
 swift test                         # needs the Xcode toolchain (swift-testing's runtime isn't wired up
                                    # under bare CommandLineTools); if `xcode-select -p` points at CLT,
                                    # prefix: DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test
