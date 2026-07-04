@@ -217,6 +217,74 @@ final class AppTests: XCTestCase {
         try await shutdown(app)
     }
 
+    /// Packing uploads the same recording twice under one shared laneSlug ("packing_cadence")
+    /// with two different roles ("cores"/"gaps") — regression test for the bug where the second
+    /// upload's redo-supersession query ignored `role` and wrongly marked the first upload
+    /// "redone" instead of recognizing it as a sibling projection of the same take.
+    func testPackingDualRoleUploadsAreBothKeptNotSuperseded() async throws {
+        let app = try await makeTestApp()
+
+        var participantID: UUID!
+        try await app.test(.POST, "api/participants", beforeRequest: { req async throws in
+            try req.content.encode(ParticipantCreateRequest(
+                inviteCode: "letmein", pseudonym: nil, experienceLevel: .novice, consentVersion: "v1"))
+        }, afterResponse: { res async throws in
+            participantID = try res.content.decode(Participant.self).id
+        })
+
+        var sessionID: UUID!
+        try await app.test(.POST, "api/sessions", beforeRequest: { req async throws in
+            try req.content.encode(SessionCreateRequest(
+                participantID: participantID, scriptVersion: "v1", sampleRate: 44_100,
+                userAgent: "XCTest", micConstraintsActual: nil))
+        }, afterResponse: { res async throws in
+            sessionID = try res.content.decode(EnrollSession.self).id
+        })
+
+        let roomTone = synthesizeWAV(seconds: 2, amplitude: 0.002)
+        try await app.test(.POST, "api/sessions/\(sessionID!)/room-tone", beforeRequest: { req async throws in
+            try req.content.encode(RoomToneUploadRequest(sampleRate: 44_100, audio: roomTone))
+        }, afterResponse: { res async throws in
+            XCTAssertEqual(res.status, .ok)
+        })
+
+        let take = synthesizeWAV(seconds: 10, amplitude: 0.15)
+        for role in ["gaps", "cores"] {
+            try await app.test(
+                .POST, "api/sessions/\(sessionID!)/takes",
+                beforeRequest: { req async throws in
+                    try req.content.encode(TakeUploadRequest(
+                        stepSlug: "packing", laneSlug: "packing_cadence", style: "packing",
+                        breathType: "inhale", renderMode: "counted", role: role, takeIndex: 1,
+                        reference: nil, minSeconds: 8, maxSeconds: 25, sampleRate: 44_100,
+                        clientMeta: nil, audio: take))
+                },
+                afterResponse: { res async throws in
+                    XCTAssertEqual(res.status, .ok)
+                })
+        }
+
+        let rows = try await Take.query(on: app.db)
+            .filter(\.$session.$id == sessionID)
+            .filter(\.$laneSlug == "packing_cadence")
+            .all()
+        XCTAssertEqual(rows.count, 2)
+        XCTAssertTrue(rows.allSatisfy { $0.status == .kept }, "neither role's row should be superseded by the other")
+        XCTAssertEqual(Set(rows.map(\.role)), Set(["gaps", "cores"]))
+
+        try await app.test(
+            .GET, "api/admin/sessions/\(sessionID!)/export",
+            beforeRequest: { req async throws in
+                req.headers.bearerAuthorization = .init(token: "admin-secret")
+            },
+            afterResponse: { res async throws in
+                XCTAssertEqual(res.status, .ok)
+                XCTAssertGreaterThan(Data(buffer: res.body).count, 0)
+            })
+
+        try await shutdown(app)
+    }
+
     func testSlugValidationRejectsTraversalAndSeparators() {
         XCTAssertTrue(SlugValidation.isSafe("calm_inhale"))
         XCTAssertTrue(SlugValidation.isSafe("frc_exhale-1"))

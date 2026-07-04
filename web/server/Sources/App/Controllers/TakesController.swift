@@ -60,12 +60,17 @@ struct TakesController: RouteCollection {
             reference: body.reference, minSeconds: body.minSeconds, maxSeconds: body.maxSeconds
         )
 
-        // Supersede any prior "kept" row at this exact (lane, take index) slot — never delete, just
-        // flip its status, so a redo history stays fully auditable (mirrors the native Fragment's
-        // keep-with-reason philosophy).
+        // Supersede any prior "kept" row at this exact (lane, role, take index) slot — never
+        // delete, just flip its status, so a redo history stays fully auditable (mirrors the
+        // native Fragment's keep-with-reason philosophy). `role` matters here, not just
+        // laneSlug+takeIndex: packing uploads the same recording twice under one shared laneSlug
+        // ("packing_cadence") but two different roles ("cores"/"gaps") — without this filter, the
+        // second upload would wrongly mark the first role's row as superseded instead of
+        // recognizing it as a sibling projection of the same take.
         if let previous = try await Take.query(on: req.db)
             .filter(\.$session.$id == sessionID)
             .filter(\.$laneSlug == body.laneSlug)
+            .filter(\.$role == body.role)
             .filter(\.$takeIndex == body.takeIndex)
             .filter(\.$status == .kept)
             .first()
