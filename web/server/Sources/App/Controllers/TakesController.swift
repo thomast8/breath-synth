@@ -21,6 +21,21 @@ struct TakesController: RouteCollection {
         }
         let body = try req.content.decode(TakeUploadRequest.self)
 
+        // Every one of these ends up as a path component (object storage key, and — for
+        // `reference` — an argument to LiveTakeGrader's own unvalidated
+        // `assetsDir.appendingPathComponent(reference)`), so a crafted client payload containing
+        // ".." or "/" must be rejected before it ever reaches a file-system call.
+        for candidate in [body.stepSlug, body.laneSlug] {
+            guard SlugValidation.isSafe(candidate) else {
+                throw Abort(.badRequest, reason: "Invalid slug")
+            }
+        }
+        if let reference = body.reference {
+            guard SlugValidation.isSafe(reference) else {
+                throw Abort(.badRequest, reason: "Invalid reference")
+            }
+        }
+
         guard body.audio.count <= Self.maxTakeBytes else {
             throw Abort(.payloadTooLarge, reason: "Take exceeds \(Self.maxTakeBytes) bytes")
         }

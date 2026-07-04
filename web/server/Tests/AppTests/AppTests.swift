@@ -161,6 +161,52 @@ final class AppTests: XCTestCase {
         try await shutdown(app)
     }
 
+    /// A crafted `laneSlug` containing ".." must never reach the object-storage key or a future
+    /// ZIP entry name — regression test for the path-traversal finding fixed in `SlugValidation`.
+    func testTakeUploadRejectsPathTraversalLaneSlug() async throws {
+        let app = try await makeTestApp()
+
+        var participantID: UUID!
+        try await app.test(.POST, "api/participants", beforeRequest: { req async throws in
+            try req.content.encode(ParticipantCreateRequest(
+                inviteCode: "letmein", pseudonym: nil, experienceLevel: .novice, consentVersion: "v1"))
+        }, afterResponse: { res async throws in
+            participantID = try res.content.decode(Participant.self).id
+        })
+
+        var sessionID: UUID!
+        try await app.test(.POST, "api/sessions", beforeRequest: { req async throws in
+            try req.content.encode(SessionCreateRequest(
+                participantID: participantID, scriptVersion: "v1", sampleRate: 44_100,
+                userAgent: "XCTest", micConstraintsActual: nil))
+        }, afterResponse: { res async throws in
+            sessionID = try res.content.decode(EnrollSession.self).id
+        })
+
+        let roomTone = synthesizeWAV(seconds: 2, amplitude: 0.002)
+        try await app.test(.POST, "api/sessions/\(sessionID!)/room-tone", beforeRequest: { req async throws in
+            try req.content.encode(RoomToneUploadRequest(sampleRate: 44_100, audio: roomTone))
+        }, afterResponse: { res async throws in
+            XCTAssertEqual(res.status, .ok)
+        })
+
+        let take = synthesizeWAV(seconds: 8, amplitude: 0.15)
+        try await app.test(
+            .POST, "api/sessions/\(sessionID!)/takes",
+            beforeRequest: { req async throws in
+                try req.content.encode(TakeUploadRequest(
+                    stepSlug: "calm", laneSlug: "../../../../tmp/evil", style: "calm",
+                    breathType: "inhale", renderMode: "textured", role: "texture", takeIndex: 1,
+                    reference: nil, minSeconds: 4, maxSeconds: 15, sampleRate: 44_100,
+                    clientMeta: nil, audio: take))
+            },
+            afterResponse: { res async throws in
+                XCTAssertEqual(res.status, .badRequest)
+            })
+
+        try await shutdown(app)
+    }
+
     func testAdminRoutesRejectWrongToken() async throws {
         let app = try await makeTestApp()
         try await app.test(.GET, "api/admin/sessions", beforeRequest: { req async throws in
@@ -169,6 +215,24 @@ final class AppTests: XCTestCase {
             XCTAssertEqual(res.status, .unauthorized)
         })
         try await shutdown(app)
+    }
+
+    func testSlugValidationRejectsTraversalAndSeparators() {
+        XCTAssertTrue(SlugValidation.isSafe("calm_inhale"))
+        XCTAssertTrue(SlugValidation.isSafe("frc_exhale-1"))
+        XCTAssertFalse(SlugValidation.isSafe(""))
+        XCTAssertFalse(SlugValidation.isSafe("../etc/passwd"))
+        XCTAssertFalse(SlugValidation.isSafe("a/b"))
+        XCTAssertFalse(SlugValidation.isSafe("a\\b"))
+        XCTAssertFalse(SlugValidation.isSafe(String(repeating: "a", count: 129)))
+    }
+
+    func testConstantTimeCompareMatchesRegularEquality() {
+        XCTAssertTrue(ConstantTimeCompare.equals("letmein", "letmein"))
+        XCTAssertFalse(ConstantTimeCompare.equals("letmein", "letmeIn"))
+        XCTAssertFalse(ConstantTimeCompare.equals("short", "muchlonger"))
+        XCTAssertFalse(ConstantTimeCompare.equals("", "a"))
+        XCTAssertTrue(ConstantTimeCompare.equals("", ""))
     }
 
     /// A 2-second, 44.1kHz mono 16-bit PCM WAV of pseudo-random noise at `amplitude` — a stand-in

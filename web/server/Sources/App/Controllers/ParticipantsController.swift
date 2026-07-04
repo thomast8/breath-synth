@@ -12,7 +12,7 @@ struct ParticipantsController: RouteCollection {
         let body = try req.content.decode(ParticipantCreateRequest.self)
 
         if let required = req.application.inviteCode {
-            guard let supplied = body.inviteCode, supplied == required else {
+            guard let supplied = body.inviteCode, ConstantTimeCompare.equals(supplied, required) else {
                 throw Abort(.unauthorized, reason: "Invalid or missing invite code")
             }
         }

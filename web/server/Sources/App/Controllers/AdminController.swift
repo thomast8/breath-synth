@@ -38,7 +38,8 @@ struct AdminAuthMiddleware: AsyncMiddleware {
         guard let required = req.application.adminToken else {
             return try await next.respond(to: req)
         }
-        guard let bearer = req.headers.bearerAuthorization, bearer.token == required else {
+        guard let bearer = req.headers.bearerAuthorization,
+              ConstantTimeCompare.equals(bearer.token, required) else {
             throw Abort(.unauthorized)
         }
         return try await next.respond(to: req)

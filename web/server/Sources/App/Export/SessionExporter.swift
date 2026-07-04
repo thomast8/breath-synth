@@ -44,6 +44,14 @@ enum SessionExporter {
 
         var entries: [ZipWriter.Entry] = [.init(name: "captures.json", data: capturesJSON)]
         for take in takes {
+            // Defense-in-depth against zip-slip: `laneSlug` was validated at intake
+            // (`TakesController`), but this re-checks independently rather than trusting that
+            // every write path into `takes` remembered to — an entry name like "../../etc/foo"
+            // would let a naive `unzip` on whoever downloads this archive write outside the
+            // target directory.
+            guard SlugValidation.isSafe(take.laneSlug) else {
+                throw Abort(.internalServerError, reason: "Unsafe lane slug in stored take: \(take.laneSlug)")
+            }
             let data = try await storage.get(key: take.objectKey)
             entries.append(.init(name: "\(take.laneSlug)_take\(take.takeIndex).wav", data: data))
         }
