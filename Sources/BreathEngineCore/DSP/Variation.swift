@@ -42,7 +42,7 @@ public enum Variation {
     }
 
     /// FNV-1a 64-bit hash over a string. Stable across runs (unlike `Hasher`).
-    static func fnv1a(_ string: String) -> UInt64 {
+    public static func fnv1a(_ string: String) -> UInt64 {
         var hash: UInt64 = 0xCBF2_9CE4_8422_2325
         for byte in string.utf8 {
             hash ^= UInt64(byte)
@@ -57,7 +57,7 @@ public enum Variation {
     }
 
     /// Canonical, stable serialization of the render-affecting fields of a spec.
-    static func canonicalString(_ spec: BreathSpec) -> String {
+    public static func canonicalString(_ spec: BreathSpec) -> String {
         let v = spec.variation
         return [
             spec.type.rawValue,

@@ -1,5 +1,5 @@
 import AVFoundation
-import BreathEngine
+import BreathEngineCore
 import Foundation
 
 /// Audio file I/O for the offline bank builder: decode enrollment takes to mono Float at the working
@@ -8,13 +8,52 @@ import Foundation
 /// assets) so the app-layer builder owns capture-side file handling. All functions are non-isolated
 /// so the synchronous CLI can call them directly.
 public enum AudioIO {
-    /// Decode any audio file to mono Float at `sampleRate`, through the engine's exact decoder so the
-    /// builder and the renderer agree sample-for-sample on what a take's samples are.
+    /// Decode any audio file to mono Float at `sampleRate`. Own decode path (not a call into
+    /// `BreathEngine`'s `AssetLibrary`, which is Apple-only and would drag this whole module out of
+    /// Linux's reach) — same downmix + resample logic, kept in sync by inspection since both are
+    /// small and rarely change.
     public static func decodeMono(
         url: URL,
         sampleRate: Double = AudioConstants.workingSampleRate
     ) throws -> [Float] {
-        try AssetLibrary.loadMonoSamples(url: url, targetRate: sampleRate)
+        let file: AVAudioFile
+        do {
+            file = try AVAudioFile(forReading: url)
+        } catch {
+            throw BreathError.ioFailure("opening \(url.lastPathComponent): \(error.localizedDescription)")
+        }
+        let inFormat = file.processingFormat
+        let frameCount = AVAudioFrameCount(file.length)
+        guard frameCount > 0,
+              let inBuffer = AVAudioPCMBuffer(pcmFormat: inFormat, frameCapacity: frameCount) else {
+            return []
+        }
+        do {
+            try file.read(into: inBuffer)
+        } catch {
+            throw BreathError.ioFailure("reading \(url.lastPathComponent): \(error.localizedDescription)")
+        }
+
+        // `processingFormat` is always deinterleaved Float32, so floatChannelData is valid.
+        let frames = Int(inBuffer.frameLength)
+        guard frames > 0, let channelData = inBuffer.floatChannelData else { return [] }
+        let channelCount = Int(inFormat.channelCount)
+
+        var mono = [Float](repeating: 0, count: frames)
+        for c in 0..<channelCount {
+            let ptr = channelData[c]
+            for i in 0..<frames { mono[i] += ptr[i] }
+        }
+        if channelCount > 1 {
+            let scale = 1 / Float(channelCount)
+            for i in 0..<frames { mono[i] *= scale }
+        }
+
+        if inFormat.sampleRate != sampleRate {
+            let target = Int((Double(frames) * sampleRate / inFormat.sampleRate).rounded())
+            mono = Resample.toFrames(mono, target)
+        }
+        return mono
     }
 
     /// On-disk `(durationSec, sampleRate, channels)` for a take, for its manifest `BreathAsset` entry.

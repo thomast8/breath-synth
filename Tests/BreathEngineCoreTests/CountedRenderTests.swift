@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import BreathEngine
+@testable import BreathEngineCore
 
 struct CountedRenderTests {
     /// `assembleCounted` cycles through the recording's real units to fill `count`. With two

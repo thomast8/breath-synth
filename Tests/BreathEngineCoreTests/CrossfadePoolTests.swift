@@ -1,5 +1,5 @@
 import Testing
-@testable import BreathEngine
+@testable import BreathEngineCore
 
 struct CrossfadePoolTests {
     private func constantGrain(_ value: Float, _ length: Int) -> [Float] {

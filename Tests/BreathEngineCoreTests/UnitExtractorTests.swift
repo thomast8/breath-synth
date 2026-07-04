@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import BreathEngine
+@testable import BreathEngineCore
 
 struct UnitExtractorTests {
     /// Three 1 kHz tone-bursts spaced 1 s apart (well beyond the ~0.7 s event min-distance): the

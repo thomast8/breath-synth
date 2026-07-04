@@ -1,4 +1,4 @@
-import BreathEngine
+import BreathEngineCore
 import Foundation
 
 /// Non-deep, data-light quality grading: plain DSP, no classifier, no labels. A fragment is accepted

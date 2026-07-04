@@ -1,7 +1,10 @@
 import Testing
 import Foundation
+#if canImport(AVFoundation)
+import AVFoundation
+#endif
 
-@testable import BreathEngine
+@testable import BreathEngineCore
 
 /// Synthetic-signal tests for the live capture detector. These are the floor for the auto-capture
 /// feature; the real ceiling is an end-to-end enroll → `breath-bank build` run.
@@ -679,18 +682,55 @@ struct CaptureAnalyzerTests {
     }
 
     // MARK: Real breath recordings — drive the detector with real audio (oracle = offline UnitExtractor)
+    //
+    // These decode committed AIFC gold assets, which needs AVFoundation — not portable, so this whole
+    // section (through the gold spectral-gate tests below) only runs on Apple platforms. The rest of
+    // this file is pure-Foundation and still runs under `swift test` on Linux.
+#if canImport(AVFoundation)
 
     private func assetURL(_ name: String) -> URL {
-        URL(fileURLWithPath: #filePath)        // …/Tests/BreathEngineTests/CaptureAnalyzerTests.swift
-            .deletingLastPathComponent()       // BreathEngineTests
+        URL(fileURLWithPath: #filePath)        // …/Tests/BreathEngineCoreTests/CaptureAnalyzerTests.swift
+            .deletingLastPathComponent()       // BreathEngineCoreTests
             .deletingLastPathComponent()       // Tests
             .deletingLastPathComponent()       // package root
             .appendingPathComponent("Assets/breaths/\(name)")
     }
 
+    /// Decode a committed gold asset to mono Float at `targetRate` — a test-local duplicate of
+    /// `AssetLibrary.loadMonoSamples`/`AudioIO.decodeMono` (both live in Apple-only targets this
+    /// portable test module can't depend on) so this file stays buildable without them.
+    private func loadGoldAsset(_ name: String, targetRate: Double) throws -> [Float] {
+        let url = assetURL(name)
+        let file = try AVAudioFile(forReading: url)
+        let inFormat = file.processingFormat
+        let frameCount = AVAudioFrameCount(file.length)
+        guard frameCount > 0,
+              let inBuffer = AVAudioPCMBuffer(pcmFormat: inFormat, frameCapacity: frameCount) else {
+            return []
+        }
+        try file.read(into: inBuffer)
+        let frames = Int(inBuffer.frameLength)
+        guard frames > 0, let channelData = inBuffer.floatChannelData else { return [] }
+        let channelCount = Int(inFormat.channelCount)
+        var mono = [Float](repeating: 0, count: frames)
+        for c in 0..<channelCount {
+            let ptr = channelData[c]
+            for i in 0..<frames { mono[i] += ptr[i] }
+        }
+        if channelCount > 1 {
+            let scale = 1 / Float(channelCount)
+            for i in 0..<frames { mono[i] *= scale }
+        }
+        if inFormat.sampleRate != targetRate {
+            let target = Int((Double(frames) * targetRate / inFormat.sampleRate).rounded())
+            mono = Resample.toFrames(mono, target)
+        }
+        return mono
+    }
+
     /// Session noise floor from the real room-tone recording, as the app derives it.
     private func realRoomFloor() throws -> Float {
-        let room = try AssetLibrary.loadMonoSamples(url: assetURL("room_silence.aifc"), targetRate: sr)
+        let room = try loadGoldAsset("room_silence.aifc", targetRate: sr)
         var a = CaptureAnalyzer(sampleRate: sr, detection: .fixedDuration(seconds: Double(room.count) / sr + 1),
                                 noiseFloorRMS: nil)
         _ = a.ingest(room)
@@ -698,7 +738,7 @@ struct CaptureAnalyzerTests {
     }
 
     @Test func realPackingLiveCountTracksOffline() throws {
-        let samples = try AssetLibrary.loadMonoSamples(url: assetURL("packing_1.aifc"), targetRate: sr)
+        let samples = try loadGoldAsset("packing_1.aifc", targetRate: sr)
         let offline = UnitExtractor.gulpCoreRanges(from: samples, sampleRate: sr).count
         let (_, analyzer) = run(.cleanEvents(minGapSec: 0.35, maxTakeSec: 60, trailingSilenceSec: 5),
                                 noiseFloor: try realRoomFloor(), samples)
@@ -708,7 +748,7 @@ struct CaptureAnalyzerTests {
     }
 
     @Test func realRecoveryLiveCountTracksOffline() throws {
-        let samples = try AssetLibrary.loadMonoSamples(url: assetURL("recovery.aifc"), targetRate: sr)
+        let samples = try loadGoldAsset("recovery.aifc", targetRate: sr)
         // gulpCoreRanges (default gulpMinDistSec) counts raw sips, not complete hooks — extract's
         // hookMinDistSec merge is the oracle for "complete breaths," matching the live paired counter.
         let offlineRawSips = UnitExtractor.gulpCoreRanges(from: samples, sampleRate: sr).count
@@ -735,8 +775,8 @@ struct CaptureAnalyzerTests {
 
     @Test(.disabled("gentle calm-cycle splitting needs real same-session recordings to calibrate"))
     func realCycleSplitsRealInhaleAndExhale() throws {
-        let inhale = try AssetLibrary.loadMonoSamples(url: assetURL("calm_inhale.aifc"), targetRate: sr)
-        let exhale = try AssetLibrary.loadMonoSamples(url: assetURL("calm_exhale.aifc"), targetRate: sr)
+        let inhale = try loadGoldAsset("calm_inhale.aifc", targetRate: sr)
+        let exhale = try loadGoldAsset("calm_exhale.aifc", targetRate: sr)
         let signal = inhale + silence(1.2) + exhale + silence(1.5)
         let (events, _) = run(.cycle(minPhaseSec: 3.0, midPauseSec: 0.5, maxCycleSec: 60, trailingSilenceSec: 1.0),
                               noiseFloor: try realRoomFloor(), signal)
@@ -749,6 +789,8 @@ struct CaptureAnalyzerTests {
         // not asserted, so the suite never implies the gentle-cycle path is validated on real audio.
     }
 
+#endif  // canImport(AVFoundation)
+
     // MARK: Consistency guard — live count agrees with the offline extractor
 
     @Test func liveCountMatchesOfflineUnitExtractor() {
@@ -759,6 +801,9 @@ struct CaptureAnalyzerTests {
     }
 
     // MARK: Style-aware spectral gate (Step 2.4) — zero-true-event-loss against the gold assets
+    //
+    // Also gold-asset-dependent (AVFoundation decode) — see the note on the section above.
+#if canImport(AVFoundation)
 
     /// Every width-confirmed candidate in a bundled gold recording must be spectrally accepted under
     /// its style's profile — this is the permanent release gate for `SpectralGateProfile` thresholds.
@@ -767,7 +812,7 @@ struct CaptureAnalyzerTests {
     /// doc comments for the measured cluster evidence behind `.gulp`/`.hook`.
     @Test func goldPackingAcceptedUnderGulpProfile() throws {
         for name in ["packing_1.aifc", "packing_2.aifc"] {
-            let samples = try AssetLibrary.loadMonoSamples(url: assetURL(name), targetRate: sr)
+            let samples = try loadGoldAsset(name, targetRate: sr)
             let (_, analyzer) = run(.cleanEvents(minGapSec: 0.22, maxTakeSec: 40, trailingSilenceSec: 3.0,
                                                  eventMinDistSec: UnitExtractor.gulpMinDistSec,
                                                  spectralGate: .gulp), samples)
@@ -777,13 +822,15 @@ struct CaptureAnalyzerTests {
     }
 
     @Test func goldRecoveryAcceptedUnderHookProfile() throws {
-        let samples = try AssetLibrary.loadMonoSamples(url: assetURL("recovery.aifc"), targetRate: sr)
+        let samples = try loadGoldAsset("recovery.aifc", targetRate: sr)
         let (_, analyzer) = run(.naturalRhythm(minActiveSec: 0.5, maxTakeSec: 40, trailingSilenceSec: 3.0,
                                                eventMinDistSec: UnitExtractor.hookMinDistSec,
                                                spectralGate: .hook), samples)
         let rejected = analyzer.spectralCandidates.filter { !$0.accepted }
         #expect(rejected.isEmpty, "recovery.aifc: \(rejected.count)/\(analyzer.spectralCandidates.count) real hooks rejected — \(rejected)")
     }
+
+#endif  // canImport(AVFoundation)
 
     /// Synthetic band-limited bursts, approximated as a sum of sinusoids spanning `[lowHz, highHz]`
     /// (cheaper and more precisely band-limited for test purposes than a filtered noise source).

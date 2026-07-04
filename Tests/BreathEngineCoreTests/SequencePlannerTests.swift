@@ -1,5 +1,5 @@
 import Testing
-@testable import BreathEngine
+@testable import BreathEngineCore
 
 struct SequencePlannerTests {
     private func pattern(in i: Double, out o: Double, holdIn: Double = 0, holdOut: Double = 0) -> BreathPattern {

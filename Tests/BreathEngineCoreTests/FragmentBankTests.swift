@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import BreathEngine
+@testable import BreathEngineCore
 
 struct FragmentBankSchemaTests {
     // MARK: - Manifest v2

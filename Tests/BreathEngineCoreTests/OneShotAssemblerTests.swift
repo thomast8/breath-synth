@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import BreathEngine
+@testable import BreathEngineCore
 
 struct OneShotAssemblerTests {
     private let sr = 44_100.0

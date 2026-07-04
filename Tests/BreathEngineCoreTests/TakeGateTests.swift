@@ -1,6 +1,6 @@
 import Testing
 
-@testable import BreathEngine
+@testable import BreathEngineCore
 
 /// Pure decision-table tests for the recorder's take-lifecycle gate — no mic, no `AVAudioEngine`, no
 /// async wait required, since `TakeGate` is extracted precisely so this logic is testable this way.

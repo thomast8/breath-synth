@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import BreathEngine
+@testable import BreathEngineCore
 
 /// Coverage for the externally-supplied noise-profile path: a room-tone profile measured
 /// from a separate (same-distribution) noise buffer via `SpectralDenoise.magnitudeProfile`,

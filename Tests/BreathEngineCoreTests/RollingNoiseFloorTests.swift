@@ -1,6 +1,6 @@
 import Testing
 
-@testable import BreathEngine
+@testable import BreathEngineCore
 
 struct RollingNoiseFloorTests {
     @Test func nilSeedAdoptsFirstReading() {

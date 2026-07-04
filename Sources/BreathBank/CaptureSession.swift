@@ -1,4 +1,4 @@
-import BreathEngine
+import BreathEngineCore
 import Foundation
 
 /// What one enrollment session captured: the room-tone clip plus, per technique step, the recorded

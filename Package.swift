@@ -8,6 +8,7 @@ let package = Package(
         .iOS("26.0"),
     ],
     products: [
+        .library(name: "BreathEngineCore", targets: ["BreathEngineCore"]),
         .library(name: "BreathEngine", targets: ["BreathEngine"]),
         .executable(name: "breath", targets: ["BreathCLI"]),
         .executable(name: "breath-debug", targets: ["BreathDebugApp"]),
@@ -20,7 +21,15 @@ let package = Package(
     ],
     targets: [
         .target(
-            name: "BreathEngine"
+            // Platform-portable subset of the engine (Model/DSP/Capture analysis/BreathAssembler/
+            // SequencePlanner) — no AVFoundation, no hard Accelerate dependency (SpectralDenoise
+            // falls back to a pure-Swift FFT off Apple platforms). This is what a Linux server can
+            // link against directly; `BreathEngine` re-exports it for existing Apple consumers.
+            name: "BreathEngineCore"
+        ),
+        .target(
+            name: "BreathEngine",
+            dependencies: ["BreathEngineCore"]
         ),
         .executableTarget(
             name: "BreathCLI",
@@ -62,7 +71,7 @@ let package = Package(
         ),
         .target(
             name: "BreathBank",
-            dependencies: ["BreathEngine"]
+            dependencies: ["BreathEngineCore"]
         ),
         .executableTarget(
             name: "BreathBankCLI",
@@ -70,6 +79,10 @@ let package = Package(
                 "BreathBank",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ]
+        ),
+        .testTarget(
+            name: "BreathEngineCoreTests",
+            dependencies: ["BreathEngineCore"]
         ),
         .testTarget(
             name: "BreathEngineTests",

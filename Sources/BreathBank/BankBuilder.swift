@@ -1,4 +1,4 @@
-import BreathEngine
+import BreathEngineCore
 import Foundation
 
 /// Offline bank builder: turns an enrollment folder (`captures.json` + recorded takes + room tone)
