@@ -96,7 +96,13 @@ enum EnrollmentScript {
             // 4: 3 is the hard floor for `Grader.anomalyScore`'s cross-take oneShot comparison to exist
             // at all; the 4th keeps that gate alive even after a one-take wholesale loss.
             demoReference: "frc_1.aifc", takes: 4, renderMode: .oneShot, detection: .finalPhase,
-            minSeconds: 1.5, maxSeconds: 6, targetEvents: nil,
+            // minSeconds was 1.5 (calibrated against the bundled frc_1.aifc reference, itself a
+            // different developer's much longer/held release, ~3.4s) — real hardware showed this
+            // user's genuine passive FRC release (per this step's own "don't hold it out longer than
+            // feels natural" prompt) consistently lands 0.9-1.3s across 5 takes, so 1.5s rejected every
+            // real attempt. 0.7 gives comparable margin below the observed low end to RV's calibration
+            // (3.0 floor vs. 3.66-4.08 real takes).
+            minSeconds: 0.7, maxSeconds: 6, targetEvents: nil,
             lanes: [CaptureLane(label: .whole, slug: "frc_exhale", style: "frc", type: .exhale,
                                 role: "oneShotBody", reference: "frc_1.aifc")]
         ),

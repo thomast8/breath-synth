@@ -119,6 +119,45 @@ public struct CaptureAnalyzer {
     /// instantly read as "too loud" off a single noisy hop.
     private static let minAmbientGateHops = 150  // 1.5s at the 10ms hop rate
 
+    // MARK: Windowed quiet/loud classifier tuning (see `updateQuietLoudClassifier`)
+
+    /// Trailing window the classifier reads from — long enough that a real ambient burst (measured on
+    /// real hardware: 60-200ms, PR #11) is a minority of it, short enough to react promptly to a real
+    /// phase change.
+    private static let quietWindowSec = 0.4
+    /// A classifier verdict (quiet / loud / neither) must persist this many consecutive hops before
+    /// it's trusted — the windowed-statistic counterpart to the onset/event width gates.
+    private static let quietLoudPersistHops = 5  // ~50ms
+    private static let quietBarAmbientFactor: Float = 1.25
+    private static let quietBarBreathFactor: Float = 0.40
+    private static let loudBarQuietFactor: Float = 1.4
+    private static let loudBarBreathFactor: Float = 0.55
+    /// Pre-onset, there's no `breathTypical` yet — "loud enough to be onset" is judged against ambient
+    /// alone.
+    private static let preOnsetLoudAmbientFactor: Float = 1.8
+    private static let preOnsetLoudThresholdFactor: Float = 1.2
+    /// `.midPause → .exhale`'s release is a *new* phase's onset — same principle as `preOnsetLoud*`
+    /// (both encode the same quantity: "sustained loudness distinguishable from bursty ambient"), so it
+    /// reuses `preOnsetLoudAmbientFactor` rather than a separately-tuned constant. An initial attempt at
+    /// a lower, deliberately-permissive factor (1.4, reasoning that a false release-start is cheap and a
+    /// missed one costs the full `maxTakeSec` wait) broke real-hardware-modeled bursty-ambient robustness
+    /// — a burst during the pause could clear it — because that same bursty ambient is exactly what
+    /// `preOnsetLoudAmbientFactor` is already calibrated to reject at 1.8. The decay toward `endBar`
+    /// (below) now covers the "missed release" side (caps worst-case detection at ~5s, not a hang), and
+    /// retroactive anchoring (`retroAnchoredReleaseStart`) means a late, decay-caught detection doesn't
+    /// truncate the segment's start either — so the cost asymmetry that justified 1.4 no longer applies.
+    /// Below this many seconds into the pause, the release bar sits at its base level; from here it
+    /// decays linearly to `endBar`'s formula by `releaseBarMinDecayStartSec + releaseBarDecaySpanSec` —
+    /// a pause that's run this long is more likely a genuinely gentle release than a still-deliberate
+    /// hold, and `endBar` is by definition "distinguishable from quiet," so anything sustained above it
+    /// this late is the release, not ambient.
+    private static let releaseBarMinDecayStartSec = 2.0
+    private static let releaseBarDecaySpanSec = 3.0
+    private static let breathTypicalCap = 1000
+    /// Hops of confirmed `isLoud` before `breathTypical` is trusted — enough for one percentile
+    /// computation to mean something, not so much that a short RV-style exhale never gets one.
+    private static let minBreathTypicalHops = 20  // ~0.2s
+
     // MARK: Config
 
     public let sampleRate: Double
@@ -215,6 +254,80 @@ public struct CaptureAnalyzer {
     /// While armed, true when the trailing `ambientGateWindowSec` window's ambient level exceeds
     /// `ambientGateRMS` — onset stays suppressed (see the `.armed` case) until it releases.
     public private(set) var isAmbientHold = false
+
+    // MARK: Windowed quiet/loud classifier (see `updateQuietLoudClassifier`)
+
+    /// This take's own pre-breath ambient reference — the *median* (not the low percentile
+    /// `preOnsetFloorRMS` uses) of armed-period hops, refreshed while armed and frozen once onset
+    /// confirms. Deliberately a measure of "what ambient typically sounds like," not "the quietest
+    /// instant" — see `updateQuietLoudClassifier`'s doc for why that distinction is the whole fix.
+    private var ambientTypical: Float?
+    /// Seeds `ambientTypical` before this take's own armed hops are sufficient (falls back to the
+    /// cross-take rolling floor, then an absolute default) — needed because the classifier is also
+    /// consulted for onset itself, before any of this take's own armed data exists.
+    private let ambientTypicalFallback: Float
+    /// This take's own "how loud is a real breath" reference — the 80th percentile of hops seen while
+    /// `isLoud`. `nil` pre-onset and briefly after; `preOnsetLoud*` covers that gap.
+    private var breathTypical: Float?
+    private var breathLoudSamples: [Float] = []
+    /// Ring of the most recent `quietWindowHops` raw envelope hops — the classifier's input.
+    private var recentEnv: [Float] = []
+    private let quietWindowHops: Int
+    private var loudPendingHops = 0
+    private var isLoud = false
+    /// Two different questions, two different bars, both against the same `windowStat` — see
+    /// `updateQuietLoudClassifier`'s doc. `pauseQuiet*` (bar includes a `breathTypical` term) answers
+    /// "did airflow just abruptly halt" — a deliberate pause is a discontinuity from a sustained level,
+    /// so "well below the breath" is the right, fast discriminator. `endQuiet*` (bar is ambient-relative
+    /// only) answers "has this returned to ambient" — the right question for a take's actual end, where
+    /// a real exhale's natural decay must be allowed to ride all the way down without a stale
+    /// peak-anchored breath reference cutting it off mid-taper (PR #11: FRC/RV real hardware).
+    private var pauseQuietPendingHops = 0
+    private var isPauseQuiet = false
+    private var pauseQuietFrames = 0
+    private var pauseQuietStartFrame = 0
+    private var endQuietPendingHops = 0
+    private var isEndQuiet = false
+    private var endQuietFrames = 0
+    private var endQuietStartFrame = 0
+    /// `.midPause → .exhale`'s release detector — a *new* phase's onset, so (like armed-onset) it's
+    /// judged against ambient, never against the pause's preceding phase's `breathTypical`. Decays from
+    /// a base bar toward `endBar`'s formula the longer the pause runs — see `releaseBarAmbientFactor`'s
+    /// doc and `releaseBarDecayStartFrames`/`releaseBarDecayEndFrames`.
+    private var releasePendingHops = 0
+    private var isRelease = false
+    private let releaseBarDecayStartFrames: Int
+    private let releaseBarDecayEndFrames: Int
+    /// This pause's `windowStat` per hop, oldest-dropped past `midPauseHistoryCap` — lets a late (decay-
+    /// caught) release detection still anchor at the release's true start rather than the detection
+    /// frame. See `retroAnchoredReleaseStart`. Cleared on leaving `.midPause`.
+    private var midPauseWindowStatHistory: [Float] = []
+    private static let midPauseHistoryCap = 800  // ~8s at the 10ms hop rate — past the decay's ~5s cap
+    /// The real (non-back-dated) frame `.midPause` was entered — history index 0 corresponds to this
+    /// frame, *not* `phaseStartFrame` (which is back-dated to the pause's true start and can sit well
+    /// before history collection actually began, since confirming the pause itself takes `midPauseFrames`
+    /// + the classifier's own lag). Mapping history indices off `phaseStartFrame` instead produced a
+    /// release anchor consistently too early by exactly that gap.
+    private var midPauseEntryFrame = 0
+    /// The classifier's inherent reaction lag when a *quiet* verdict flips true, in frames — a
+    /// `quietWindowSec`-long p40 window only needs `0.4 × quietWindowSec` of it to be quiet before the
+    /// 40th-percentile point falls in the quiet region, plus `quietLoudPersistHops`' persistence.
+    /// Segment/phase boundaries anchored off `isQuiet` are back-dated by this so audio placement isn't
+    /// shifted by the detection delay.
+    private let quietDetectionLagFrames: Int
+    /// The same lag for a *loud* verdict, asymmetric with the above: at the 40th percentile, the loud
+    /// side of the window must dominate ~60% of it (`1 - 0.4`) before the same index reads loud — a
+    /// meaningfully longer reaction than the quiet direction, since index 15-of-40 sits closer to the
+    /// quiet end. Getting this backwards (treating both directions as symmetric) understates onset
+    /// latency and shifts every downstream boundary later by the difference.
+    private let loudDetectionLagFrames: Int
+    /// The window-domination portion of `loudDetectionLagFrames`, without the persistence term —
+    /// `retroAnchoredReleaseStart`'s scan finds the raw frame `windowStat` first crosses `endBar` from
+    /// below, which (being a rising crossing on the same p40 statistic) itself lags the true moment by
+    /// this much, the same mechanism that motivates `loudDetectionLagFrames` — but the scan isn't
+    /// confirming a persisted threshold, just locating a single crossing, so only the window portion
+    /// applies.
+    private let windowDominationLagFrames: Int
 
     // MARK: Sip alternator (pairedEvents styles only — see `detectSip`)
 
@@ -334,6 +447,12 @@ public struct CaptureAnalyzer {
         rawRetentionFrames = toFrames(Self.rawRetentionSec)
         spectralWindowFrames = toFrames(Self.spectralWindowSec)
         sipMergeGapFrames = toFrames(Self.sipMergeGapSec)
+        quietWindowHops = max(1, Int(Self.quietWindowSec / Self.hopSec))
+        ambientTypicalFallback = noiseFloorRMS ?? (Self.absActivityFloor / Self.activityFloorK)
+        let persistSec = Double(Self.quietLoudPersistHops) * Self.hopSec
+        quietDetectionLagFrames = toFrames(Self.quietWindowSec * 0.4 + persistSec)
+        loudDetectionLagFrames = toFrames(Self.quietWindowSec * 0.6 + persistSec)
+        windowDominationLagFrames = toFrames(Self.quietWindowSec * 0.6)
 
         switch detection {
         case let .fixedDuration(seconds):
@@ -393,6 +512,13 @@ public struct CaptureAnalyzer {
             targetEventsCount = nil; spectralGateProfile = spectralGate
             pairedEvents = paired
         }
+
+        // `.midPause → .exhale`'s release decays from a base bar down to `endBar`'s formula the longer
+        // the pause runs — see `updateQuietLoudClassifier`'s doc. `3 × midPauseFrames` scales the decay
+        // start with a longer configured pause; the 2s floor covers styles where `midPauseFrames` is 0.
+        let releaseDecayStart = max(3 * midPauseFrames, toFrames(Self.releaseBarMinDecayStartSec))
+        releaseBarDecayStartFrames = releaseDecayStart
+        releaseBarDecayEndFrames = releaseDecayStart + toFrames(Self.releaseBarDecaySpanSec)
     }
 
     // MARK: Ingest
@@ -419,7 +545,13 @@ public struct CaptureAnalyzer {
             hopCounter += 1
             if hopCounter >= hopSamples {
                 hopCounter = 0
-                let env = Float((sumSq / Double(ringFilled)).squareRoot())
+                // `sumSq` is a rolling incremental sum (add the newest squared sample, subtract the
+                // one falling out of the window) — over a long, quiet take (many hundreds of thousands
+                // of hops) floating-point cancellation can tip it *very* slightly negative even though
+                // the true sum can't be, and `.squareRoot()` of a negative value is NaN, which corrupts
+                // every downstream percentile/comparison for the rest of the take. Clamping is exact for
+                // any real signal (a rolling sum of squares is never truly negative) and costs nothing.
+                let env = Float(max(0, sumSq / Double(ringFilled)).squareRoot())
                 step(env, into: &events)
             }
         }
@@ -482,18 +614,31 @@ public struct CaptureAnalyzer {
                 events.append(.takeEnded(reason: .duration))
                 state = .done
             }
-            print("[CAL-ROOM] frame=\(currentFrame) env=\(String(format: "%.5f", env))")
             prevPrevEnv = prevEnv; prevEnv = env
             return
         }
 
-        // Activity transitions with hysteresis.
+        // Activity transitions with hysteresis. Backs the per-hop sip/counted-event layer
+        // (`detectSip`/`detectEventPeak`), which needs a fast, run-based signal — not the windowed
+        // classifier below, which a real breath's own burst-scale motion would blur.
         let wasActive = isActive
         if isActive {
             if env < activityThreshold * Self.releaseRatio {
                 isActive = false
-                silenceStartFrame = currentFrame
-                silenceFrames = 0
+                // The run that just ended is real airflow only if it sustained `onsetWidthFrames` —
+                // the same question the onset gate asks of a *rising* run and the event-width gate
+                // asks of a counted run (`detectEventPeak`). A single transient hop (room noise
+                // brushing the threshold) produces a sub-width run; bridging it — leaving
+                // `silenceFrames`/`silenceStartFrame` untouched — keeps accumulated silence intact
+                // instead of restarting the count from this instant, which is what let a handful of
+                // real hardware ~10ms blips repeatedly reset a take's trailing-silence countdown (PR
+                // #11). Strictly greater, not `>=`: a run landing exactly on the boundary is genuinely
+                // ambiguous, and bridging costs nothing while wrongly resetting reproduces the bug
+                // this guards against — ties favor bridging.
+                if currentFrame - currentRunStartFrame > onsetWidthFrames {
+                    silenceStartFrame = currentFrame
+                    silenceFrames = 0
+                }
             }
         } else if env > activityThreshold {
             isActive = true
@@ -506,6 +651,8 @@ public struct CaptureAnalyzer {
         let becameActive = !wasActive && isActive
         if becameActive { currentRunStartFrame = max(0, currentFrame - windowSamples) }
 
+        updateQuietLoudClassifier(env: env)
+
         if state == .armed {
             armedEnvSamples.append(env)
             if armedEnvSamples.count > Self.armedEnvCap {
@@ -513,52 +660,46 @@ public struct CaptureAnalyzer {
                 armedEnvDroppedCount += 1
             }
             updateAmbientHold()
+            if armedEnvSamples.count >= Self.minPreOnsetFloorHops {
+                ambientTypical = Self.percentile(armedEnvSamples, 0.5)
+            }
         }
 
         switch state {
         case .armed:
             // A held gate suppresses onset candidacy entirely — any in-progress candidate is dropped,
-            // same as the run ending on its own (`!isActive` below), so a room that goes quiet mid-way
-            // through what would've been a confirmed onset still requires a fresh run afterward.
+            // same as the run ending on its own, so a room that goes quiet mid-way through what
+            // would've been a confirmed onset still requires a fresh run afterward.
             if isAmbientHold {
                 pendingOnsetFrame = nil
                 break
             }
-            // Onset is confirmed only once its containing run has lasted `onsetWidthFrames` — a click
-            // that ends before that stays un-onset and the take keeps listening for a real one.
-            // `blackoutFrames` additionally suppresses onset altogether for a moment right after
-            // arming — the counted-event styles' between-takes exhale/re-inhale, with nothing like
-            // `finalPhase`'s discarded lead phase to absorb it (see `CaptureDetection.cleanEvents`).
+            // `blackoutFrames` suppresses onset altogether for a moment right after arming — the
+            // between-takes exhale/re-inhale a person needs (see `CaptureDetection`'s docs).
             if currentFrame < blackoutFrames { break }
-            if becameActive {
-                pendingOnsetFrame = currentRunStartFrame
-            }
-            if let onset = pendingOnsetFrame {
-                if !isActive {
-                    pendingOnsetFrame = nil
-                } else if currentFrame - onset >= onsetWidthFrames {
-                    pendingOnsetFrame = nil
-                    segmentStartFrame = onset
-                    phaseStartFrame = onset
-                    if armedEnvSamples.count >= Self.minPreOnsetFloorHops {
-                        preOnsetFloorRMS = Self.percentile(armedEnvSamples, 0.2)
-                        let minHops = max(1, Int(Self.minQuietRangeSec / Self.hopSec))
-                        // Quiet = "not yet a confirmed breath," i.e. below the same activity boundary
-                        // the analyzer already uses to decide isActive — not a tight multiple of the
-                        // 20th-percentile floor. Real room ambient naturally wanders over a much wider
-                        // range (observed: 0.00007-0.003 in one quiet room) than a small margin above
-                        // its quietest instant covers, so a percentile-relative threshold classified
-                        // nearly the whole armed period as "not quiet enough," harvesting ~0s per take.
-                        if let idxRange = Self.longestQuietRun(
-                            armedEnvSamples, threshold: activityThreshold, minCount: minHops
-                        ) {
-                            let start = (armedEnvDroppedCount + idxRange.lowerBound) * hopSamples
-                            let end = (armedEnvDroppedCount + idxRange.upperBound) * hopSamples
-                            quietRangeFrames = start..<end
-                        }
+            if countsEvents {
+                // Counted styles (packing/recovery): a real event is itself bursty (150-300ms) and
+                // close in shape to ambient noise — a burst-robust window statistic would erase the
+                // very signal it's meant to detect. Keep the original per-hop, sustained-width gate.
+                if becameActive {
+                    pendingOnsetFrame = currentRunStartFrame
+                }
+                if let onset = pendingOnsetFrame {
+                    if !isActive {
+                        pendingOnsetFrame = nil
+                    } else if currentFrame - onset >= onsetWidthFrames {
+                        pendingOnsetFrame = nil
+                        confirmOnset(at: onset, into: &events)
                     }
-                    events.append(.onset)
-                    state = (isCycle || finalPhaseOnly) ? .inhale : .capturing
+                }
+            } else {
+                // Continuous styles (calm/FRC/RV): onset via the windowed classifier instead — real
+                // ambient can itself clear a per-hop threshold for 100ms+ (PR #11 real hardware: one
+                // room's ambient p10 sat *above* the activity threshold), so per-hop onset can't tell
+                // "the room got briefly loud" from "a breath started." Pre-onset, `isLoud` is judged
+                // against `ambientTypical` alone (no `breathTypical` yet) — see the classifier's doc.
+                if isLoud {
+                    confirmOnset(at: max(0, currentFrame - loudDetectionLagFrames), into: &events)
                 }
             }
         case .capturing:
@@ -573,35 +714,61 @@ public struct CaptureAnalyzer {
             let requiredTrailing = targetHit ? postTargetTrailingFrames : trailingFrames
             if currentFrame >= maxFrames {
                 endWhole(at: currentFrame, reason: .duration, into: &events)
-            } else if !isActive, silenceFrames >= requiredTrailing, totalActiveFrames >= minActiveFrames {
-                endWhole(at: silenceStartFrame, reason: targetHit ? .targetReached : .silence, into: &events)
+            } else if countsEvents {
+                // Counted styles: tried switching this to `isEndQuiet`/`endBar` (no breath term, so the
+                // earlier `breathTypical`-contamination concern doesn't apply) — real packing/recovery
+                // fixtures broke (`testRealPackingLiveCountTracksOffline` etc.), because the 0.4s
+                // classifier window is comparable to or longer than a real inter-event gap, so
+                // `windowStat` never reads "quiet" between events at all — a different, still-real
+                // mismatch, not leftover caution. Keep the original per-hop signal, which the sip/event
+                // layer already bridges against transients.
+                if !isActive, silenceFrames >= requiredTrailing, totalActiveFrames >= minActiveFrames {
+                    endWhole(at: silenceStartFrame, reason: targetHit ? .targetReached : .silence, into: &events)
+                }
+            } else if isEndQuiet, endQuietFrames >= requiredTrailing, totalActiveFrames >= minActiveFrames {
+                endWhole(at: endQuietStartFrame, reason: targetHit ? .targetReached : .silence, into: &events)
             }
         case .inhale:
             // Require a real phase's worth of airflow before a pause can split: a natural intra-breath
             // dip (which can exceed `midPauseFrames`) must not be mistaken for the inter-phase pause.
             // `finalPhaseOnly` (e.g. FRC/RV's lead inhale) suppresses this segment — it's discarded.
-            if !isActive, silenceFrames >= midPauseFrames, totalActiveFrames >= minActiveFrames {
+            if isPauseQuiet, pauseQuietFrames >= midPauseFrames, totalActiveFrames >= minActiveFrames {
                 if !finalPhaseOnly {
-                    events.append(.segmentReady(label: .inhale, startFrame: segmentStartFrame, endFrame: silenceStartFrame))
+                    events.append(.segmentReady(label: .inhale, startFrame: segmentStartFrame, endFrame: pauseQuietStartFrame))
                 }
-                phaseStartFrame = silenceStartFrame
+                phaseStartFrame = pauseQuietStartFrame
+                midPauseEntryFrame = currentFrame
                 state = .midPause
             } else if currentFrame >= maxFrames {
                 events.append(.takeEnded(reason: .incomplete))
                 state = .done
             }
         case .midPause:
-            if becameActive {
-                segmentStartFrame = max(0, currentFrame - windowSamples)
+            // `isRelease`, not `isLoud`/`becameActive`: detecting the release is onset of a *new*
+            // phase, so it's judged against ambient (with a decay toward `endBar` the longer the pause
+            // runs) — never against `breathTypical`, which describes the *preceding* phase and is
+            // categorically the wrong data here (PR #11 real hardware: a passive FRC release quieter
+            // than its own lead inhale hung for the full `maxTakeSec` before this fix). A single
+            // transient hop still can't end the pause any more than it could end the take — same
+            // persistence gate as every other classifier verdict.
+            if isRelease {
+                let ambient = ambientTypical ?? ambientTypicalFallback
+                let endBar = max(ambient * Self.quietBarAmbientFactor, activityThreshold * Self.releaseRatio)
+                segmentStartFrame = retroAnchoredReleaseStart(detectionFrame: currentFrame, endBar: endBar)
                 phaseStartFrame = segmentStartFrame
+                // `endQuietFrames` still holds the pause's own accumulated value (the pause was quiet
+                // by construction) — without resetting it, `.exhale`'s own end check inherits an
+                // already-satisfied count and can end the take instantly, exactly the bug this session
+                // already fixed once for the pre-classifier `silenceFrames` equivalent.
+                endQuietFrames = 0
                 state = .exhale
             } else if currentFrame >= maxFrames {
                 events.append(.takeEnded(reason: .incomplete))
                 state = .done
             }
         case .exhale:
-            if !isActive, silenceFrames >= trailingFrames {
-                events.append(.segmentReady(label: finalSegmentLabel, startFrame: segmentStartFrame, endFrame: silenceStartFrame))
+            if isEndQuiet, endQuietFrames >= trailingFrames {
+                events.append(.segmentReady(label: finalSegmentLabel, startFrame: segmentStartFrame, endFrame: endQuietStartFrame))
                 events.append(.takeEnded(reason: .silence))
                 state = .done
             } else if currentFrame >= maxFrames {
@@ -620,6 +787,193 @@ public struct CaptureAnalyzer {
         events.append(.segmentReady(label: .whole, startFrame: segmentStartFrame, endFrame: max(segmentStartFrame, endFrame)))
         events.append(.takeEnded(reason: reason))
         state = .done
+    }
+
+    /// Shared onset-confirmation tail for both the counted (per-hop width gate) and continuous
+    /// (windowed classifier) `.armed` paths: freeze the pre-onset ambient measurements, emit `.onset`,
+    /// and advance to the take's first real state.
+    private mutating func confirmOnset(at onset: Int, into events: inout [Event]) {
+        segmentStartFrame = onset
+        phaseStartFrame = onset
+        if armedEnvSamples.count >= Self.minPreOnsetFloorHops {
+            preOnsetFloorRMS = Self.percentile(armedEnvSamples, 0.2)
+            let minHops = max(1, Int(Self.minQuietRangeSec / Self.hopSec))
+            // Quiet = "not yet a confirmed breath," i.e. below the same activity boundary the analyzer
+            // already uses to decide isActive — not a tight multiple of the 20th-percentile floor. Real
+            // room ambient naturally wanders over a much wider range (observed: 0.00007-0.003 in one
+            // quiet room) than a small margin above its quietest instant covers, so a percentile-relative
+            // threshold classified nearly the whole armed period as "not quiet enough," harvesting ~0s
+            // per take.
+            if let idxRange = Self.longestQuietRun(
+                armedEnvSamples, threshold: activityThreshold, minCount: minHops
+            ) {
+                let start = (armedEnvDroppedCount + idxRange.lowerBound) * hopSamples
+                let end = (armedEnvDroppedCount + idxRange.upperBound) * hopSamples
+                quietRangeFrames = start..<end
+            }
+        }
+        events.append(.onset)
+        state = (isCycle || finalPhaseOnly) ? .inhale : .capturing
+    }
+
+    /// Classifies the current moment quiet/loud/neither against a windowed, burst-robust statistic (the
+    /// 40th percentile of the last `quietWindowSec` of envelope hops) instead of the raw per-hop
+    /// envelope. A real room's ambient is not a flat floor — it wanders and bursts — and real hardware
+    /// traces (PR #11) showed bursts of 60-200ms clearing the same per-hop threshold a real breath onset
+    /// needs to clear, at a rate that made "quiet, uninterrupted, for N ms" essentially unreachable (one
+    /// trace's ambient p10 sat *above* the activity threshold — "quiet" barely existed per-hop). A
+    /// window statistic tolerant of a minority-duration burst survives exactly that: a burst occupying
+    /// under 40% of the window doesn't move the p40 point, while a genuine, sustained resumption of
+    /// breathing fills the whole window and reads loud reliably.
+    ///
+    /// Calibrated against two measurements *this take makes of itself*, not one global constant:
+    /// `ambientTypical` (this room, right now, before any breath) and `breathTypical` (this person's own
+    /// breath, once one has been heard) — because the gap between a gentle calm breath and windows-open
+    /// ambient can be thin, and a fixed ratio tuned for one room fails in a noisier one and vice versa.
+    private mutating func updateQuietLoudClassifier(env: Float) {
+        recentEnv.append(env)
+        if recentEnv.count > quietWindowHops { recentEnv.removeFirst() }
+        guard recentEnv.count >= quietWindowHops else { return }
+
+        let ambient = ambientTypical ?? ambientTypicalFallback
+        let windowStat = Self.percentile(recentEnv, 0.4)
+
+        // "Did airflow just abruptly halt" (a deliberate pause) — a discontinuity from a sustained
+        // breath level, so a breath-relative term is the fast, robust discriminator here.
+        let pauseBar = max(
+            ambient * Self.quietBarAmbientFactor,
+            (breathTypical ?? 0) * Self.quietBarBreathFactor,
+            activityThreshold * Self.releaseRatio
+        )
+        // "Has this returned to ambient" (a take's actual end) — deliberately *no* breath term: a real
+        // exhale's natural decay must be allowed to ride all the way down to ambient without a stale,
+        // peak-anchored `breathTypical` cutting it off mid-taper (PR #11 real hardware: FRC/RV kept
+        // segments truncated to a fraction of their real length, cut at ~40% of the exhale's early
+        // peak while the person was still audibly exhaling, just quieter).
+        let endBar = max(ambient * Self.quietBarAmbientFactor, activityThreshold * Self.releaseRatio)
+        let loudBar: Float
+        if let breathTypical {
+            loudBar = max(pauseBar * Self.loudBarQuietFactor, breathTypical * Self.loudBarBreathFactor)
+        } else {
+            loudBar = max(
+                ambient * Self.preOnsetLoudAmbientFactor, activityThreshold * Self.preOnsetLoudThresholdFactor
+            )
+        }
+
+        // Each verdict flips true only once persisted past its own bar; between a quiet bar and
+        // `loudBar` is a hold zone where the last verdict sticks (avoids flicker right at a boundary —
+        // matches the original single quiet/loud pair's behavior, extended to two independent quiet
+        // bars sharing one loud signal). `isLoud` becoming true is the one unambiguous "not quiet"
+        // signal, so it clears both quiet verdicts immediately.
+        if windowStat > loudBar {
+            loudPendingHops += 1
+            if loudPendingHops >= Self.quietLoudPersistHops { isLoud = true }
+        } else {
+            loudPendingHops = 0
+            if windowStat < pauseBar { isLoud = false }
+        }
+
+        if windowStat < pauseBar {
+            pauseQuietPendingHops += 1
+            if pauseQuietPendingHops >= Self.quietLoudPersistHops { isPauseQuiet = true }
+        } else {
+            pauseQuietPendingHops = 0
+        }
+        if windowStat < endBar {
+            endQuietPendingHops += 1
+            if endQuietPendingHops >= Self.quietLoudPersistHops { isEndQuiet = true }
+        } else {
+            endQuietPendingHops = 0
+        }
+        if isLoud {
+            isPauseQuiet = false
+            isEndQuiet = false
+        }
+
+        // Don't let a blackout-window between-takes breath (deliberately absorbed, not part of this
+        // take — see `CaptureDetection`'s `postArmBlackoutSec` doc) seed `breathTypical`; it isn't this
+        // take's breath.
+        let inBlackout = state == .armed && totalFrames < blackoutFrames
+        if isLoud, !inBlackout {
+            breathLoudSamples.append(env)
+            if breathLoudSamples.count > Self.breathTypicalCap { breathLoudSamples.removeFirst() }
+            if breathLoudSamples.count >= Self.minBreathTypicalHops {
+                breathTypical = Self.percentile(breathLoudSamples, 0.8)
+            }
+        }
+
+        if isPauseQuiet {
+            if pauseQuietFrames == 0 { pauseQuietStartFrame = max(0, totalFrames - quietDetectionLagFrames) }
+            pauseQuietFrames += hopSamples
+        } else {
+            pauseQuietFrames = 0
+        }
+        if isEndQuiet {
+            if endQuietFrames == 0 { endQuietStartFrame = max(0, totalFrames - quietDetectionLagFrames) }
+            endQuietFrames += hopSamples
+        } else {
+            endQuietFrames = 0
+        }
+
+        // Release detection (`.midPause → .exhale` only): a *new* phase's onset, judged against ambient
+        // like any onset — never against the pause's preceding phase's `breathTypical`, which is stale
+        // data for "did a new phase begin" (PR #11 real hardware: a passive FRC release topped out well
+        // below the loud lead-inhale's `breathTypical`, so `loudBar` never cleared and the take hung for
+        // the full `maxTakeSec`). Decays toward `endBar` the longer the pause runs.
+        if state == .midPause {
+            let pauseElapsed = totalFrames - phaseStartFrame
+            // `recentEnv` (and so `windowStat`) is a single ring shared across the whole take, not
+            // reset per phase — right as `.midPause` begins it can still hold up to `quietWindowHops`
+            // residual hops from the just-ended, louder `.inhale` tail. With `releaseBar`'s base this
+            // close to ambient, that leftover contamination alone can clear it before the ring has had
+            // a chance to fill with genuine pause-only samples, firing a false release at the pause's
+            // very start. Hold off until the window has fully refreshed since the pause began.
+            if pauseElapsed >= quietWindowHops * hopSamples {
+                let base = max(ambient * Self.preOnsetLoudAmbientFactor, activityThreshold)
+                let releaseBar: Float
+                if pauseElapsed <= releaseBarDecayStartFrames {
+                    releaseBar = base
+                } else if pauseElapsed >= releaseBarDecayEndFrames {
+                    releaseBar = endBar
+                } else {
+                    let span = Float(releaseBarDecayEndFrames - releaseBarDecayStartFrames)
+                    let t = Float(pauseElapsed - releaseBarDecayStartFrames) / span
+                    releaseBar = base + (endBar - base) * t
+                }
+                if windowStat > releaseBar {
+                    releasePendingHops += 1
+                    if releasePendingHops >= Self.quietLoudPersistHops { isRelease = true }
+                } else {
+                    releasePendingHops = 0
+                }
+            }
+            // Kept for `retroAnchoredReleaseStart` — the decay can legitimately take several seconds to
+            // confirm a genuinely faint release, and without this history the segment would be anchored
+            // to the (late) detection moment instead of where the release actually began.
+            midPauseWindowStatHistory.append(windowStat)
+            if midPauseWindowStatHistory.count > Self.midPauseHistoryCap { midPauseWindowStatHistory.removeFirst() }
+        } else {
+            releasePendingHops = 0
+            isRelease = false
+            midPauseWindowStatHistory.removeAll(keepingCapacity: true)
+        }
+    }
+
+    /// The true release start, however long `isRelease` took to confirm: scans this pause's
+    /// `windowStat` history backward for the last hop that was still genuinely quiet (below `endBar`)
+    /// and anchors there instead of at the (possibly much later) detection frame. For a prompt
+    /// detection (a loud release, confirmed within ~persistence) this lands at essentially the same
+    /// frame the old fixed-lag backdating produced — it's the universal anchor, not a special late-
+    /// detection path. Falls back to the fixed lag if history is empty (shouldn't happen: a pause is
+    /// quiet by construction at entry).
+    private func retroAnchoredReleaseStart(detectionFrame: Int, endBar: Float) -> Int {
+        for i in stride(from: midPauseWindowStatHistory.count - 1, through: 0, by: -1) {
+            if midPauseWindowStatHistory[i] < endBar {
+                let crossingFrame = midPauseEntryFrame + (i + 1) * hopSamples
+                return max(0, crossingFrame - windowDominationLagFrames)
+            }
+        }
+        return max(0, detectionFrame - loudDetectionLagFrames)
     }
 
     /// One-hop-lookahead local-max peak picker, width-gated: a peak-shaped candidate (`prevEnv ≥
