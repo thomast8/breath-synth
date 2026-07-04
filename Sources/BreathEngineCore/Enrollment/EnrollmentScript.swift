@@ -1,8 +1,9 @@
-import BreathEngine
 import Foundation
 
-/// How a step is captured live — maps to a `CaptureDetection` in `EnrollModel`.
-enum DetectionKind: Sendable {
+/// How a step is captured live — maps to a `CaptureDetection` (see `EnrollmentDetection.swift`).
+/// Shared between the native `BreathEnrollApp` and the web enrollment server — moved here (rather
+/// than duplicated) so the two can never drift: one source of truth for the calibrated script.
+public enum DetectionKind: Sendable {
     /// Inhale → pause → exhale; two labelled segments. Calm.
     case cycle
     /// One continuous breath/exhale, no separable lead phase.
@@ -20,28 +21,28 @@ enum DetectionKind: Sendable {
 /// Where one captured segment is filed: which `SegmentLabel` routes to which bank. A `cycle` step has
 /// two lanes (inhale, exhale); every other step has one (`.whole`). Each lane becomes one
 /// `captures.json` step for the bank builder.
-struct CaptureLane: Sendable {
-    let label: SegmentLabel
+public struct CaptureLane: Sendable {
+    public let label: SegmentLabel
     /// Filename base + `captures.json` slug, e.g. "calm_inhale", "packing_separated".
-    let slug: String
-    let style: String
-    let type: BreathType
+    public let slug: String
+    public let style: String
+    public let type: BreathType
     /// Builder role: "texture" (grains), "oneShotBody" (frc/rv), "cores" / "gaps" (counted).
-    let role: String
+    public let role: String
     /// Gold grading template for this lane (in the assets dir); may differ from the step's demo.
-    let reference: String?
+    public let reference: String?
 }
 
 /// One step of the guided enrollment: what to perform, how it's detected, and where its segments are
 /// filed. Pure data — the app-layer catalog; the engine stays a primitive.
-struct EnrollmentStep: Identifiable, Sendable {
-    let id = UUID()
+public struct EnrollmentStep: Identifiable, Sendable {
+    public let id = UUID()
     /// UI title, e.g. "Calm breathing".
-    let title: String
+    public let title: String
     /// The instruction shown to the person.
-    let prompt: String
+    public let prompt: String
     /// Filename in the assets dir played once as a demo before recording; nil if none.
-    let demoReference: String?
+    public let demoReference: String?
     /// How many takes to gather. Sized to the grading gates' statistical floor plus one take of
     /// wholesale-loss tolerance — not blanket redundancy: live grading (Phase 4) already auto-redoes
     /// any structurally or signal-defective take at capture time, so the offline build only has
@@ -54,25 +55,25 @@ struct EnrollmentStep: Identifiable, Sendable {
     /// cadence) is graded within a single take or pooled across takes with no such floor, so those steps
     /// only need one take beyond the functional minimum for loss tolerance — see PR #11's fable-planner
     /// take-count calibration for the full per-role evidence.
-    let takes: Int
-    let renderMode: RenderMode
-    let detection: DetectionKind
+    public let takes: Int
+    public let renderMode: RenderMode
+    public let detection: DetectionKind
     /// Per-segment length bounds (seconds) for the builder's length gate; for `cycle` these bound each phase.
-    let minSeconds: Double
-    let maxSeconds: Double
+    public let minSeconds: Double
+    public let maxSeconds: Double
     /// Expected event count shown as on-screen guidance for `cleanEvents`/`naturalRhythm` (never a hard stop).
-    let targetEvents: Int?
-    let lanes: [CaptureLane]
+    public let targetEvents: Int?
+    public let lanes: [CaptureLane]
 }
 
-enum EnrollmentScript {
+public enum EnrollmentScript {
     /// Uniform capabilities across techniques: calm captures a full inhale→pause→exhale cycle (both
     /// phases from one take); FRC/RV are single terminal exhales; recovery gets separate clean (cores)
     /// and natural-rhythm (gaps) passes (its hook breaths are reliably too close together for one
     /// natural-rhythm take to double as both); packing captures natural rhythm only by default, adding
     /// a separated pass only if that turns out too tight (`packingSeparatedFallback`). References point
     /// at the bundled palette.
-    static let steps: [EnrollmentStep] = [
+    public static let steps: [EnrollmentStep] = [
         EnrollmentStep(
             title: "Calm breathing",
             prompt: "Breathe slow and relaxed: a smooth inhale, pause a beat, then a smooth exhale. "
@@ -172,7 +173,7 @@ enum EnrollmentScript {
     /// gulps turn out too close together for a clean isolated core (see
     /// `EnrollModel.checkPackingCoreIsolation`) — unlike recovery's double-sip hooks, packing's natural
     /// cadence is usually wide enough to double as cores (see PR #11), so this isn't needed by default.
-    static let packingSeparatedFallback = EnrollmentStep(
+    public static let packingSeparatedFallback = EnrollmentStep(
         title: "Packing — separated",
         prompt: "Your natural rhythm was a bit tight for clean isolated samples. Pack 6 deliberate, "
             + "well-SEPARATED gulps this time — a clear gap between each.",

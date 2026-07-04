@@ -70,23 +70,10 @@ final class EnrollModel {
     /// `CaptureAnalyzer.quietRangeFrames`), until there's enough to write `room_tone.caf` — see
     /// `onTakeAmbient` in `startStepCapture()`. Reset per session in `chooseOutputDir()`.
     @ObservationIgnored private var ambientPool: [Float] = []
-    /// Once the pool reaches this much audio, it's written once and never touched again — a refreshing
-    /// profile would churn `LiveTakeGrader`'s cached denoise profile for no measured benefit.
-    private static let ambientPoolTargetSec = 4.0
     /// Created once the harvested room-tone pool is written (needs its file + `assetsDir`); grades every
     /// technique take live from then on. `nil` until then — takes before that are `.keptUnchecked`.
     @ObservationIgnored private var liveGrader: LiveTakeGrader?
     private(set) var liveCheck: LiveCheck = .idle
-    /// Measured (this session, real fixture): grading a packing `cores` take costs ~7-11s (denoise STFT
-    /// dominates, not fixed overhead — a short frc/rv `oneShotBody` take grades in ~1.5-3s). 15s clears
-    /// the worst observed case (10.7s, a 32s take) with real margin; a timeout still falls back to
-    /// accept, so a slow grade never blocks the session, only skips this take's live check.
-    private let liveGradeDeadlineSec = 15.0
-    /// Redo policy is app-catalog data, not engine or grader logic: only signal-defect gates trigger an
-    /// auto-redo. Person-dependent gates (off_technique/cadence_drift/outlier) are advisory-only —
-    /// auto-redoing a person against the bundled gold's spectrum/cadence would recreate the blind
-    /// retry loop that motivated this whole feature.
-    private let redoReasons: Set<String> = ["clipped", "length", "dropout", "low_snr", "merged_gulp"]
 
     /// First error to surface — a model-level start error, else a recorder write error.
     var displayError: String? { errorMessage ?? recorder.errorMessage }
@@ -139,7 +126,7 @@ final class EnrollModel {
         do {
             try recorder.start(
                 takes: step.takes,
-                detection: detection(for: step),
+                detection: EnrollmentDetection.detection(for: step),
                 noiseFloorRMS: rollingFloor,
                 fileURL: { i, label in
                     dir.appendingPathComponent("\(slugByLabel[label] ?? "take")_\(i + 1).caf")
@@ -172,7 +159,7 @@ final class EnrollModel {
         guard roomToneFile == nil, let dir = outputDir else { return }
         ambientPool.append(contentsOf: samples)
         let poolSec = Double(ambientPool.count) / recorder.sampleRate
-        guard poolSec >= Self.ambientPoolTargetSec else { return }
+        guard poolSec >= EnrollmentDetection.ambientPoolTargetSec else { return }
         let url = dir.appendingPathComponent("room_tone.caf")
         do {
             try BreathRecorder.writeMono(ambientPool, sampleRate: recorder.sampleRate, to: url)
@@ -225,8 +212,9 @@ final class EnrollModel {
                     return results
                 }
             }
-            group.addTask { [liveGradeDeadlineSec] in
-                try? await Task.sleep(nanoseconds: UInt64(liveGradeDeadlineSec * 1_000_000_000))
+            group.addTask {
+                let deadline = EnrollmentDetection.liveGradeDeadlineSec
+                try? await Task.sleep(nanoseconds: UInt64(deadline * 1_000_000_000))
                 return nil
             }
             let first = await group.next() ?? nil
@@ -236,12 +224,12 @@ final class EnrollModel {
 
         let elapsedSec = Double(DispatchTime.now().uptimeNanoseconds - reviewStart.uptimeNanoseconds) / 1_000_000_000
         guard let verdicts else {
-            print("[PHASE4] TIMEOUT after \(String(format: "%.2f", elapsedSec))s (deadline=\(liveGradeDeadlineSec)s) — keptUnchecked, take=\(takeIndex)")
+            print("[PHASE4] TIMEOUT after \(String(format: "%.2f", elapsedSec))s (deadline=\(EnrollmentDetection.liveGradeDeadlineSec)s) — keptUnchecked, take=\(takeIndex)")
             liveCheck = .keptUnchecked(take: takeIndex)
             return .accept
         }
         print("[PHASE4] graded in \(String(format: "%.2f", elapsedSec))s — verdicts: \(verdicts.map { "accept=\($0.accept) reason=\($0.reason ?? "-") advisory=\($0.advisory) frags=\($0.fragmentsAccepted)/\($0.fragmentsTotal)" })")
-        if let worst = verdicts.first(where: { !$0.accept && redoReasons.contains($0.reason ?? "") }) {
+        if let worst = verdicts.first(where: { !$0.accept && EnrollmentDetection.redoReasons.contains($0.reason ?? "") }) {
             print("[PHASE4] DECISION: redo, take=\(takeIndex), reason=\(worst.reason ?? "quality")")
             liveCheck = .redoing(take: takeIndex, reason: worst.reason ?? "quality")
             return .redo
@@ -265,63 +253,6 @@ final class EnrollModel {
         stage = .finished
     }
 
-    /// Map a step's catalog intent to the engine's detection contract (tuning lives here, app-side).
-    private func detection(for step: EnrollmentStep) -> CaptureDetection {
-        switch step.detection {
-        case .cycle:
-            // postArmBlackoutSec: a real between-takes settle pause — calm is gentle, so a short one —
-            // that also (Phase 2b) gives the harvest/rolling-floor calibration a guaranteed window;
-            // without it a self-paced take could onset almost immediately, leaving nothing to sample.
-            return .cycle(minPhaseSec: step.minSeconds, midPauseSec: 0.45,
-                          maxCycleSec: step.maxSeconds * 2 + 6, trailingSilenceSec: 1.0,
-                          postArmBlackoutSec: 1.5)
-        case .single:
-            return .single(minActiveSec: max(0.3, step.minSeconds * 0.5),
-                           maxTakeSec: step.maxSeconds + 3, trailingSilenceSec: 0.8,
-                           postArmBlackoutSec: 1.5)
-        case .finalPhase:
-            // minLeadSec small — the lead phase (a real inhale before the hold) is discarded regardless
-            // of how long it runs; midPauseSec matches calm's deliberate-pause split; maxTakeSec has
-            // margin for the lead + pause overhead on top of the final phase's own bound.
-            // postArmBlackoutSec: FRC/RV are exertive (RV especially — a forced exhale to residual
-            // volume) — a real recovery pause matters on its own, on top of the settle/harvest purpose.
-            return .finalPhase(minLeadSec: 0.5, midPauseSec: 0.4,
-                               minPhaseSec: step.minSeconds, maxTakeSec: step.maxSeconds + 6,
-                               trailingSilenceSec: 0.8, postArmBlackoutSec: 2.0)
-        case .cleanEvents:
-            // Trailing silence must exceed the deliberate inter-event gap (events are well-separated),
-            // so a slow gap doesn't end the take after the first event — only the real done-pause does.
-            // postArmBlackoutSec: gives the between-takes exhale/re-inhale (packing/recovery have no
-            // discarded-lead-phase structure like cycle/finalPhase) a window to happen without bleeding
-            // into the next take as onset noise. pairedEvents: recovery's hook breath is a strict
-            // inhale-sip/exhale-sip alternation (see `CaptureDetection.cleanEvents`'s doc); packing's
-            // single-click gulp has no such structure.
-            return .cleanEvents(minGapSec: 0.35, maxTakeSec: step.maxSeconds + 8, trailingSilenceSec: 3.0,
-                                eventMinDistSec: eventMinDistSec(for: step), targetEvents: step.targetEvents,
-                                spectralGate: spectralGateProfile(for: step), postArmBlackoutSec: 5.0,
-                                pairedEvents: step.lanes.first?.style == "recovery")
-        case .naturalRhythm:
-            return .naturalRhythm(minActiveSec: 1.0, maxTakeSec: step.maxSeconds + 5, trailingSilenceSec: 1.0,
-                                  eventMinDistSec: eventMinDistSec(for: step),
-                                  spectralGate: spectralGateProfile(for: step), postArmBlackoutSec: 5.0,
-                                  pairedEvents: step.lanes.first?.style == "recovery")
-        }
-    }
-
-    /// Refractory spacing between counted events, by style: recovery's hook breaths need the wider
-    /// offline `hookMinDistSec` floor (matches `UnitExtractor.extract`'s double-sip merge) so an
-    /// in/out pair isn't split into two events; every other counted style uses the tighter gulp floor.
-    private func eventMinDistSec(for step: EnrollmentStep) -> Double {
-        step.lanes.first?.style == "recovery" ? UnitExtractor.hookMinDistSec : UnitExtractor.gulpMinDistSec
-    }
-
-    /// Spectral event-shape profile, by style: packing's sharp glottal gulps and recovery's turbulent
-    /// hook breaths are spectrally near-opposite (see `SpectralGateProfile.gulp`/`.hook`), so there is
-    /// no shared default — every counted style picks explicitly.
-    private func spectralGateProfile(for step: EnrollmentStep) -> SpectralGateProfile {
-        step.lanes.first?.style == "recovery" ? .hook : .gulp
-    }
-
     /// Dev/testing shortcut: jump straight to any technique step instead of walking the whole script.
     /// The room-tone pool need not have filled yet — the analyzer just falls back to `absActivityFloor`
     /// — but if it has, `rollingFloor`/`liveGrader` (both already session-scoped, not step-scoped) carry
@@ -333,11 +264,6 @@ final class EnrollModel {
         stage = .technique(step: index)
     }
 
-    /// Gulps closer together than this can't isolate cleanly (`UnitExtractor.coreRanges`'s fixed
-    /// `[-0.08s, +0.35s]` window around each event bleeds into a neighbor closer than 0.43s); a small
-    /// margin above that keeps this a "clearly fine" bar rather than a razor's-edge one.
-    private static let packingCoreIsolationSec = 0.45
-
     /// After "Packing" (natural rhythm) finishes, checks whether its own gulps were spaced widely enough
     /// to double as clean cores (see PR #11's real-data finding: natural packing cadence usually clears
     /// this, unlike recovery's reliably-tighter hook cadence). If not, inserts `packingSeparatedFallback`
@@ -348,7 +274,7 @@ final class EnrollModel {
         defer { currentStepIntervalsFrames = [] }
         guard let minGapFrames = currentStepIntervalsFrames.min() else { return }
         let minGapSec = Double(minGapFrames) / recorder.sampleRate
-        guard minGapSec < Self.packingCoreIsolationSec else { return }
+        guard minGapSec < EnrollmentDetection.packingCoreIsolationSec else { return }
         steps.insert(EnrollmentScript.packingSeparatedFallback, at: index + 1)
         stepInsertedNotice = "Your natural packing rhythm ran a bit tight (\(String(format: "%.2f", minGapSec))s "
             + "between some gulps) for clean isolated samples, so a quick separated round got added next."

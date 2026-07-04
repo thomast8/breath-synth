@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { LevelMeter } from "../components/LevelMeter";
 import type { CaptureController } from "../audio/CaptureController";
 
@@ -6,6 +6,9 @@ const ROOM_TONE_SECONDS = 5;
 
 interface Props {
   capture: CaptureController;
+  level: { rms: number; peak: number };
+  micReady: boolean;
+  micError: string | null;
   onReady: (roomTone: Blob, sampleRate: number) => void;
   error: string | null;
   uploading: boolean;
@@ -15,22 +18,9 @@ interface Props {
  * native app's incremental per-take harvesting, since the server grades against one uploaded
  * room-tone clip per session (see SessionsController.uploadRoomTone) rather than an accumulating
  * pool. Simpler to implement correctly and only costs the participant a few seconds up front. */
-export function MicCheckScreen({ capture, onReady, error, uploading }: Props) {
-  const [level, setLevel] = useState({ rms: 0, peak: 0 });
-  const [micError, setMicError] = useState<string | null>(null);
-  const [ready, setReady] = useState(false);
+export function MicCheckScreen({ capture, level, micReady, micError, onReady, error, uploading }: Props) {
   const [recordingRoomTone, setRecordingRoomTone] = useState(false);
   const [countdown, setCountdown] = useState(ROOM_TONE_SECONDS);
-  const initialized = useRef(false);
-
-  useEffect(() => {
-    if (initialized.current) return;
-    initialized.current = true;
-    capture
-      .initialize((l) => setLevel(l))
-      .then(() => setReady(true))
-      .catch((e: unknown) => setMicError(e instanceof Error ? e.message : String(e)));
-  }, [capture]);
 
   function startRoomTone() {
     setRecordingRoomTone(true);
@@ -59,11 +49,11 @@ export function MicCheckScreen({ capture, onReady, error, uploading }: Props) {
           reload.
         </p>
       )}
-      {!micError && !ready && <p>Requesting microphone access…</p>}
-      {ready && !recordingRoomTone && (
+      {!micError && !micReady && <p>Requesting microphone access…</p>}
+      {micReady && !recordingRoomTone && (
         <>
           <p>Speak or breathe normally to check the level, then record a few seconds of silence.</p>
-          <LevelMeter rms={level.rms} active={ready} />
+          <LevelMeter rms={level.rms} active={micReady} />
           {noiseSuppressionOn && (
             <p className="warning-text">
               This browser may be applying noise suppression or auto-gain to the mic input, which

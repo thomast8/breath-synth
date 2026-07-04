@@ -40,7 +40,6 @@ export class CaptureController {
   private recording = false;
   private chunks: Float32Array[] = [];
   private sampleCount = 0;
-  private takeStartedAt = 0;
   private quietStreakFrames = 0;
   private windowFrames = 0;
   private maxFrames = 0;
@@ -99,7 +98,6 @@ export class CaptureController {
     this.takePeak = 0;
     this.takeSumSquares = 0;
     this.takeSampleTotal = 0;
-    this.takeStartedAt = performance.now();
     this.minFrames = Math.round(minSeconds * this.sampleRate);
     this.maxFrames = Math.round(maxSeconds * this.sampleRate);
     this.onAutoStop = onAutoStop;
