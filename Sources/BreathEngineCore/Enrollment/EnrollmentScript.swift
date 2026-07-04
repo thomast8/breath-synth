@@ -31,6 +31,15 @@ public struct CaptureLane: Sendable {
     public let role: String
     /// Gold grading template for this lane (in the assets dir); may differ from the step's demo.
     public let reference: String?
+
+    public init(label: SegmentLabel, slug: String, style: String, type: BreathType, role: String, reference: String?) {
+        self.label = label
+        self.slug = slug
+        self.style = style
+        self.type = type
+        self.role = role
+        self.reference = reference
+    }
 }
 
 /// One step of the guided enrollment: what to perform, how it's detected, and where its segments are
@@ -64,6 +73,23 @@ public struct EnrollmentStep: Identifiable, Sendable {
     /// Expected event count shown as on-screen guidance for `cleanEvents`/`naturalRhythm` (never a hard stop).
     public let targetEvents: Int?
     public let lanes: [CaptureLane]
+
+    public init(
+        title: String, prompt: String, demoReference: String?, takes: Int, renderMode: RenderMode,
+        detection: DetectionKind, minSeconds: Double, maxSeconds: Double, targetEvents: Int?,
+        lanes: [CaptureLane]
+    ) {
+        self.title = title
+        self.prompt = prompt
+        self.demoReference = demoReference
+        self.takes = takes
+        self.renderMode = renderMode
+        self.detection = detection
+        self.minSeconds = minSeconds
+        self.maxSeconds = maxSeconds
+        self.targetEvents = targetEvents
+        self.lanes = lanes
+    }
 }
 
 public enum EnrollmentScript {
