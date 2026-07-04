@@ -12,7 +12,7 @@ public func configure(_ app: Application) async throws {
     try configureDatabase(app)
     try configureStorage(app)
     try configureInviteAndAdmin(app)
-    configureGrading(app)
+    configureEnrollmentSessions(app)
 
     app.migrations.add(CreateParticipant())
     app.migrations.add(CreateEnrollSession())
@@ -51,10 +51,23 @@ private func configureStorage(_ app: Application) throws {
     app.logger.info("Storage root: \(root)")
 }
 
-private func configureGrading(_ app: Application) {
-    let assetsDir = URL(fileURLWithPath: app.directory.workingDirectory)
-        .appendingPathComponent("Resources/gold-refs", isDirectory: true)
-    app.gradingSessions = GradingSessionStore(assetsDir: assetsDir)
+/// One `EnrollmentEngine` per live session, registered by `EnrollmentSocketController` on `hello` and
+/// looked up again on a `resume` reconnect. Idle sessions (participant closed the tab, never resumed)
+/// are swept periodically so an abandoned session doesn't leak an actor forever.
+private func configureEnrollmentSessions(_ app: Application) {
+    let registry = EnrollmentSessionRegistry()
+    app.enrollmentSessions = registry
+    let idleTimeout: TimeInterval = 30 * 60
+    let sweepInterval: UInt64 = 5 * 60 * 1_000_000_000
+    Task.detached {
+        while !Task.isCancelled {
+            try? await Task.sleep(nanoseconds: sweepInterval)
+            let evicted = await registry.evictIdle(olderThan: idleTimeout)
+            if !evicted.isEmpty {
+                app.logger.info("Evicted \(evicted.count) idle enrollment session(s)")
+            }
+        }
+    }
 }
 
 private func configureInviteAndAdmin(_ app: Application) throws {

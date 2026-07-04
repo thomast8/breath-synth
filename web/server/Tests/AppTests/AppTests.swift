@@ -17,11 +17,7 @@ final class AppTests: XCTestCase {
             .appendingPathComponent("breath-enroll-tests-\(UUID().uuidString)", isDirectory: true)
         app.storageDriver = LocalDiskStorage(root: tempDir)
 
-        let assetsDir = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent() // AppTests
-            .deletingLastPathComponent() // Tests
-            .appendingPathComponent("Resources/gold-refs", isDirectory: true)
-        app.gradingSessions = GradingSessionStore(assetsDir: assetsDir)
+        app.enrollmentSessions = EnrollmentSessionRegistry()
 
         app.inviteCode = "letmein"
         app.adminToken = "admin-secret"
@@ -72,11 +68,11 @@ final class AppTests: XCTestCase {
         try await shutdown(app)
     }
 
-    /// End-to-end plumbing check: participant → session → room tone → a take upload → verdict →
-    /// complete → admin list/export. Not asserting the grader's *specific* accept/reject verdict on
-    /// synthetic silence (that decision-level parity is Phase 4's job, against real recordings) —
-    /// this proves the pipeline wires together and produces a coherent, exportable session.
-    func testFullSessionFlowProducesExportableSession() async throws {
+    /// Plumbing check for the REST-only lifecycle around the live-capture WebSocket (participant →
+    /// session → complete → admin list/export). Capture itself — the WebSocket flow that writes takes
+    /// and grades them live — is `EnrollmentSocketHandlerTests`' job; this just proves the surrounding
+    /// REST endpoints and the admin export still produce a coherent (if take-less) session.
+    func testSessionLifecycleReachesAdminExport() async throws {
         let app = try await makeTestApp()
 
         var participantID: UUID!
@@ -97,32 +93,6 @@ final class AppTests: XCTestCase {
             XCTAssertEqual(res.status, .ok)
             sessionID = try res.content.decode(EnrollSession.self).id
         })
-
-        let roomTone = synthesizeWAV(seconds: 2, amplitude: 0.002)
-        try await app.test(
-            .POST, "api/sessions/\(sessionID!)/room-tone",
-            beforeRequest: { req async throws in
-                try req.content.encode(RoomToneUploadRequest(sampleRate: 44_100, audio: roomTone))
-            },
-            afterResponse: { res async throws in
-                XCTAssertEqual(res.status, .ok)
-            })
-
-        let take = synthesizeWAV(seconds: 8, amplitude: 0.15)
-        var verdict: TakeVerdictResponse!
-        try await app.test(
-            .POST, "api/sessions/\(sessionID!)/takes",
-            beforeRequest: { req async throws in
-                try req.content.encode(TakeUploadRequest(
-                    stepSlug: "calm", laneSlug: "calm_inhale", style: "calm", breathType: "inhale",
-                    renderMode: "textured", role: "texture", takeIndex: 1, reference: nil,
-                    minSeconds: 4, maxSeconds: 15, sampleRate: 44_100, clientMeta: nil, audio: take))
-            },
-            afterResponse: { res async throws in
-                XCTAssertEqual(res.status, .ok)
-                verdict = try res.content.decode(TakeVerdictResponse.self)
-            })
-        XCTAssertNotNil(verdict)
 
         try await app.test(
             .POST, "api/sessions/\(sessionID!)/complete",
@@ -161,52 +131,6 @@ final class AppTests: XCTestCase {
         try await shutdown(app)
     }
 
-    /// A crafted `laneSlug` containing ".." must never reach the object-storage key or a future
-    /// ZIP entry name — regression test for the path-traversal finding fixed in `SlugValidation`.
-    func testTakeUploadRejectsPathTraversalLaneSlug() async throws {
-        let app = try await makeTestApp()
-
-        var participantID: UUID!
-        try await app.test(.POST, "api/participants", beforeRequest: { req async throws in
-            try req.content.encode(ParticipantCreateRequest(
-                inviteCode: "letmein", pseudonym: nil, experienceLevel: .novice, consentVersion: "v1"))
-        }, afterResponse: { res async throws in
-            participantID = try res.content.decode(Participant.self).id
-        })
-
-        var sessionID: UUID!
-        try await app.test(.POST, "api/sessions", beforeRequest: { req async throws in
-            try req.content.encode(SessionCreateRequest(
-                participantID: participantID, scriptVersion: "v1", sampleRate: 44_100,
-                userAgent: "XCTest", micConstraintsActual: nil))
-        }, afterResponse: { res async throws in
-            sessionID = try res.content.decode(EnrollSession.self).id
-        })
-
-        let roomTone = synthesizeWAV(seconds: 2, amplitude: 0.002)
-        try await app.test(.POST, "api/sessions/\(sessionID!)/room-tone", beforeRequest: { req async throws in
-            try req.content.encode(RoomToneUploadRequest(sampleRate: 44_100, audio: roomTone))
-        }, afterResponse: { res async throws in
-            XCTAssertEqual(res.status, .ok)
-        })
-
-        let take = synthesizeWAV(seconds: 8, amplitude: 0.15)
-        try await app.test(
-            .POST, "api/sessions/\(sessionID!)/takes",
-            beforeRequest: { req async throws in
-                try req.content.encode(TakeUploadRequest(
-                    stepSlug: "calm", laneSlug: "../../../../tmp/evil", style: "calm",
-                    breathType: "inhale", renderMode: "textured", role: "texture", takeIndex: 1,
-                    reference: nil, minSeconds: 4, maxSeconds: 15, sampleRate: 44_100,
-                    clientMeta: nil, audio: take))
-            },
-            afterResponse: { res async throws in
-                XCTAssertEqual(res.status, .badRequest)
-            })
-
-        try await shutdown(app)
-    }
-
     func testAdminRoutesRejectWrongToken() async throws {
         let app = try await makeTestApp()
         try await app.test(.GET, "api/admin/sessions", beforeRequest: { req async throws in
@@ -214,74 +138,6 @@ final class AppTests: XCTestCase {
         }, afterResponse: { res async throws in
             XCTAssertEqual(res.status, .unauthorized)
         })
-        try await shutdown(app)
-    }
-
-    /// Packing uploads the same recording twice under one shared laneSlug ("packing_cadence")
-    /// with two different roles ("cores"/"gaps") — regression test for the bug where the second
-    /// upload's redo-supersession query ignored `role` and wrongly marked the first upload
-    /// "redone" instead of recognizing it as a sibling projection of the same take.
-    func testPackingDualRoleUploadsAreBothKeptNotSuperseded() async throws {
-        let app = try await makeTestApp()
-
-        var participantID: UUID!
-        try await app.test(.POST, "api/participants", beforeRequest: { req async throws in
-            try req.content.encode(ParticipantCreateRequest(
-                inviteCode: "letmein", pseudonym: nil, experienceLevel: .novice, consentVersion: "v1"))
-        }, afterResponse: { res async throws in
-            participantID = try res.content.decode(Participant.self).id
-        })
-
-        var sessionID: UUID!
-        try await app.test(.POST, "api/sessions", beforeRequest: { req async throws in
-            try req.content.encode(SessionCreateRequest(
-                participantID: participantID, scriptVersion: "v1", sampleRate: 44_100,
-                userAgent: "XCTest", micConstraintsActual: nil))
-        }, afterResponse: { res async throws in
-            sessionID = try res.content.decode(EnrollSession.self).id
-        })
-
-        let roomTone = synthesizeWAV(seconds: 2, amplitude: 0.002)
-        try await app.test(.POST, "api/sessions/\(sessionID!)/room-tone", beforeRequest: { req async throws in
-            try req.content.encode(RoomToneUploadRequest(sampleRate: 44_100, audio: roomTone))
-        }, afterResponse: { res async throws in
-            XCTAssertEqual(res.status, .ok)
-        })
-
-        let take = synthesizeWAV(seconds: 10, amplitude: 0.15)
-        for role in ["gaps", "cores"] {
-            try await app.test(
-                .POST, "api/sessions/\(sessionID!)/takes",
-                beforeRequest: { req async throws in
-                    try req.content.encode(TakeUploadRequest(
-                        stepSlug: "packing", laneSlug: "packing_cadence", style: "packing",
-                        breathType: "inhale", renderMode: "counted", role: role, takeIndex: 1,
-                        reference: nil, minSeconds: 8, maxSeconds: 25, sampleRate: 44_100,
-                        clientMeta: nil, audio: take))
-                },
-                afterResponse: { res async throws in
-                    XCTAssertEqual(res.status, .ok)
-                })
-        }
-
-        let rows = try await Take.query(on: app.db)
-            .filter(\.$session.$id == sessionID)
-            .filter(\.$laneSlug == "packing_cadence")
-            .all()
-        XCTAssertEqual(rows.count, 2)
-        XCTAssertTrue(rows.allSatisfy { $0.status == .kept }, "neither role's row should be superseded by the other")
-        XCTAssertEqual(Set(rows.map(\.role)), Set(["gaps", "cores"]))
-
-        try await app.test(
-            .GET, "api/admin/sessions/\(sessionID!)/export",
-            beforeRequest: { req async throws in
-                req.headers.bearerAuthorization = .init(token: "admin-secret")
-            },
-            afterResponse: { res async throws in
-                XCTAssertEqual(res.status, .ok)
-                XCTAssertGreaterThan(Data(buffer: res.body).count, 0)
-            })
-
         try await shutdown(app)
     }
 
@@ -301,39 +157,5 @@ final class AppTests: XCTestCase {
         XCTAssertFalse(ConstantTimeCompare.equals("short", "muchlonger"))
         XCTAssertFalse(ConstantTimeCompare.equals("", "a"))
         XCTAssertTrue(ConstantTimeCompare.equals("", ""))
-    }
-
-    /// A 2-second, 44.1kHz mono 16-bit PCM WAV of pseudo-random noise at `amplitude` — a stand-in
-    /// for real breath audio, just enough to exercise decode → analyze → grade without needing a
-    /// bundled fixture recording.
-    private func synthesizeWAV(seconds: Double, amplitude: Double) -> Data {
-        let sampleRate = 44_100
-        let count = Int(seconds * Double(sampleRate))
-        var samples = [Int16](repeating: 0, count: count)
-        var seed: UInt64 = 12345
-        for i in 0..<count {
-            seed = seed &* 6_364_136_223_846_793_005 &+ 1
-            let unit = Double(seed >> 33) / Double(1 << 31) * 2 - 1
-            samples[i] = Int16(max(-1, min(1, unit * amplitude)) * Double(Int16.max))
-        }
-
-        var data = Data()
-        func appendASCII(_ s: String) { data.append(contentsOf: s.utf8) }
-        func appendLE(_ v: UInt32) { var le = v.littleEndian; withUnsafeBytes(of: &le) { data.append(contentsOf: $0) } }
-        func appendLE(_ v: UInt16) { var le = v.littleEndian; withUnsafeBytes(of: &le) { data.append(contentsOf: $0) } }
-        func appendLE(_ v: Int16) { var le = v.littleEndian; withUnsafeBytes(of: &le) { data.append(contentsOf: $0) } }
-
-        let dataSize = samples.count * 2
-        appendASCII("RIFF"); appendLE(UInt32(36 + dataSize)); appendASCII("WAVE")
-        appendASCII("fmt "); appendLE(UInt32(16))
-        appendLE(UInt16(1)) // PCM
-        appendLE(UInt16(1)) // mono
-        appendLE(UInt32(sampleRate))
-        appendLE(UInt32(sampleRate * 2))
-        appendLE(UInt16(2)) // block align
-        appendLE(UInt16(16)) // bits per sample
-        appendASCII("data"); appendLE(UInt32(dataSize))
-        for s in samples { appendLE(s) }
-        return data
     }
 }
