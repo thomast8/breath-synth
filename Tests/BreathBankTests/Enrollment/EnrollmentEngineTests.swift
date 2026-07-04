@@ -151,6 +151,44 @@ struct EnrollmentEngineTests {
         #expect(FileManager.default.fileExists(atPath: manifestURL.path))
     }
 
+    // MARK: Event stream
+
+    private actor EventCollector {
+        private(set) var events: [EnrollmentEngine.Event] = []
+        func record(_ event: EnrollmentEngine.Event) { events.append(event) }
+    }
+
+    /// `takeVerdict`/`stepComplete`/`sessionFinished` all originate from the detached post-review
+    /// continuation, outside any `feed()` call — a WebSocket handler can't reconstruct them by polling
+    /// state the way it can `detectionState`/`ambientHold`, hence this dedicated event-stream contract.
+    @Test func eventStreamEmitsVerdictsStepCompleteAndFinished() async throws {
+        let dirs = try makeDirs()
+        let steps = [singleStep(title: "Step A", slug: "stepA"), singleStep(title: "Step B", slug: "stepB")]
+        let enrollment = EnrollmentEngine(outputDir: dirs.output, assetsDir: dirs.assets, sampleRate: sr, steps: steps)
+        let collector = EventCollector()
+        let stream = await enrollment.makeEventStream()
+        let consumer = Task {
+            for await event in stream { await collector.record(event) }
+        }
+
+        await enrollment.start()
+        await enrollment.startStepCapture()
+        await feed(enrollment, silence(1.7) + tone(1.0) + silence(1.0))
+        await waitUntil { await enrollment.stage == .technique(step: 1) }
+        await enrollment.startStepCapture()
+        await feed(enrollment, silence(1.7) + tone(1.0) + silence(1.0))
+        await waitUntil { await enrollment.stage == .finished }
+        await consumer.value  // the stream's `finish()` (on session completion) ends the for-await loop
+
+        let events = await collector.events
+        #expect(events.count == 4, "\(events)")
+        guard events.count == 4 else { return }
+        #expect(events[0] == .takeVerdict(takeIndex: 0, check: .keptUnchecked(take: 0)))
+        #expect(events[1] == .stepComplete(nextStepIndex: 1, insertedFallbackNotice: nil))
+        #expect(events[2] == .takeVerdict(takeIndex: 0, check: .keptUnchecked(take: 0)))
+        #expect(events[3] == .sessionFinished)
+    }
+
     // MARK: Packing core-isolation fallback insertion
 
     @Test func tightPackingCadenceInsertsSeparatedFallbackStep() async throws {

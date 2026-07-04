@@ -27,6 +27,18 @@ public actor EnrollmentEngine {
         case keptUnchecked(take: Int)
     }
 
+    /// Session transitions the WebSocket handler (Phase 4) needs to push to the client as they happen.
+    /// `takeVerdict`/`stepComplete`/`sessionFinished` all originate from `TakeCaptureEngine`'s detached
+    /// post-review continuation — outside any `feed()` call — so a handler can't reconstruct them by
+    /// polling engine state the way it can for `detectionState`/`ambientHold` (which live on
+    /// `TakeCaptureEngine`, refreshed inside `feed()`, and are fine to poll at a fixed rate instead).
+    public enum Event: Sendable, Equatable {
+        case roomToneReady(filename: String)
+        case takeVerdict(takeIndex: Int, check: LiveCheck)
+        case stepComplete(nextStepIndex: Int, insertedFallbackNotice: String?)
+        case sessionFinished
+    }
+
     /// Mutable (not `let`): the packing-core-isolation check can insert `packingSeparatedFallback`
     /// mid-session — `advance(fromStep:)`'s `step + 1 < steps.count` already tolerates a growing array.
     public private(set) var steps: [EnrollmentStep]
@@ -71,6 +83,7 @@ public actor EnrollmentEngine {
     /// the calibrated `EnrollmentDetection.liveGradeDeadlineSec`; injectable so a test can exercise the
     /// timeout branch against a deliberately slow grade without waiting out the real 15s deadline.
     private let gradeDeadlineSec: Double
+    private var eventContinuation: AsyncStream<Event>.Continuation?
 
     public init(
         outputDir: URL, assetsDir: URL, sampleRate: Double, steps: [EnrollmentStep] = EnrollmentScript.steps,
@@ -106,6 +119,15 @@ public actor EnrollmentEngine {
     /// Begin the session at the first technique step. The caller has already prepared `outputDir`.
     public func start() {
         stage = .technique(step: 0)
+    }
+
+    /// Subscribe to this session's transition events — call once (a second call replaces the first
+    /// continuation, dropping the earlier subscriber). Finishes when the session ends, normally or via
+    /// `finishEarly()`.
+    public func makeEventStream() -> AsyncStream<Event> {
+        AsyncStream { continuation in
+            self.eventContinuation = continuation
+        }
     }
 
     // MARK: - Capture
@@ -171,6 +193,7 @@ public actor EnrollmentEngine {
             roomToneFile = url.lastPathComponent
             liveGrader = LiveTakeGrader(roomToneURL: url, assetsDir: assetsDir)
             writeSessionManifest()
+            eventContinuation?.yield(.roomToneReady(filename: url.lastPathComponent))
         } catch {
             errorMessage = "Failed to write room_tone.wav: \(error.localizedDescription)"
         }
@@ -190,7 +213,7 @@ public actor EnrollmentEngine {
         takeIndex: Int, segments: [(label: SegmentLabel, url: URL)], step: EnrollmentStep
     ) async -> TakeReview {
         guard let grader = liveGrader else {
-            liveCheck = .keptUnchecked(take: takeIndex)
+            setLiveCheck(.keptUnchecked(take: takeIndex))
             return .accept
         }
         liveCheck = .checking(take: takeIndex)
@@ -226,15 +249,27 @@ public actor EnrollmentEngine {
         }
 
         guard let verdicts else {
-            liveCheck = .keptUnchecked(take: takeIndex)
+            setLiveCheck(.keptUnchecked(take: takeIndex))
             return .accept
         }
         if let worst = verdicts.first(where: { !$0.accept && EnrollmentDetection.redoReasons.contains($0.reason ?? "") }) {
-            liveCheck = .redoing(take: takeIndex, reason: worst.reason ?? "quality")
+            setLiveCheck(.redoing(take: takeIndex, reason: worst.reason ?? "quality"))
             return .redo
         }
-        liveCheck = .passed(take: takeIndex)
+        setLiveCheck(.passed(take: takeIndex))
         return .accept
+    }
+
+    /// Sets `liveCheck` and emits the matching `takeVerdict` event together, so the two can never drift.
+    /// Not used for `.checking` (an in-progress status, not a verdict) or `.idle` (reset, not a result).
+    private func setLiveCheck(_ check: LiveCheck) {
+        liveCheck = check
+        let takeIndex: Int
+        switch check {
+        case let .passed(take), let .redoing(take, _), let .keptUnchecked(take): takeIndex = take
+        case .idle, .checking: return
+        }
+        eventContinuation?.yield(.takeVerdict(takeIndex: takeIndex, check: check))
     }
 
     /// Manual override: finalize the take in progress now.
@@ -249,6 +284,8 @@ public actor EnrollmentEngine {
         await engine.abort()
         writeSessionManifest()
         stage = .finished
+        eventContinuation?.yield(.sessionFinished)
+        eventContinuation?.finish()
     }
 
     /// Dev/testing shortcut: jump straight to any technique step instead of walking the whole script.
@@ -282,9 +319,12 @@ public actor EnrollmentEngine {
         checkPackingCoreIsolation(justCompletedStepIndex: step)
         if step + 1 < steps.count {
             stage = .technique(step: step + 1)
+            eventContinuation?.yield(.stepComplete(nextStepIndex: step + 1, insertedFallbackNotice: stepInsertedNotice))
         } else {
             stage = .finished
             writeSessionManifest()
+            eventContinuation?.yield(.sessionFinished)
+            eventContinuation?.finish()
         }
     }
 
