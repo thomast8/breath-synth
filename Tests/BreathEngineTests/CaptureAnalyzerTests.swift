@@ -45,9 +45,10 @@ final class CaptureAnalyzerTests: XCTestCase {
     // MARK: Harness
 
     private func run(
-        _ detection: CaptureDetection, noiseFloor: Float? = nil, _ signal: [Float]
+        _ detection: CaptureDetection, noiseFloor: Float? = nil, ambientGateRMS: Float? = nil, _ signal: [Float]
     ) -> (events: [CaptureAnalyzer.Event], analyzer: CaptureAnalyzer) {
-        var a = CaptureAnalyzer(sampleRate: sr, detection: detection, noiseFloorRMS: noiseFloor)
+        var a = CaptureAnalyzer(
+            sampleRate: sr, detection: detection, noiseFloorRMS: noiseFloor, ambientGateRMS: ambientGateRMS)
         var events: [CaptureAnalyzer.Event] = []
         var i = 0
         while i < signal.count {
@@ -115,6 +116,84 @@ final class CaptureAnalyzerTests: XCTestCase {
         let signal = lowNoise(1.0, 0.002) + tone(1.0)
         let (_, analyzer) = run(.single(minActiveSec: 0.2, maxTakeSec: 10, trailingSilenceSec: 0.8), signal)
         XCTAssertNil(analyzer.preOnsetFloorRMS, "under 1.5s of armed hops isn't enough for a meaningful percentile")
+    }
+
+    // MARK: quietRangeFrames (room-tone harvest — Problem 2b)
+
+    func testQuietRangeSelectsLongestFloorLevelStretch() {
+        // Two quiet stretches (3.0s, 2.0s) flank a breath-scale burst; blackout shields the whole armed
+        // period so the burst can't itself onset. The longer, earlier stretch must be selected.
+        let signal = lowNoise(3.0, 0.002) + tone(0.5, 0.05) + lowNoise(2.0, 0.002) + tone(1.0)
+        let (_, analyzer) = run(
+            .cleanEvents(minGapSec: 0.1, maxTakeSec: 20, trailingSilenceSec: 0.8, postArmBlackoutSec: 4.0), signal)
+        let range = try? XCTUnwrap(analyzer.quietRangeFrames)
+        XCTAssertNotNil(range)
+        guard let range else { return }
+        let lengthSec = Double(range.upperBound - range.lowerBound) / sr
+        XCTAssertEqual(lengthSec, 3.0, accuracy: 0.3, "must pick the longer 3.0s stretch, not the 2.0s one")
+        XCTAssertLessThan(Double(range.upperBound) / sr, 3.3, "must end before the burst, not run into it")
+    }
+
+    func testQuietRangeNilWhenNothingQuietLongEnough() {
+        // Alternating 0.2s quiet/0.2s loud — no single contiguous quiet run reaches the 0.5s floor.
+        var signal: [Float] = []
+        for _ in 0..<5 { signal += lowNoise(0.2, 0.002) + tone(0.2, 0.05) }
+        signal += lowNoise(0.3, 0.002) + tone(1.0)
+        let (_, analyzer) = run(
+            .cleanEvents(minGapSec: 0.1, maxTakeSec: 20, trailingSilenceSec: 0.8, postArmBlackoutSec: 2.0), signal)
+        XCTAssertNotNil(analyzer.preOnsetFloorRMS, "sanity: still enough armed hops for the floor itself")
+        XCTAssertNil(analyzer.quietRangeFrames, "no run reached the 0.5s minimum")
+    }
+
+    // MARK: Ambient gate (per-take loud-room hold — Problem 2b)
+
+    /// noiseFloor tuned so `activityThreshold` (`noiseFloor × activityFloorK`) sits at ~0.03 — high
+    /// enough that a 0.02-amplitude "loud ambient" tone never itself reads as activity (isolating the
+    /// gate's effect from the unrelated onset-width race), while a 0.1-amplitude "breath" burst clears it.
+    private let ambientTestNoiseFloor: Float = 0.0214
+
+    func testAmbientHoldSuppressesOnsetWhileLoud() {
+        // Loud ambient warms the gate past its 1.5s minimum and engages it (0.02 > gateRMS 0.01); a
+        // breath-scale burst arriving while still held must not onset despite exceeding activityThreshold.
+        let signal = tone(2.0, 0.02) + tone(0.5, 0.1)
+        let (events, analyzer) = run(
+            .single(minActiveSec: 0.2, maxTakeSec: 20, trailingSilenceSec: 0.8),
+            noiseFloor: ambientTestNoiseFloor, ambientGateRMS: 0.01, signal)
+        XCTAssertEqual(onsetCount(events), 0, "held gate must suppress the burst's onset")
+        XCTAssertTrue(analyzer.isAmbientHold)
+    }
+
+    func testAmbientHoldIgnoresOwnBreathTransient() {
+        // A brief breath-scale transient is a small minority of the trailing window — its own approach
+        // must not read as "the room is loud" and must still onset normally, unblocked.
+        let signal = lowNoise(2.0, 0.002) + tone(0.5, 0.05)
+        let (events, analyzer) = run(
+            .single(minActiveSec: 0.2, maxTakeSec: 20, trailingSilenceSec: 0.8),
+            noiseFloor: ambientTestNoiseFloor, ambientGateRMS: 0.01, signal)
+        XCTAssertEqual(onsetCount(events), 1, "the transient itself is a real breath and must onset")
+        XCTAssertFalse(analyzer.isAmbientHold)
+    }
+
+    func testAmbientHoldRecoversAfterLoudStretchPasses() {
+        // Loud ambient engages the gate; a quiet stretch longer than the trailing window (3.0s) must
+        // fully clear it from that window, releasing the hold before the final breath.
+        let signal = tone(2.0, 0.02) + lowNoise(4.0, 0.0005) + tone(1.0, 0.1)
+        let (events, analyzer) = run(
+            .single(minActiveSec: 0.2, maxTakeSec: 20, trailingSilenceSec: 0.8),
+            noiseFloor: ambientTestNoiseFloor, ambientGateRMS: 0.01, signal)
+        XCTAssertEqual(onsetCount(events), 1, "hold must have released before the final breath")
+        XCTAssertFalse(analyzer.isAmbientHold)
+    }
+
+    func testAmbientHoldDisabledWhenThresholdNil() {
+        // Same loud-ambient-then-burst shape as the suppression test, but with the gate off (nil) —
+        // behavior must be identical to every pre-Problem-2b caller: the burst onsets normally.
+        let signal = tone(2.0, 0.02) + tone(0.5, 0.1)
+        let (events, analyzer) = run(
+            .single(minActiveSec: 0.2, maxTakeSec: 20, trailingSilenceSec: 0.8),
+            noiseFloor: ambientTestNoiseFloor, signal)
+        XCTAssertEqual(onsetCount(events), 1, "no gate means no suppression")
+        XCTAssertFalse(analyzer.isAmbientHold)
     }
 
     // MARK: single (frc/rv)

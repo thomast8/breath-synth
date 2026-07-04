@@ -63,7 +63,6 @@ struct EnrollContentView: View {
     @ViewBuilder private var content: some View {
         switch model.stage {
         case .needsOutputDir: chooseFolderView
-        case .roomTone: roomToneView
         case .technique: techniqueView
         case .finished: finishedView
         }
@@ -75,65 +74,6 @@ struct EnrollContentView: View {
                 .multilineTextAlignment(.center)
             Button("Choose Enrollment Folder…") { model.chooseOutputDir() }
                 .controlSize(.large)
-        }
-        .frame(maxWidth: .infinity)
-    }
-
-    @ViewBuilder private var roomToneView: some View {
-        if model.roomToneReady {
-            roomToneResultView
-        } else {
-            VStack(spacing: 16) {
-                Text("Step 1 — Room tone").font(.headline)
-                Text("Sit still and stay silent. Recording stops itself after "
-                     + "\(Int(EnrollmentScript.roomToneSeconds)) seconds. "
-                     + "This captures your room's background to grade recording quality (never reused between sessions).")
-                    .multilineTextAlignment(.center).foregroundStyle(.secondary)
-                levelMeter
-                if model.recorder.isRecording {
-                    let left = max(0, EnrollmentScript.roomToneSeconds - model.recorder.elapsed)
-                    Text("Recording room tone… \(fmt(left)) s left").font(.callout.monospacedDigit())
-                } else {
-                    Button { model.startRoomTone() } label: {
-                        Label("Start room tone", systemImage: "record.circle")
-                    }
-                    .controlSize(.large).tint(.red)
-                }
-            }
-            .frame(maxWidth: .infinity)
-        }
-    }
-
-    /// Confirm-or-redo screen shown once room tone completes — a loud reading scales every later
-    /// step's activity threshold up, silently degrading onset/event detection, so it's worth a look
-    /// before committing to technique capture.
-    private var roomToneResultView: some View {
-        VStack(spacing: 16) {
-            Text("Room tone captured").font(.headline)
-            if let dbfs = model.roomToneDbfs {
-                Text(String(format: "%.0f dBFS", dbfs))
-                    .font(.title2.monospacedDigit())
-                    .foregroundStyle(model.roomTooNoisy ? .orange : .green)
-            }
-            if model.roomTooNoisy {
-                Text("This room reads louder than usual — a quieter space makes gentle breaths "
-                     + "(especially calm breathing) much easier for the app to detect. "
-                     + "You can continue anyway, but consider finding a quieter spot first.")
-                    .multilineTextAlignment(.center).foregroundStyle(.orange).padding(.horizontal)
-            } else {
-                Text("Quiet enough — good to go.")
-                    .foregroundStyle(.secondary)
-            }
-            HStack(spacing: 16) {
-                Button { model.redoRoomTone() } label: {
-                    Label("Redo room tone", systemImage: "arrow.counterclockwise")
-                }
-                Button { model.confirmRoomTone() } label: {
-                    Label("Continue", systemImage: "arrow.right.circle")
-                }
-                .tint(model.roomTooNoisy ? .orange : .accentColor)
-            }
-            .controlSize(.large)
         }
         .frame(maxWidth: .infinity)
     }
@@ -187,6 +127,17 @@ struct EnrollContentView: View {
                 .font(.title3.weight(.medium).monospacedDigit())
             Text(phaseLabel(step))
                 .font(.callout).foregroundStyle(.secondary)
+            if model.recorder.ambientHold {
+                VStack(spacing: 6) {
+                    Text("Room is too loud right now — waiting for it to quiet down before this take starts")
+                        .font(.caption).foregroundStyle(.orange).multilineTextAlignment(.center)
+                    Button("Record anyway") { model.recordAnywayDespiteNoise() }
+                        .font(.caption)
+                }
+            } else if model.roomTooNoisy {
+                Text("This room reads loud — gentle breaths may be hard to detect")
+                    .font(.caption2).foregroundStyle(.orange)
+            }
             phaseFloorHint(step)
             levelMeter
             EnrollWaveformView(peaks: model.recorder.wavePeaks)

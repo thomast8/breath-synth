@@ -57,6 +57,10 @@ public final class BreathRecorder {
     /// ambient blends in as it finalizes, so this reflects conditions close to *now*, not a single
     /// session-start reading. `nil` until the first take with a usable pre-onset window finalizes.
     public private(set) var currentNoiseFloorRMS: Float?
+    /// `true` while armed and the room reads too loud for a clean onset (see `CaptureAnalyzer.isAmbientHold`)
+    /// — a take waits here instead of starting against a noisy room. Always `false` when the gate is off
+    /// (`ambientGateRMS == nil`, the default — see `start(...)`).
+    public private(set) var ambientHold = false
     public private(set) var errorMessage: String?
 
     // MARK: Config (per start)
@@ -73,6 +77,13 @@ public final class BreathRecorder {
     /// asymmetric). A take's own floor can't gate its own onset (the threshold is fixed at analyzer
     /// `init`, before that take's audio exists), so this always feeds the *next* take.
     @ObservationIgnored private var rollingFloor = RollingNoiseFloor()
+    /// Session/room-level bar for the per-take ambient gate (see `CaptureAnalyzer.isAmbientHold`) —
+    /// `nil` (the default) disables it, matching every caller's behavior before Problem 2b. Cleared for
+    /// the rest of the session by `overrideAmbientGate()`.
+    @ObservationIgnored private var ambientGateRMS: Float?
+    /// Fires once per finalized non-fixed take with its harvested quiet-stretch samples (possibly
+    /// empty) — the app pools these toward a room-tone file. `nil` (the default) is a no-op.
+    @ObservationIgnored private var onTakeAmbient: (@MainActor ([Float]) -> Void)?
     @ObservationIgnored private var takes = 1
     @ObservationIgnored private var isCycle = false
     /// `finalPhase` (FRC/RV's deliberate-pause split): structurally validated and auto-redone the same
@@ -114,7 +125,9 @@ public final class BreathRecorder {
             _ spectralCandidates: [CaptureAnalyzer.SpectralCandidate]
         ) -> Void,
         onFinished: @escaping @MainActor () -> Void,
-        onTakeReview: (@MainActor (_ takeIndex: Int, _ segments: [(label: SegmentLabel, url: URL)]) async -> TakeReview)? = nil
+        onTakeReview: (@MainActor (_ takeIndex: Int, _ segments: [(label: SegmentLabel, url: URL)]) async -> TakeReview)? = nil,
+        ambientGateRMS: Float? = nil,
+        onTakeAmbient: (@MainActor ([Float]) -> Void)? = nil
     ) throws {
         guard !isRecording else { return }
         let authorization = AVCaptureDevice.authorizationStatus(for: .audio)
@@ -137,6 +150,8 @@ public final class BreathRecorder {
         self.onSegment = onSegment
         self.onFinished = onFinished
         self.onTakeReview = onTakeReview
+        self.ambientGateRMS = ambientGateRMS
+        self.onTakeAmbient = onTakeAmbient
         reviewing = false
         isFixed = detection.isFixedDuration
         isCycle = detection.isCycle
@@ -155,7 +170,9 @@ public final class BreathRecorder {
         phaseElapsed = 0
         wavePeaks = []
 
-        let box = CaptureBox(analyzer: CaptureAnalyzer(sampleRate: sampleRate, detection: detection, noiseFloorRMS: rollingFloor.value))
+        let box = CaptureBox(analyzer: CaptureAnalyzer(
+            sampleRate: sampleRate, detection: detection, noiseFloorRMS: rollingFloor.value,
+            ambientGateRMS: ambientGateRMS))
         box.armed = true
         self.box = box
 
@@ -225,17 +242,32 @@ public final class BreathRecorder {
     /// Stop the whole session immediately without finalizing or calling `onFinished`.
     public func abort() { teardown() }
 
+    /// Escape hatch: a genuinely loud room must never trap the session behind the ambient gate. Turns
+    /// the gate off for the rest of this `start(...)` session and re-arms immediately (same fresh-
+    /// analyzer pattern as `arm()` — the buffer/waveform reset is harmless since nothing has onset yet
+    /// by construction, the gate only ever holds pre-onset).
+    public func overrideAmbientGate() {
+        guard isRecording else { return }
+        ambientGateRMS = nil
+        arm()
+        publishSnapshot()
+    }
+
     // MARK: Take lifecycle (main actor)
 
     private func finalize(_ request: FinalizeRequest) {
         guard isRecording, let fileURL, onSegment != nil else { return }
         if isFixed {
             lastNoiseFloorRMS = request.meanFloor
-        } else if let ambient = request.preOnsetFloor {
-            // Blended in regardless of what this take's outcome turns out to be below (even a redone
-            // take's pre-onset ambient is real, valid data about current conditions).
-            rollingFloor.update(with: ambient)
-            currentNoiseFloorRMS = rollingFloor.value
+        } else {
+            if let ambient = request.preOnsetFloor {
+                // Blended in regardless of what this take's outcome turns out to be below (even a
+                // redone take's pre-onset ambient is real, valid data about current conditions).
+                rollingFloor.update(with: ambient)
+                currentNoiseFloorRMS = rollingFloor.value
+            }
+            // Same "still valid data even if redone" reasoning as the rolling floor above.
+            onTakeAmbient?(request.ambientSamples)
         }
 
         let issue = takeIssue(request)
@@ -366,8 +398,11 @@ public final class BreathRecorder {
         let detection = detection
         let noiseFloor = rollingFloor.value
         let sampleRate = sampleRate
+        let ambientGateRMS = ambientGateRMS
         box.lock.withLock {
-            box.analyzer = CaptureAnalyzer(sampleRate: sampleRate, detection: detection, noiseFloorRMS: noiseFloor)
+            box.analyzer = CaptureAnalyzer(
+                sampleRate: sampleRate, detection: detection, noiseFloorRMS: noiseFloor,
+                ambientGateRMS: ambientGateRMS)
             box.buffer.removeAll(keepingCapacity: true)
             box.segments.removeAll(keepingCapacity: true)
             box.hasOnset = false
@@ -407,7 +442,7 @@ public final class BreathRecorder {
              armed: box.armed, onset: box.hasOnset, gap: box.analyzer.lastGapWithinMin,
              livePhase: box.analyzer.livePhase, phaseFrames: box.analyzer.phaseElapsedFrames,
              peaks: box.wavePeaks, threshold: box.analyzer.currentActivityThreshold,
-             blackoutSec: box.analyzer.blackoutSec)
+             blackoutSec: box.analyzer.blackoutSec, ambientHold: box.analyzer.isAmbientHold)
         }
         // Display-only ballistics: the analyzer's raw envelope updates every ~10ms hop and is exactly
         // right for gating, but redrawing a meter at that resolution reads as flicker to the eye. Faster
@@ -420,6 +455,7 @@ public final class BreathRecorder {
         eventCount = snapshot.count
         elapsed = Double(snapshot.frames) / sampleRate
         blackoutRemaining = snapshot.onset ? 0 : max(0, snapshot.blackoutSec - elapsed)
+        ambientHold = snapshot.ambientHold
         gapTooClose = snapshot.gap
         livePhase = snapshot.livePhase
         phaseElapsed = Double(snapshot.phaseFrames) / sampleRate
@@ -457,8 +493,9 @@ public final class BreathRecorder {
     }
 
     /// Write mono Float samples as 32-bit-float CAF at `sampleRate` (lossless; the builder resamples
-    /// on load). Mirrors `BreathBank.AudioIO.writeMonoWAV`, which the engine can't depend on.
-    private nonisolated static func writeMono(_ samples: [Float], sampleRate: Double, to url: URL) throws {
+    /// on load). Mirrors `BreathBank.AudioIO.writeMonoWAV`, which the engine can't depend on. Public so
+    /// the app layer can write the harvested room-tone pool in the exact same format as every capture.
+    public nonisolated static func writeMono(_ samples: [Float], sampleRate: Double, to url: URL) throws {
         let settings: [String: Any] = [
             AVFormatIDKey: kAudioFormatLinearPCM,
             AVSampleRateKey: sampleRate,
@@ -508,6 +545,9 @@ private struct FinalizeRequest: Sendable {
     /// the armed wait was too short to estimate one. Feeds the rolling noise floor for the *next* take.
     let preOnsetFloor: Float?
     let spectralCandidates: [CaptureAnalyzer.SpectralCandidate]
+    /// This take's own harvested quiet stretch (see `CaptureAnalyzer.quietRangeFrames`), sliced from the
+    /// take's buffer — empty if nothing quiet enough ran long enough. Room-tone harvest pool material.
+    let ambientSamples: [Float]
 }
 
 /// One bucket of a downsampled waveform: the min/max sample over its frame range. Cheap to draw (one
@@ -580,11 +620,20 @@ private final class CaptureBox: @unchecked Sendable {
                 segments.append(FinalizeRequest.Segment(label: label, samples: Array(buffer[lo..<hi])))
             case let .takeEnded(reason):
                 armed = false
+                let ambient: [Float]
+                if let range = analyzer.quietRangeFrames {
+                    let lo = max(0, min(range.lowerBound, buffer.count))
+                    let hi = max(lo, min(range.upperBound, buffer.count))
+                    ambient = Array(buffer[lo..<hi])
+                } else {
+                    ambient = []
+                }
                 return FinalizeRequest(
                     segments: segments, reason: reason,
                     intervals: analyzer.intervalsFrames, meanFloor: analyzer.meanFloorRMS(),
                     preOnsetFloor: analyzer.preOnsetFloorRMS,
-                    spectralCandidates: analyzer.spectralCandidates
+                    spectralCandidates: analyzer.spectralCandidates,
+                    ambientSamples: ambient
                 )
             }
         }
@@ -600,8 +649,8 @@ private extension CaptureDetection {
     /// minimum) used by the structural validity guard.
     var minPhaseSec: Double? {
         switch self {
-        case let .cycle(minPhaseSec, _, _, _): return minPhaseSec
-        case let .finalPhase(_, _, minPhaseSec, _, _): return minPhaseSec
+        case let .cycle(minPhaseSec, _, _, _, _): return minPhaseSec
+        case let .finalPhase(_, _, minPhaseSec, _, _, _): return minPhaseSec
         default: return nil
         }
     }

@@ -15,7 +15,6 @@ import Observation
 final class EnrollModel {
     enum Stage: Equatable {
         case needsOutputDir
-        case roomTone
         case technique(step: Int)
         case finished
     }
@@ -60,22 +59,22 @@ final class EnrollModel {
     /// for future threshold re-tuning; not read by the current build pipeline.
     private(set) var spectralDiagnostics: [String: [CaptureAnalyzer.SpectralCandidate]] = [:]
     private(set) var roomToneFile: String?
-    /// Room-tone noise floor for this session, fed to every later step's detection. Not
-    /// `@ObservationIgnored` (unlike most engine-mirroring state here) — `roomTooNoisy`/`roomToneDbfs`
-    /// are computed from it and the confirm-or-redo screen needs to react when it's set.
-    private var roomFloor: Float?
-    /// Seeded from `roomFloor` once room tone completes, then refreshed after every step from the
-    /// recorder's own rolling floor (`BreathRecorder.currentNoiseFloorRMS`) — each take's own pre-onset
-    /// ambient blends in over the session instead of freezing at the one upfront reading.
+    /// Seeded from the first take's own pre-onset ambient (via `BreathRecorder.currentNoiseFloorRMS`),
+    /// refreshed after every step — each take's own reading blends in over the session instead of a
+    /// single upfront reading (there is no standalone room-tone step anymore, see `ambientPool`).
     @ObservationIgnored private var rollingFloor: Float?
-    /// `true` once room tone has been recorded and is awaiting confirm-or-redo (stays on `.roomTone`
-    /// stage instead of auto-advancing) — a loud reading scales every later step's activity threshold
-    /// up, silently degrading onset/event detection, so it's worth a look before technique capture.
-    private(set) var roomToneReady = false
-    var roomTooNoisy: Bool { roomFloor.map(CaptureAnalyzer.isRoomTooNoisy) ?? false }
-    /// The room-tone reading in dBFS, for display (`nil` before room tone completes).
-    var roomToneDbfs: Double? { roomFloor.map { $0 > 0 ? 20 * log10(Double($0)) : -.infinity } }
-    /// Created once room tone completes (needs its profile + floor); grades every technique take live.
+    /// Mid-capture warning caption (rolling-floor based, not a single upfront reading — see
+    /// `EnrollContentView`'s "This room reads loud" caption).
+    var roomTooNoisy: Bool { recorder.currentNoiseFloorRMS.map(CaptureAnalyzer.isRoomTooNoisy) ?? false }
+    /// Pooled quiet-stretch samples harvested from each take's own pre-onset audio (see
+    /// `CaptureAnalyzer.quietRangeFrames`), until there's enough to write `room_tone.caf` — see
+    /// `onTakeAmbient` in `startStepCapture()`. Reset per session in `chooseOutputDir()`.
+    @ObservationIgnored private var ambientPool: [Float] = []
+    /// Once the pool reaches this much audio, it's written once and never touched again — a refreshing
+    /// profile would churn `LiveTakeGrader`'s cached denoise profile for no measured benefit.
+    private static let ambientPoolTargetSec = 4.0
+    /// Created once the harvested room-tone pool is written (needs its file + `assetsDir`); grades every
+    /// technique take live from then on. `nil` until then — takes before that are `.keptUnchecked`.
     @ObservationIgnored private var liveGrader: LiveTakeGrader?
     private(set) var liveCheck: LiveCheck = .idle
     /// Measured (this session, real fixture): grading a packing `cores` take costs ~7-11s (denoise STFT
@@ -115,63 +114,15 @@ final class EnrollModel {
         captured = [:]
         spectralDiagnostics = [:]
         roomToneFile = nil
-        roomFloor = nil
         rollingFloor = nil
-        roomToneReady = false
+        ambientPool = []
         liveGrader = nil
         liveCheck = .idle
-        stage = .roomTone
+        stage = .technique(step: 0)
         errorMessage = nil
     }
 
     // MARK: - Capture
-
-    /// Capture the mandatory room tone (fixed 5 s, auto-stop). Lands on a confirm-or-redo screen
-    /// (`roomToneReady`) rather than auto-advancing — a loud room scales every later step's activity
-    /// threshold up, so it's worth surfacing before technique capture rather than only discovering it
-    /// through mysteriously-unresponsive onset detection.
-    func startRoomTone() {
-        guard let dir = outputDir, !recorder.isRecording else { return }
-        do {
-            try recorder.start(
-                takes: 1,
-                detection: .fixedDuration(seconds: EnrollmentScript.roomToneSeconds),
-                noiseFloorRMS: nil,
-                fileURL: { _, _ in dir.appendingPathComponent("room_tone.caf") },
-                onSegment: { [weak self] _, _, url, _, _ in self?.roomToneFile = url.lastPathComponent },
-                onFinished: { [weak self] in
-                    guard let self else { return }
-                    self.roomFloor = self.recorder.lastNoiseFloorRMS
-                    if let dir = self.outputDir, let roomToneFile = self.roomToneFile {
-                        self.liveGrader = LiveTakeGrader(
-                            roomToneURL: dir.appendingPathComponent(roomToneFile), assetsDir: self.assetsDir
-                        )
-                    }
-                    self.roomToneReady = true
-                    self.writeSessionManifest()   // captures.json now exists (room tone recorded)
-                }
-            )
-            errorMessage = nil
-        } catch {
-            errorMessage = error.localizedDescription
-        }
-    }
-
-    /// Accept the room-tone reading (whether or not it flagged as noisy) and advance to technique capture.
-    func confirmRoomTone() {
-        guard roomToneReady else { return }
-        rollingFloor = roomFloor
-        stage = .technique(step: 0)
-    }
-
-    /// Discard the room-tone reading and re-listen; `startRoomTone()` overwrites `room_tone.caf` in
-    /// place (same deterministic filename), so no orphan or duplicate `captures.json` entry results.
-    func redoRoomTone() {
-        roomToneReady = false
-        roomToneFile = nil
-        roomFloor = nil
-        liveGrader = nil
-    }
 
     /// Begin auto-capturing the current technique's N takes (self-paced; auto-advances + auto-stops).
     func startStepCapture() {
@@ -205,13 +156,37 @@ final class EnrollModel {
                 onFinished: { [weak self] in self?.advance(fromStep: stepIndex) },
                 onTakeReview: { [weak self] takeIndex, segments in
                     await self?.reviewTake(takeIndex: takeIndex, segments: segments, step: step) ?? .accept
-                }
+                },
+                ambientGateRMS: CaptureAnalyzer.noisyRoomFloorRMS,
+                onTakeAmbient: { [weak self] samples in self?.poolAmbient(samples) }
             )
             errorMessage = nil
         } catch {
             errorMessage = error.localizedDescription
         }
     }
+
+    /// Pool a take's harvested quiet stretch toward the session's room-tone file, writing it once the
+    /// pool reaches `ambientPoolTargetSec` — see `ambientPool`'s doc comment for why only once.
+    private func poolAmbient(_ samples: [Float]) {
+        guard roomToneFile == nil, let dir = outputDir else { return }
+        ambientPool.append(contentsOf: samples)
+        let poolSec = Double(ambientPool.count) / recorder.sampleRate
+        guard poolSec >= Self.ambientPoolTargetSec else { return }
+        let url = dir.appendingPathComponent("room_tone.caf")
+        do {
+            try BreathRecorder.writeMono(ambientPool, sampleRate: recorder.sampleRate, to: url)
+            roomToneFile = url.lastPathComponent
+            liveGrader = LiveTakeGrader(roomToneURL: url, assetsDir: assetsDir)
+            writeSessionManifest()
+        } catch {
+            errorMessage = "Failed to write room_tone.caf: \(error.localizedDescription)"
+        }
+    }
+
+    /// Escape hatch for the ambient gate: a genuinely loud room must never trap the session waiting for
+    /// quiet that isn't coming.
+    func recordAnywayDespiteNoise() { recorder.overrideAmbientGate() }
 
     /// Grade every segment of a just-written take concurrently, racing the deadline. A timeout falls
     /// back to accept — the offline build is authoritative and never skips a check, so a slow live
@@ -294,18 +269,25 @@ final class EnrollModel {
     private func detection(for step: EnrollmentStep) -> CaptureDetection {
         switch step.detection {
         case .cycle:
+            // postArmBlackoutSec: a real between-takes settle pause — calm is gentle, so a short one —
+            // that also (Phase 2b) gives the harvest/rolling-floor calibration a guaranteed window;
+            // without it a self-paced take could onset almost immediately, leaving nothing to sample.
             return .cycle(minPhaseSec: step.minSeconds, midPauseSec: 0.45,
-                          maxCycleSec: step.maxSeconds * 2 + 6, trailingSilenceSec: 1.0)
+                          maxCycleSec: step.maxSeconds * 2 + 6, trailingSilenceSec: 1.0,
+                          postArmBlackoutSec: 1.5)
         case .single:
             return .single(minActiveSec: max(0.3, step.minSeconds * 0.5),
-                           maxTakeSec: step.maxSeconds + 3, trailingSilenceSec: 0.8)
+                           maxTakeSec: step.maxSeconds + 3, trailingSilenceSec: 0.8,
+                           postArmBlackoutSec: 1.5)
         case .finalPhase:
             // minLeadSec small — the lead phase (a real inhale before the hold) is discarded regardless
             // of how long it runs; midPauseSec matches calm's deliberate-pause split; maxTakeSec has
             // margin for the lead + pause overhead on top of the final phase's own bound.
+            // postArmBlackoutSec: FRC/RV are exertive (RV especially — a forced exhale to residual
+            // volume) — a real recovery pause matters on its own, on top of the settle/harvest purpose.
             return .finalPhase(minLeadSec: 0.5, midPauseSec: 0.4,
                                minPhaseSec: step.minSeconds, maxTakeSec: step.maxSeconds + 6,
-                               trailingSilenceSec: 0.8)
+                               trailingSilenceSec: 0.8, postArmBlackoutSec: 2.0)
         case .cleanEvents:
             // Trailing silence must exceed the deliberate inter-event gap (events are well-separated),
             // so a slow gap doesn't end the take after the first event — only the real done-pause does.
@@ -341,8 +323,9 @@ final class EnrollModel {
     }
 
     /// Dev/testing shortcut: jump straight to any technique step instead of walking the whole script.
-    /// Room tone need not have run yet — the analyzer just falls back to `absActivityFloor` — but if it
-    /// has, `roomFloor`/`liveGrader` (both already session-scoped, not step-scoped) carry over untouched.
+    /// The room-tone pool need not have filled yet — the analyzer just falls back to `absActivityFloor`
+    /// — but if it has, `rollingFloor`/`liveGrader` (both already session-scoped, not step-scoped) carry
+    /// over untouched.
     func jumpToStep(_ index: Int) {
         guard steps.indices.contains(index), !recorder.isRecording else { return }
         stopReference()

@@ -66,9 +66,6 @@ struct EnrollmentStep: Identifiable, Sendable {
 }
 
 enum EnrollmentScript {
-    /// Mandatory session prelude: room tone for this session's SNR baseline (never the bundled one).
-    static let roomToneSeconds = 5.0
-
     /// Uniform capabilities across techniques: calm captures a full inhale→pause→exhale cycle (both
     /// phases from one take); FRC/RV are single terminal exhales; recovery gets separate clean (cores)
     /// and natural-rhythm (gaps) passes (its hook breaths are reliably too close together for one

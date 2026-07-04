@@ -85,11 +85,18 @@ public enum CaptureDetection: Sendable, Equatable {
     case fixedDuration(seconds: Double)
     /// Inhale → mid-pause → exhale: split into two labelled segments at the pause, labelled by order.
     /// Calm. The mid-pause (short silence) ends the inhale; trailing silence (long) ends the take.
-    case cycle(minPhaseSec: Double, midPauseSec: Double, maxCycleSec: Double, trailingSilenceSec: Double)
+    /// - `postArmBlackoutSec`: see `cleanEvents`'s doc — same between-takes settle purpose, and (Phase
+    ///   2b) the window `preOnsetFloorRMS`/`quietRangeFrames` are sampled from; `0` (the default) is
+    ///   unchanged prior behavior.
+    case cycle(
+        minPhaseSec: Double, midPauseSec: Double, maxCycleSec: Double, trailingSilenceSec: Double,
+        postArmBlackoutSec: Double = 0
+    )
     /// One continuous breath/exhale → a single `.whole` segment ending on trailing silence. Onset jumps
     /// straight to capturing, so a natural pre-exhale inhale is captured as part of the same segment —
     /// only correct for a genuine onset-to-silence consumer with no separable lead phase.
-    case single(minActiveSec: Double, maxTakeSec: Double, trailingSilenceSec: Double)
+    /// - `postArmBlackoutSec`: see `cleanEvents`'s doc.
+    case single(minActiveSec: Double, maxTakeSec: Double, trailingSilenceSec: Double, postArmBlackoutSec: Double = 0)
     /// Deliberate-pause phase split, keeping only the final phase: reuses `cycle`'s
     /// inhale → mid-pause → exhale state machine internally, but the lead phase's segment is **never
     /// emitted** — only the final phase, as `label: .whole` (so a single-lane consumer's routing is
@@ -103,7 +110,12 @@ public enum CaptureDetection: Sendable, Equatable {
     ///   mid-pause, not a natural intra-breath dip — small, since the lead phase is discarded regardless.
     /// - `minPhaseSec`: minimum duration of the kept final phase — a structural post-hoc check (see
     ///   `CaptureAnalyzer.TakeIssue`), not enforced inside the state machine itself.
-    case finalPhase(minLeadSec: Double, midPauseSec: Double, minPhaseSec: Double, maxTakeSec: Double, trailingSilenceSec: Double)
+    /// - `postArmBlackoutSec`: see `cleanEvents`'s doc — FRC/RV are exertive enough that a real recovery
+    ///   pause between takes is worth it on its own, on top of the settle/harvest purpose.
+    case finalPhase(
+        minLeadSec: Double, midPauseSec: Double, minPhaseSec: Double, maxTakeSec: Double,
+        trailingSilenceSec: Double, postArmBlackoutSec: Double = 0
+    )
     /// Well-separated events (cores): count them and flag onsets closer than `minGapSec`
     /// (separation feedback); one `.whole` segment. Packing/recovery separated.
     /// - `eventMinDistSec`: refractory spacing between counted events — the minimum real gap between

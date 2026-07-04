@@ -106,6 +106,18 @@ public struct CaptureAnalyzer {
     /// feature (see `SpectralCandidate`), not a per-call knob.
     private static let breathBandLowHz = 300.0
     private static let breathBandHighHz = 3000.0
+    /// Minimum harvestable quiet stretch — below this it's not worth pooling toward room tone.
+    private static let minQuietRangeSec = 0.5
+    /// Trailing window the live ambient gate reads from, in seconds — recent enough to react to a
+    /// newly-loud room, long enough that the person's own approaching breath (a transient within the
+    /// window) doesn't dominate its percentile.
+    private static let ambientGateWindowSec = 3.0
+    /// Release hysteresis: once held, the trailing window's level must drop this fraction below the
+    /// gate bar before the hold releases — avoids flapping right at the boundary.
+    private static let ambientGateReleaseRatio: Float = 0.9
+    /// The ambient gate can't engage until at least this many armed hops exist — a fresh arm must never
+    /// instantly read as "too loud" off a single noisy hop.
+    private static let minAmbientGateHops = 150  // 1.5s at the 10ms hop rate
 
     // MARK: Config
 
@@ -182,6 +194,9 @@ public struct CaptureAnalyzer {
     /// (rather than needing a separate measurement pass). ~30s cap is far past any realistic wait.
     private var armedEnvSamples: [Float] = []
     private static let armedEnvCap = 3000
+    /// Hops dropped off the front of `armedEnvSamples` past `armedEnvCap` — lets `quietRangeFrames`
+    /// map a surviving sample's array index back to its true hop position for a frame-range result.
+    private var armedEnvDroppedCount = 0
     /// Frozen once onset confirms: the 20th percentile of `armedEnvSamples` — deliberately a low
     /// percentile, not a mean, because the armed window can genuinely contain a between-takes breath
     /// (the blackout window exists for exactly that) and a mean would count that breath as "ambient,"
@@ -189,6 +204,17 @@ public struct CaptureAnalyzer {
     /// percentile to mean anything, so it stays `nil` rather than report a noisy estimate.
     public private(set) var preOnsetFloorRMS: Float?
     private static let minPreOnsetFloorHops = 150  // 1.5s at the 10ms hop rate
+    /// Frozen alongside `preOnsetFloorRMS`: the longest contiguous armed-period stretch below
+    /// `activityThreshold` (i.e. "not yet a confirmed breath," the same boundary `isActive` uses), in
+    /// frames since this analyzer's creation — the harvestable room-tone slice of silence this take's
+    /// own pre-onset audio already produced. `nil` if nothing that quiet ran long enough (`minQuietRangeSec`).
+    public private(set) var quietRangeFrames: Range<Int>?
+    /// Session/room property, not a per-style `CaptureDetection` contract — `nil` disables the gate
+    /// entirely, preserving prior behavior for every other caller.
+    private let ambientGateRMS: Float?
+    /// While armed, true when the trailing `ambientGateWindowSec` window's ambient level exceeds
+    /// `ambientGateRMS` — onset stays suppressed (see the `.armed` case) until it releases.
+    public private(set) var isAmbientHold = false
 
     // MARK: Sip alternator (pairedEvents styles only — see `detectSip`)
 
@@ -288,9 +314,12 @@ public struct CaptureAnalyzer {
 
     // MARK: Init
 
-    public init(sampleRate: Double, detection: CaptureDetection, noiseFloorRMS: Float?) {
+    public init(
+        sampleRate: Double, detection: CaptureDetection, noiseFloorRMS: Float?, ambientGateRMS: Float? = nil
+    ) {
         self.sampleRate = sampleRate
         self.detection = detection
+        self.ambientGateRMS = ambientGateRMS
         windowSamples = max(1, Int(Self.windowSec * sampleRate))
         hopSamples = max(1, Int(Self.hopSec * sampleRate))
         ring = [Float](repeating: 0, count: windowSamples)
@@ -314,23 +343,25 @@ public struct CaptureAnalyzer {
             refractoryFrames = 0; targetEventsCount = nil; spectralGateProfile = nil; blackoutFrames = 0
             pairedEvents = false
             state = .capturing
-        case let .cycle(minPhaseSec, midPauseSec, maxCycleSec, trailingSilenceSec):
+        case let .cycle(minPhaseSec, midPauseSec, maxCycleSec, trailingSilenceSec, postArmBlackoutSec):
             isFixed = false; isCycle = true; finalPhaseOnly = false; finalSegmentLabel = .exhale; countsEvents = false
             trailingFrames = toFrames(trailingSilenceSec)
             midPauseFrames = toFrames(midPauseSec)
             maxFrames = toFrames(maxCycleSec)
             minActiveFrames = toFrames(minPhaseSec)
-            minGapFrames = 0; refractoryFrames = 0; targetEventsCount = nil; spectralGateProfile = nil; blackoutFrames = 0
+            minGapFrames = 0; refractoryFrames = 0; targetEventsCount = nil; spectralGateProfile = nil
+            self.blackoutFrames = postArmBlackoutSec > 0 ? toFrames(postArmBlackoutSec) : 0
             pairedEvents = false
-        case let .single(minActiveSec, maxTakeSec, trailingSilenceSec):
+        case let .single(minActiveSec, maxTakeSec, trailingSilenceSec, postArmBlackoutSec):
             isFixed = false; isCycle = false; finalPhaseOnly = false; finalSegmentLabel = .whole; countsEvents = false
             trailingFrames = toFrames(trailingSilenceSec)
             maxFrames = toFrames(maxTakeSec)
             minActiveFrames = toFrames(minActiveSec)
             midPauseFrames = 0; minGapFrames = 0; refractoryFrames = 0
-            targetEventsCount = nil; spectralGateProfile = nil; blackoutFrames = 0
+            targetEventsCount = nil; spectralGateProfile = nil
+            self.blackoutFrames = postArmBlackoutSec > 0 ? toFrames(postArmBlackoutSec) : 0
             pairedEvents = false
-        case let .finalPhase(minLeadSec, midPauseSec, _, maxTakeSec, trailingSilenceSec):
+        case let .finalPhase(minLeadSec, midPauseSec, _, maxTakeSec, trailingSilenceSec, postArmBlackoutSec):
             // `minPhaseSec` (the kept final phase's minimum) isn't used inside the state machine — it's
             // a post-hoc structural check the recorder makes from `CaptureDetection.minPhaseSec`.
             isFixed = false; isCycle = false; finalPhaseOnly = true; finalSegmentLabel = .whole; countsEvents = false
@@ -338,7 +369,8 @@ public struct CaptureAnalyzer {
             midPauseFrames = toFrames(midPauseSec)
             maxFrames = toFrames(maxTakeSec)
             minActiveFrames = toFrames(minLeadSec)
-            minGapFrames = 0; refractoryFrames = 0; targetEventsCount = nil; spectralGateProfile = nil; blackoutFrames = 0
+            minGapFrames = 0; refractoryFrames = 0; targetEventsCount = nil; spectralGateProfile = nil
+            self.blackoutFrames = postArmBlackoutSec > 0 ? toFrames(postArmBlackoutSec) : 0
             pairedEvents = false
         case let .cleanEvents(minGapSec, maxTakeSec, trailingSilenceSec, eventMinDistSec, targetEvents, spectralGate, postArmBlackoutSec, paired):
             isFixed = false; isCycle = false; finalPhaseOnly = false; finalSegmentLabel = .whole; countsEvents = true
@@ -476,12 +508,22 @@ public struct CaptureAnalyzer {
 
         if state == .armed {
             armedEnvSamples.append(env)
-            if armedEnvSamples.count > Self.armedEnvCap { armedEnvSamples.removeFirst() }
-            print("[CAL-ARMED] frame=\(currentFrame) env=\(String(format: "%.5f", env)) threshold=\(String(format: "%.5f", activityThreshold)) active=\(isActive)")
+            if armedEnvSamples.count > Self.armedEnvCap {
+                armedEnvSamples.removeFirst()
+                armedEnvDroppedCount += 1
+            }
+            updateAmbientHold()
         }
 
         switch state {
         case .armed:
+            // A held gate suppresses onset candidacy entirely — any in-progress candidate is dropped,
+            // same as the run ending on its own (`!isActive` below), so a room that goes quiet mid-way
+            // through what would've been a confirmed onset still requires a fresh run afterward.
+            if isAmbientHold {
+                pendingOnsetFrame = nil
+                break
+            }
             // Onset is confirmed only once its containing run has lasted `onsetWidthFrames` — a click
             // that ends before that stays un-onset and the take keeps listening for a real one.
             // `blackoutFrames` additionally suppresses onset altogether for a moment right after
@@ -500,6 +542,20 @@ public struct CaptureAnalyzer {
                     phaseStartFrame = onset
                     if armedEnvSamples.count >= Self.minPreOnsetFloorHops {
                         preOnsetFloorRMS = Self.percentile(armedEnvSamples, 0.2)
+                        let minHops = max(1, Int(Self.minQuietRangeSec / Self.hopSec))
+                        // Quiet = "not yet a confirmed breath," i.e. below the same activity boundary
+                        // the analyzer already uses to decide isActive — not a tight multiple of the
+                        // 20th-percentile floor. Real room ambient naturally wanders over a much wider
+                        // range (observed: 0.00007-0.003 in one quiet room) than a small margin above
+                        // its quietest instant covers, so a percentile-relative threshold classified
+                        // nearly the whole armed period as "not quiet enough," harvesting ~0s per take.
+                        if let idxRange = Self.longestQuietRun(
+                            armedEnvSamples, threshold: activityThreshold, minCount: minHops
+                        ) {
+                            let start = (armedEnvDroppedCount + idxRange.lowerBound) * hopSamples
+                            let end = (armedEnvDroppedCount + idxRange.upperBound) * hopSamples
+                            quietRangeFrames = start..<end
+                        }
                     }
                     events.append(.onset)
                     state = (isCycle || finalPhaseOnly) ? .inhale : .capturing
@@ -741,5 +797,39 @@ public struct CaptureAnalyzer {
         let sorted = values.sorted()
         let index = min(sorted.count - 1, max(0, Int(Double(sorted.count - 1) * fraction)))
         return sorted[index]
+    }
+
+    /// The longest contiguous index range in `values` where every element is `<= threshold`, or `nil`
+    /// if the longest such stretch is shorter than `minCount`.
+    private static func longestQuietRun(_ values: [Float], threshold: Float, minCount: Int) -> Range<Int>? {
+        var bestStart = 0, bestLen = 0
+        var runStart = 0, runLen = 0
+        for (i, v) in values.enumerated() {
+            if v <= threshold {
+                if runLen == 0 { runStart = i }
+                runLen += 1
+                if runLen > bestLen { bestLen = runLen; bestStart = runStart }
+            } else {
+                runLen = 0
+            }
+        }
+        guard bestLen >= minCount else { return nil }
+        return bestStart..<(bestStart + bestLen)
+    }
+
+    /// Live pre-onset ambient check while armed: the trailing `ambientGateWindowSec` window's 20th
+    /// percentile against `ambientGateRMS`, with release hysteresis so it doesn't flap right at the
+    /// boundary. A low percentile (not a mean) so the person's own approaching breath — a transient
+    /// within the window — doesn't itself read as "the room is loud."
+    private mutating func updateAmbientHold() {
+        guard let gateRMS = ambientGateRMS, armedEnvSamples.count >= Self.minAmbientGateHops else { return }
+        let windowHops = max(1, Int(Self.ambientGateWindowSec / Self.hopSec))
+        let window = Array(armedEnvSamples.suffix(windowHops))
+        let level = Self.percentile(window, 0.2)
+        if isAmbientHold {
+            if level < gateRMS * Self.ambientGateReleaseRatio { isAmbientHold = false }
+        } else if level > gateRMS {
+            isAmbientHold = true
+        }
     }
 }
