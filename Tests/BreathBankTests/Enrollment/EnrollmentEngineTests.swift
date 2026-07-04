@@ -84,7 +84,12 @@ struct EnrollmentEngineTests {
     @Test func roomTonePoolsToTargetThenWritesOnceAndNeverAgain() async throws {
         let dirs = try makeDirs()
         let step = singleStep(title: "Step A", slug: "stepA", takes: 2)
-        let enrollment = EnrollmentEngine(outputDir: dirs.output, assetsDir: dirs.assets, sampleRate: sr, steps: [step])
+        // Take 1 crosses the pool target, so its own finalize creates the live grader before the review
+        // decision runs (see below) — both takes then route through real grading. The outcome doesn't
+        // matter to this test, so a short injected deadline keeps them resolving quickly instead of
+        // racing the real 15s `liveGradeDeadlineSec`.
+        let enrollment = EnrollmentEngine(
+            outputDir: dirs.output, assetsDir: dirs.assets, sampleRate: sr, steps: [step], gradeDeadlineSec: 1.0)
         await enrollment.start()
         await enrollment.startStepCapture()
 
@@ -94,6 +99,11 @@ struct EnrollmentEngineTests {
         // .finalize`'s ordering).
         await feed(enrollment, silence(4.5) + tone(1.0) + silence(1.0))
         await waitUntil { await enrollment.roomToneFile != nil }
+        // `roomToneFile` is set mid-review (pooling settles before the review decision), so waiting on
+        // it alone races take 1's still-in-flight async grade — take 2's signal, sent too early, would
+        // land while `armed == false` and be silently dropped. Wait for take 1 to fully resolve (take
+        // index advances to 1) before feeding take 2.
+        await waitUntil { await enrollment.engine.takeIndex == 1 }
 
         let roomToneURL = dirs.output.appendingPathComponent("room_tone.wav")
         let sizeAfterTake1 = try FileManager.default.attributesOfItem(atPath: roomToneURL.path)[.size] as? Int
@@ -104,6 +114,7 @@ struct EnrollmentEngineTests {
         await waitUntil { await enrollment.stage == .finished }
 
         let sizeAfterTake2 = try FileManager.default.attributesOfItem(atPath: roomToneURL.path)[.size] as? Int
+        #expect(await enrollment.stage == .finished, "the session must actually complete, not just time out waiting")
         #expect(sizeAfterTake1 != nil && sizeAfterTake1! > 0)
         #expect(sizeAfterTake2 == sizeAfterTake1, "a second take's ambient must not append to or rewrite room_tone.wav")
         #expect(await enrollment.roomToneFile == "room_tone.wav")
