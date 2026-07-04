@@ -1,6 +1,6 @@
 import Testing
 import BreathBank
-import BreathEngine
+import BreathEngineCore
 
 /// The segmenter must cut fragments whose offsets reproduce the exact audio the engine renders, with
 /// the same grain geometry as `recordedShapeBranch` and the same cores as `assembleHybrid`. Denoise

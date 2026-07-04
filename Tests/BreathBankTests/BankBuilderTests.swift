@@ -1,7 +1,7 @@
 import Testing
 import Foundation
 import BreathBank
-import BreathEngine
+import BreathEngineCore
 
 /// End-to-end builder: a synthetic enrollment folder (room tone + good takes + a deliberately clipped
 /// take) must produce a v2 manifest, a loadable bank, the prepared caches, and — the invariant PR5/6

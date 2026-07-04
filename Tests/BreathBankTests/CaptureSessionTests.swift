@@ -1,7 +1,7 @@
 import Testing
 import Foundation
 @testable import BreathBank
-import BreathEngine
+import BreathEngineCore
 
 struct CaptureSessionTests {
     @Test

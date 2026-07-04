@@ -1,7 +1,7 @@
 import Testing
 import Foundation
 import BreathBank
-import BreathEngine
+import BreathEngineCore
 
 /// Round-trip coverage for `WavIO`, the Foundation-only decoder/encoder Linux uses in place of
 /// `AudioIO`'s AVFoundation path. On macOS both paths exist, so these tests cross-check them

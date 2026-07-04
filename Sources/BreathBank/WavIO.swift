@@ -197,7 +197,7 @@ private extension Data {
 
     func readLE<T: FixedWidthInteger>(_ type: T.Type, at offset: Int) -> T {
         var value: T = 0
-        Swift.withUnsafeMutableBytes(of: &value) { dest in
+        _ = Swift.withUnsafeMutableBytes(of: &value) { dest in
             self.copyBytes(to: dest, from: offset..<(offset + MemoryLayout<T>.size))
         }
         return T(littleEndian: value)

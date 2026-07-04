@@ -1,6 +1,6 @@
 import Testing
 @testable import BreathBank
-import BreathEngine
+import BreathEngineCore
 
 struct GraderTests {
     private let flatProfile = [Float](repeating: 1, count: 513)
