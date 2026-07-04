@@ -1,5 +1,64 @@
+#if canImport(Accelerate)
 import Accelerate
+#endif
 import Foundation
+
+/// Common interface both FFT backends satisfy, so `SpectralDenoise` can hold either behind an
+/// existential without caring which one it got.
+private protocol FFTBackend {
+    func transform(_ realp: inout [Float], _ imagp: inout [Float], forward: Bool)
+    func destroy()
+}
+
+/// Wraps `PortableFFT` — unconditionally compiled (unlike the Accelerate engine below) so it's
+/// available as the default on Linux, and as a forceable alternative on Apple platforms via
+/// `SpectralDenoise.forcePortableFFTForTesting`, letting tests prove decision-level parity
+/// against the vDSP path from a single macOS test binary.
+private struct PortableFFTEngine: FFTBackend {
+    private let n: Int
+    init(log2n: Int) { self.n = 1 << log2n }
+    func transform(_ realp: inout [Float], _ imagp: inout [Float], forward: Bool) {
+        PortableFFT.transform(realp: &realp, imagp: &imagp, n: n, inverse: !forward)
+    }
+    func destroy() {}
+}
+
+#if canImport(Accelerate)
+private struct AccelerateFFTEngine: FFTBackend {
+    private let setup: FFTSetup
+    private let log2n: vDSP_Length
+
+    init?(log2n: Int) {
+        guard let setup = vDSP_create_fftsetup(vDSP_Length(log2n), FFTRadix(kFFTRadix2)) else { return nil }
+        self.setup = setup
+        self.log2n = vDSP_Length(log2n)
+    }
+
+    func transform(_ realp: inout [Float], _ imagp: inout [Float], forward: Bool) {
+        realp.withUnsafeMutableBufferPointer { rp in
+            imagp.withUnsafeMutableBufferPointer { ip in
+                var split = DSPSplitComplex(realp: rp.baseAddress!, imagp: ip.baseAddress!)
+                let direction = forward ? FFTDirection(kFFTDirection_Forward) : FFTDirection(kFFTDirection_Inverse)
+                vDSP_fft_zip(setup, &split, 1, log2n, direction)
+            }
+        }
+    }
+
+    func destroy() { vDSP_destroy_fftsetup(setup) }
+}
+#endif
+
+/// Picks the FFT backend: vDSP on Apple platforms (fast, and the historically-tuned path),
+/// `PortableFFT` elsewhere (Linux). Both honor vDSP's unnormalized round-trip convention, so
+/// `SpectralDenoise`'s own `1/N` compensation after the inverse call is correct either way.
+private func makeFFTEngine(log2n: Int) -> FFTBackend {
+    #if canImport(Accelerate)
+    if let engine = AccelerateFFTEngine(log2n: log2n) {
+        return engine
+    }
+    #endif
+    return PortableFFTEngine(log2n: log2n)
+}
 
 /// FFT noise-profile subtraction (spectral gating) for the recorded breath source.
 ///
@@ -14,7 +73,7 @@ import Foundation
 public enum SpectralDenoise {
     private static let frameSize = 1024 // ~23 ms @ 44.1k
     private static let hop = 256 // 75% overlap
-    private static let log2n = vDSP_Length(10) // log2(frameSize)
+    private static let log2n = 10 // log2(frameSize)
 
     /// Spectral-subtract the steady noise floor from `samples`.
     ///
@@ -39,14 +98,45 @@ public enum SpectralDenoise {
         floorGain: Float,
         noiseProfile: [Float]? = nil
     ) -> [Float] {
+        let engine = makeFFTEngine(log2n: log2n)
+        defer { engine.destroy() }
+        return denoiseImpl(samples, sampleRate: sampleRate, overSubtraction: overSubtraction,
+                            floorGain: floorGain, noiseProfile: noiseProfile, engine: engine)
+    }
+
+    /// Test-only entry point (not public): identical algorithm, explicit FFT backend choice, so
+    /// `@testable import` tests can prove `PortableFFT` and vDSP produce decision-level identical
+    /// results from a single macOS test binary instead of waiting for a Linux run to notice a
+    /// divergence. `forcePortable: false` still prefers vDSP where available (i.e. behaves like
+    /// the public `denoise` above), so this is a strict superset, not a separate code path.
+    static func denoiseForTesting(
+        _ samples: [Float],
+        sampleRate: Double,
+        overSubtraction: Float,
+        floorGain: Float,
+        noiseProfile: [Float]? = nil,
+        forcePortable: Bool
+    ) -> [Float] {
+        let engine: FFTBackend = forcePortable ? PortableFFTEngine(log2n: log2n) : makeFFTEngine(log2n: log2n)
+        defer { engine.destroy() }
+        return denoiseImpl(samples, sampleRate: sampleRate, overSubtraction: overSubtraction,
+                            floorGain: floorGain, noiseProfile: noiseProfile, engine: engine)
+    }
+
+    private static func denoiseImpl(
+        _ samples: [Float],
+        sampleRate: Double,
+        overSubtraction: Float,
+        floorGain: Float,
+        noiseProfile: [Float]?,
+        engine: FFTBackend
+    ) -> [Float] {
         let n = frameSize
         guard samples.count > n else { return samples }
         // Clamp to a safe range so out-of-range values (e.g. an unvalidated CLI knob) can't
         // produce negative gains (phase flips) or amplification.
         let overSub = max(0, overSubtraction)
         let floor = min(1, max(0, floorGain))
-        guard let setup = vDSP_create_fftsetup(log2n, FFTRadix(kFFTRadix2)) else { return samples }
-        defer { vDSP_destroy_fftsetup(setup) }
 
         // Periodic Hann, used for both analysis and synthesis (WOLA). The exact shape is not
         // load-bearing: resynthesis divides by the accumulated per-sample window-overlap sum,
@@ -74,7 +164,7 @@ public enum SpectralDenoise {
             }
             var realp = windowed
             var imagp = [Float](repeating: 0, count: n)
-            transform(setup, &realp, &imagp, direction: FFTDirection(kFFTDirection_Forward))
+            engine.transform(&realp, &imagp, forward: true)
             var frameMag = [Float](repeating: 0, count: half + 1)
             for k in 0...half {
                 frameMag[k] = (realp[k] * realp[k] + imagp[k] * imagp[k]).squareRoot()
@@ -129,7 +219,7 @@ public enum SpectralDenoise {
                     imagp[mk] *= gain
                 }
             }
-            transform(setup, &realp, &imagp, direction: FFTDirection(kFFTDirection_Inverse))
+            engine.transform(&realp, &imagp, forward: false)
             let start = f * hop
             for i in 0..<n {
                 out[start + i] += realp[i] * scale * window[i]
@@ -154,12 +244,23 @@ public enum SpectralDenoise {
     ///
     /// - Returns: the per-bin average magnitude, length `frameSize/2 + 1` (bins `0...half`).
     ///   Empty if `samples` is too short to form a frame.
-    public static func magnitudeProfile(from samples: [Float], sampleRate _: Double) -> [Float] {
+    public static func magnitudeProfile(from samples: [Float], sampleRate: Double) -> [Float] {
+        let engine = makeFFTEngine(log2n: log2n)
+        defer { engine.destroy() }
+        return magnitudeProfileImpl(from: samples, sampleRate: sampleRate, engine: engine)
+    }
+
+    /// Test-only entry point (not public) — see `denoiseForTesting`'s doc comment.
+    static func magnitudeProfileForTesting(from samples: [Float], sampleRate: Double, forcePortable: Bool) -> [Float] {
+        let engine: FFTBackend = forcePortable ? PortableFFTEngine(log2n: log2n) : makeFFTEngine(log2n: log2n)
+        defer { engine.destroy() }
+        return magnitudeProfileImpl(from: samples, sampleRate: sampleRate, engine: engine)
+    }
+
+    private static func magnitudeProfileImpl(from samples: [Float], sampleRate _: Double, engine: FFTBackend) -> [Float] {
         let n = frameSize
         let half = n / 2
         guard samples.count > n else { return [] }
-        guard let setup = vDSP_create_fftsetup(log2n, FFTRadix(kFFTRadix2)) else { return [] }
-        defer { vDSP_destroy_fftsetup(setup) }
 
         let window = hannWindow(n)
         let frameCount = (samples.count - 1) / hop + 1
@@ -175,7 +276,7 @@ public enum SpectralDenoise {
             }
             var realp = windowed
             var imagp = [Float](repeating: 0, count: n)
-            transform(setup, &realp, &imagp, direction: FFTDirection(kFFTDirection_Forward))
+            engine.transform(&realp, &imagp, forward: true)
             for k in 0...half {
                 sumMag[k] += (realp[k] * realp[k] + imagp[k] * imagp[k]).squareRoot()
             }
@@ -195,21 +296,6 @@ public enum SpectralDenoise {
             window[i] = 0.5 - 0.5 * cos(2.0 * Float.pi * Float(i) / Float(n))
         }
         return window
-    }
-
-    /// In-place complex FFT on split-complex arrays backed by `realp`/`imagp`.
-    private static func transform(
-        _ setup: FFTSetup,
-        _ realp: inout [Float],
-        _ imagp: inout [Float],
-        direction: FFTDirection
-    ) {
-        realp.withUnsafeMutableBufferPointer { rp in
-            imagp.withUnsafeMutableBufferPointer { ip in
-                var split = DSPSplitComplex(realp: rp.baseAddress!, imagp: ip.baseAddress!)
-                vDSP_fft_zip(setup, &split, 1, log2n, direction)
-            }
-        }
     }
 
     /// Per-bin noise estimate: the minimum, over all frames, of a `temporalWindow`-frame moving
