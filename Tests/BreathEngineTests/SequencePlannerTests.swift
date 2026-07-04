@@ -1,126 +1,138 @@
-import XCTest
+import Testing
 @testable import BreathEngine
 
-final class SequencePlannerTests: XCTestCase {
+struct SequencePlannerTests {
     private func pattern(in i: Double, out o: Double, holdIn: Double = 0, holdOut: Double = 0) -> BreathPattern {
         BreathPattern(inhaleSec: i, holdInSec: holdIn, exhaleSec: o, holdOutSec: holdOut)
     }
 
     // MARK: - Exact fit
 
-    func testExactFitStrict() throws {
+    @Test func exactFitStrict() throws {
         let plan = try SequencePlanner.plan(total: 30, pattern: pattern(in: 5, out: 5), mode: .strict)
-        XCTAssertEqual(plan.cycles, 3)
-        XCTAssertEqual(plan.actualTotalSec, 30, accuracy: 1e-9)
-        XCTAssertEqual(plan.deltaSec, 0, accuracy: 1e-9)
-        XCTAssertTrue(plan.isExact)
+        #expect(plan.cycles == 3)
+        #expect(abs(plan.actualTotalSec - 30) <= 1e-9)
+        #expect(abs(plan.deltaSec - 0) <= 1e-9)
+        #expect(plan.isExact)
     }
 
-    func testExactFitClosestMatchesStrict() throws {
+    @Test func exactFitClosestMatchesStrict() throws {
         let plan = try SequencePlanner.plan(total: 30, pattern: pattern(in: 5, out: 5), mode: .closest)
-        XCTAssertEqual(plan.cycles, 3)
-        XCTAssertTrue(plan.isExact)
-        XCTAssertEqual(plan.deltaSec, 0, accuracy: 1e-9)
+        #expect(plan.cycles == 3)
+        #expect(plan.isExact)
+        #expect(abs(plan.deltaSec - 0) <= 1e-9)
     }
 
-    func testExactFitWithHolds() throws {
+    @Test func exactFitWithHolds() throws {
         // 4 in + 1 hold + 4 out + 1 hold = 10s cycle → 3 cycles fill 30s exactly.
         let plan = try SequencePlanner.plan(total: 30, pattern: pattern(in: 4, out: 4, holdIn: 1, holdOut: 1), mode: .strict)
-        XCTAssertEqual(plan.cycles, 3)
-        XCTAssertTrue(plan.isExact)
+        #expect(plan.cycles == 3)
+        #expect(plan.isExact)
     }
 
     // MARK: - Non-tiling: strict fails with a proposal
 
-    func testNonTilingStrictThrowsWithProposal() {
-        XCTAssertThrowsError(try SequencePlanner.plan(total: 30, pattern: pattern(in: 3, out: 6), mode: .strict)) { error in
-            guard case let .doesNotTile(requested, lower, upper, nearest) = error as? SequencePlanError else {
-                return XCTFail("expected doesNotTile, got \(error)")
-            }
-            XCTAssertEqual(requested, 30, accuracy: 1e-9)
-            XCTAssertEqual(lower.cycles, 3)
-            XCTAssertEqual(lower.actualTotalSec, 27, accuracy: 1e-9)
-            XCTAssertEqual(upper.cycles, 4)
-            XCTAssertEqual(upper.actualTotalSec, 36, accuracy: 1e-9)
-            // 27 is 3s away, 36 is 6s away → 27 is nearest.
-            XCTAssertEqual(nearest.cycles, 3)
-            XCTAssertEqual(nearest.actualTotalSec, 27, accuracy: 1e-9)
+    @Test func nonTilingStrictThrowsWithProposal() throws {
+        let error = try #require(throws: SequencePlanError.self) {
+            try SequencePlanner.plan(total: 30, pattern: pattern(in: 3, out: 6), mode: .strict)
         }
+        guard case let .doesNotTile(requested, lower, upper, nearest) = error else {
+            Issue.record("expected doesNotTile, got \(error)")
+            return
+        }
+        #expect(abs(requested - 30) <= 1e-9)
+        #expect(lower.cycles == 3)
+        #expect(abs(lower.actualTotalSec - 27) <= 1e-9)
+        #expect(upper.cycles == 4)
+        #expect(abs(upper.actualTotalSec - 36) <= 1e-9)
+        // 27 is 3s away, 36 is 6s away → 27 is nearest.
+        #expect(nearest.cycles == 3)
+        #expect(abs(nearest.actualTotalSec - 27) <= 1e-9)
     }
 
     // MARK: - Non-tiling: closest renders the nearest
 
-    func testNonTilingClosestRendersNearest() throws {
+    @Test func nonTilingClosestRendersNearest() throws {
         let plan = try SequencePlanner.plan(total: 30, pattern: pattern(in: 3, out: 6), mode: .closest)
-        XCTAssertEqual(plan.cycles, 3)
-        XCTAssertEqual(plan.actualTotalSec, 27, accuracy: 1e-9)
-        XCTAssertEqual(plan.deltaSec, -3, accuracy: 1e-9)
-        XCTAssertFalse(plan.isExact)
+        #expect(plan.cycles == 3)
+        #expect(abs(plan.actualTotalSec - 27) <= 1e-9)
+        #expect(abs(plan.deltaSec - (-3)) <= 1e-9)
+        #expect(!(plan.isExact))
     }
 
     // MARK: - Total shorter than one cycle
 
-    func testTotalShorterThanOneCycleStrict() {
-        XCTAssertThrowsError(try SequencePlanner.plan(total: 5, pattern: pattern(in: 3, out: 6), mode: .strict)) { error in
-            guard case let .doesNotTile(_, lower, upper, _) = error as? SequencePlanError else {
-                return XCTFail("expected doesNotTile, got \(error)")
-            }
-            // Only one option: a single 9s cycle.
-            XCTAssertEqual(lower.cycles, 1)
-            XCTAssertEqual(upper.cycles, 1)
-            XCTAssertEqual(lower.actualTotalSec, 9, accuracy: 1e-9)
+    @Test func totalShorterThanOneCycleStrict() throws {
+        let error = try #require(throws: SequencePlanError.self) {
+            try SequencePlanner.plan(total: 5, pattern: pattern(in: 3, out: 6), mode: .strict)
         }
+        guard case let .doesNotTile(_, lower, upper, _) = error else {
+            Issue.record("expected doesNotTile, got \(error)")
+            return
+        }
+        // Only one option: a single 9s cycle.
+        #expect(lower.cycles == 1)
+        #expect(upper.cycles == 1)
+        #expect(abs(lower.actualTotalSec - 9) <= 1e-9)
     }
 
-    func testTotalShorterThanOneCycleClosest() throws {
+    @Test func totalShorterThanOneCycleClosest() throws {
         let plan = try SequencePlanner.plan(total: 5, pattern: pattern(in: 3, out: 6), mode: .closest)
-        XCTAssertEqual(plan.cycles, 1)
-        XCTAssertEqual(plan.actualTotalSec, 9, accuracy: 1e-9)
-        XCTAssertFalse(plan.isExact)
+        #expect(plan.cycles == 1)
+        #expect(abs(plan.actualTotalSec - 9) <= 1e-9)
+        #expect(!(plan.isExact))
     }
 
     // MARK: - Invalid patterns
 
-    func testInhaleBelowMinimumThrowsInvalid() {
-        XCTAssertThrowsError(try SequencePlanner.plan(total: 30, pattern: pattern(in: 0.5, out: 6), mode: .closest)) { error in
-            guard case .invalidPattern = error as? SequencePlanError else {
-                return XCTFail("expected invalidPattern, got \(error)")
-            }
+    @Test func inhaleBelowMinimumThrowsInvalid() throws {
+        let error = try #require(throws: SequencePlanError.self) {
+            try SequencePlanner.plan(total: 30, pattern: pattern(in: 0.5, out: 6), mode: .closest)
+        }
+        guard case .invalidPattern = error else {
+            Issue.record("expected invalidPattern, got \(error)")
+            return
         }
     }
 
-    func testExhaleAboveMaximumThrowsInvalid() {
-        XCTAssertThrowsError(try SequencePlanner.plan(total: 120, pattern: pattern(in: 4, out: 40), mode: .closest)) { error in
-            guard case .invalidPattern = error as? SequencePlanError else {
-                return XCTFail("expected invalidPattern, got \(error)")
-            }
+    @Test func exhaleAboveMaximumThrowsInvalid() throws {
+        let error = try #require(throws: SequencePlanError.self) {
+            try SequencePlanner.plan(total: 120, pattern: pattern(in: 4, out: 40), mode: .closest)
+        }
+        guard case .invalidPattern = error else {
+            Issue.record("expected invalidPattern, got \(error)")
+            return
         }
     }
 
-    func testNonPositiveTotalThrowsInvalid() {
-        XCTAssertThrowsError(try SequencePlanner.plan(total: 0, pattern: pattern(in: 4, out: 6), mode: .closest)) { error in
-            guard case .invalidPattern = error as? SequencePlanError else {
-                return XCTFail("expected invalidPattern, got \(error)")
-            }
+    @Test func nonPositiveTotalThrowsInvalid() throws {
+        let error = try #require(throws: SequencePlanError.self) {
+            try SequencePlanner.plan(total: 0, pattern: pattern(in: 4, out: 6), mode: .closest)
+        }
+        guard case .invalidPattern = error else {
+            Issue.record("expected invalidPattern, got \(error)")
+            return
         }
     }
 
-    func testNegativeHoldThrowsInvalid() {
+    @Test func negativeHoldThrowsInvalid() throws {
         let p = BreathPattern(inhaleSec: 4, holdInSec: -1, exhaleSec: 6)
-        XCTAssertThrowsError(try SequencePlanner.plan(total: 30, pattern: p, mode: .closest)) { error in
-            guard case .invalidPattern = error as? SequencePlanError else {
-                return XCTFail("expected invalidPattern, got \(error)")
-            }
+        let error = try #require(throws: SequencePlanError.self) {
+            try SequencePlanner.plan(total: 30, pattern: p, mode: .closest)
+        }
+        guard case .invalidPattern = error else {
+            Issue.record("expected invalidPattern, got \(error)")
+            return
         }
     }
 
     // MARK: - Tie-break
 
-    func testTieBreakPrefersFewerCycles() throws {
+    @Test func tieBreakPrefersFewerCycles() throws {
         // 4s cycle into 10s → exactly 2.5 cycles. 2 cycles (8s) and 3 cycles (12s) are
         // both 2s away; the tie resolves toward fewer cycles (the shorter total).
         let plan = try SequencePlanner.plan(total: 10, pattern: pattern(in: 2, out: 2), mode: .closest)
-        XCTAssertEqual(plan.cycles, 2)
-        XCTAssertEqual(plan.actualTotalSec, 8, accuracy: 1e-9)
+        #expect(plan.cycles == 2)
+        #expect(abs(plan.actualTotalSec - 8) <= 1e-9)
     }
 }

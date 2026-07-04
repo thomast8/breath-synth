@@ -1,15 +1,16 @@
-import XCTest
+import Testing
+import Foundation
 @testable import BreathEngine
 
-final class FragmentBankSchemaTests: XCTestCase {
+struct FragmentBankSchemaTests {
     // MARK: - Manifest v2
 
-    func testManifestCurrentVersionIsTwo() {
-        XCTAssertEqual(BreathManifest.currentVersion, 2)
-        XCTAssertEqual(BreathManifest().version, 2)
+    @Test func manifestCurrentVersionIsTwo() {
+        #expect(BreathManifest.currentVersion == 2)
+        #expect(BreathManifest().version == 2)
     }
 
-    func testV2ManifestWithFragmentBankRoundTrips() throws {
+    @Test func v2ManifestWithFragmentBankRoundTrips() throws {
         var palette = RolePalette()
         palette.oneShot = [BreathAsset(file: "rv_1.aifc", durationSec: 8, sampleRate: 44_100, channels: 1)]
         palette.fragmentBank = "rv_exhale.frags.json"
@@ -20,23 +21,23 @@ final class FragmentBankSchemaTests: XCTestCase {
 
         let data = try JSONEncoder().encode(manifest)
         let decoded = try JSONDecoder().decode(BreathManifest.self, from: data)
-        XCTAssertEqual(decoded, manifest)
-        XCTAssertEqual(decoded.palette(style: "rv", type: .exhale)?.fragmentBank, "rv_exhale.frags.json")
+        #expect(decoded == manifest)
+        #expect(decoded.palette(style: "rv", type: .exhale)?.fragmentBank == "rv_exhale.frags.json")
     }
 
-    func testV1ManifestWithoutFragmentBankStillDecodes() throws {
+    @Test func v1ManifestWithoutFragmentBankStillDecodes() throws {
         // A pre-bank v1 manifest (no fragmentBank/render/noiseProfile keys) must still load; the
         // new optional field decodes to nil.
         let json = """
         {"version":1,"styles":{"calm":{"inhale":{"start":[],"loop":[{"file":"calm.aifc","durationSec":7.3,"sampleRate":48000,"channels":1}],"end":[],"oneShot":[]},"exhale":{"start":[],"loop":[],"end":[],"oneShot":[]}}}}
         """
         let manifest = try JSONDecoder().decode(BreathManifest.self, from: Data(json.utf8))
-        XCTAssertEqual(manifest.version, 1)
-        XCTAssertNil(manifest.palette(style: "calm", type: .inhale)?.fragmentBank)
-        XCTAssertEqual(manifest.palette(style: "calm", type: .inhale)?.loop.first?.file, "calm.aifc")
+        #expect(manifest.version == 1)
+        #expect(manifest.palette(style: "calm", type: .inhale)?.fragmentBank == nil)
+        #expect(manifest.palette(style: "calm", type: .inhale)?.loop.first?.file == "calm.aifc")
     }
 
-    func testLoadAcceptsV1AndV2RejectsFuture() throws {
+    @Test func loadAcceptsV1AndV2RejectsFuture() throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -46,18 +47,20 @@ final class FragmentBankSchemaTests: XCTestCase {
             try Data("{\"version\":\(version),\"styles\":{}}".utf8).write(to: url)
             return url
         }
-        XCTAssertEqual(try BreathManifest.load(from: writeManifest(version: 1)).version, 1)
-        XCTAssertEqual(try BreathManifest.load(from: writeManifest(version: 2)).version, 2)
-        XCTAssertThrowsError(try BreathManifest.load(from: writeManifest(version: 3))) { error in
-            guard case BreathError.unsupportedManifestVersion = error else {
-                return XCTFail("expected unsupportedManifestVersion, got \(error)")
-            }
+        #expect(try BreathManifest.load(from: writeManifest(version: 1)).version == 1)
+        #expect(try BreathManifest.load(from: writeManifest(version: 2)).version == 2)
+        let error = try #require(throws: BreathError.self) {
+            try BreathManifest.load(from: writeManifest(version: 3))
+        }
+        guard case .unsupportedManifestVersion = error else {
+            Issue.record("expected unsupportedManifestVersion, got \(error)")
+            return
         }
     }
 
     // MARK: - FragmentBank sidecar
 
-    func testFragmentBankRoundTrips() throws {
+    @Test func fragmentBankRoundTrips() throws {
         let bank = FragmentBank(
             style: "packing", type: .inhale, sampleRate: 44_100, preparedSig: "abc123",
             referenceTake: "packing_gold.aifc", roomToneProfile: "room.aifc", builtAt: "2026-06-25T00:00:00Z",
@@ -71,10 +74,10 @@ final class FragmentBankSchemaTests: XCTestCase {
         )
         let data = try JSONEncoder().encode(bank)
         let decoded = try JSONDecoder().decode(FragmentBank.self, from: data)
-        XCTAssertEqual(decoded, bank)
+        #expect(decoded == bank)
     }
 
-    func testAcceptedFragmentsAreFilteredAndStablyOrdered() {
+    @Test func acceptedFragmentsAreFilteredAndStablyOrdered() {
         let bank = FragmentBank(
             style: "calm", type: .inhale, preparedSig: "x",
             fragments: [
@@ -87,25 +90,27 @@ final class FragmentBankSchemaTests: XCTestCase {
         )
         let grains = bank.acceptedFragments(kind: .grain)
         // Rejects and other kinds excluded; remaining sorted by (file, startFrame).
-        XCTAssertEqual(grains.map { "\($0.file):\($0.startFrame)" }, ["a.aifc:10", "a.aifc:50", "b.aifc:0"])
-        XCTAssertTrue(grains.allSatisfy { $0.accept && $0.kind == .grain })
+        #expect(grains.map { "\($0.file):\($0.startFrame)" } == ["a.aifc:10", "a.aifc:50", "b.aifc:0"])
+        #expect(grains.allSatisfy { $0.accept && $0.kind == .grain })
     }
 
-    func testFragmentBankLoadRoundTripsAndRejectsFutureVersion() throws {
+    @Test func fragmentBankLoadRoundTripsAndRejectsFutureVersion() throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
 
         let url = dir.appendingPathComponent("bank.json")
         try FragmentBank(style: "calm", type: .inhale, preparedSig: "x").write(to: url)
-        XCTAssertEqual(try FragmentBank.load(from: url).style, "calm")
+        #expect(try FragmentBank.load(from: url).style == "calm")
 
         let future = dir.appendingPathComponent("future.json")
         try Data(#"{"version":99,"style":"calm","type":"inhale","sampleRate":44100,"preparedSig":"x","builtAt":"","fragments":[]}"#.utf8).write(to: future)
-        XCTAssertThrowsError(try FragmentBank.load(from: future)) { error in
-            guard case BreathError.unsupportedBankVersion = error else {
-                return XCTFail("expected unsupportedBankVersion, got \(error)")
-            }
+        let error = try #require(throws: BreathError.self) {
+            try FragmentBank.load(from: future)
+        }
+        guard case .unsupportedBankVersion = error else {
+            Issue.record("expected unsupportedBankVersion, got \(error)")
+            return
         }
     }
 }

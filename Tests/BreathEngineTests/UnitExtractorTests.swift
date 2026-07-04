@@ -1,10 +1,12 @@
-import XCTest
+import Testing
+import Foundation
 @testable import BreathEngine
 
-final class UnitExtractorTests: XCTestCase {
+struct UnitExtractorTests {
     /// Three 1 kHz tone-bursts spaced 1 s apart (well beyond the ~0.7 s event min-distance): the
     /// extractor should split them into exactly three real segments, each carrying energy, so the
     /// counted path can replay the actual events rather than a cloned exemplar.
+    @Test
     func testThreeSpacedBurstsGiveThreeUnits() {
         let sr = 44_100.0
         let toneFrames = Int(0.1 * sr)
@@ -21,14 +23,14 @@ final class UnitExtractorTests: XCTestCase {
 
         let (units, count) = UnitExtractor.extract(from: signal, sampleRate: sr)
 
-        XCTAssertEqual(count, burstCount, "expected 3 detected events")
-        XCTAssertEqual(units.count, burstCount)
+        #expect(count == burstCount, "expected 3 detected events")
+        #expect(units.count == burstCount)
         for unit in units {
-            XCTAssertGreaterThan(unit.count, 1)
-            XCTAssertGreaterThan(unit.reduce(Float(0)) { $0 + $1 * $1 }, 0, "each unit must carry energy")
+            #expect(unit.count > 1)
+            #expect(unit.reduce(Float(0)) { $0 + $1 * $1 } > 0, "each unit must carry energy")
         }
         // Concatenating the units stays within the source (segments are non-overlapping slices).
-        XCTAssertLessThanOrEqual(units.map(\.count).reduce(0, +), signal.count)
+        #expect(units.map(\.count).reduce(0, +) <= signal.count)
     }
 
     // MARK: minDistSec (Step 5.1 — style-aware event spacing)
@@ -36,6 +38,7 @@ final class UnitExtractorTests: XCTestCase {
     /// Two bursts 0.5 s apart: at `hookMinDistSec` (0.70) they merge into one event (a double-sip);
     /// at `gulpMinDistSec` (0.22) they resolve as two. Locks in the style-aware spacing this session
     /// added to align `Segmenter`'s bank-side geometry with the engine's own `extract` render path.
+    @Test
     func testGulpCoreRangesMinDistSecMergesOrSplitsBySpacing() {
         let sr = 44_100.0
         let toneFrames = Int(0.1 * sr)
@@ -49,12 +52,13 @@ final class UnitExtractorTests: XCTestCase {
         }
 
         let merged = UnitExtractor.gulpCoreRanges(from: signal, sampleRate: sr, minDistSec: UnitExtractor.hookMinDistSec)
-        XCTAssertEqual(merged.count, 1, "0.5s apart must merge under the 0.70s hook floor")
+        #expect(merged.count == 1, "0.5s apart must merge under the 0.70s hook floor")
 
         let split = UnitExtractor.gulpCoreRanges(from: signal, sampleRate: sr, minDistSec: UnitExtractor.gulpMinDistSec)
-        XCTAssertEqual(split.count, 2, "0.5s apart must stay separate under the 0.22s gulp floor")
+        #expect(split.count == 2, "0.5s apart must stay separate under the 0.22s gulp floor")
     }
 
+    @Test
     func testRhythmGapsMinDistSecMergesOrSplitsBySpacing() {
         let sr = 44_100.0
         let toneFrames = Int(0.1 * sr)
@@ -72,7 +76,7 @@ final class UnitExtractorTests: XCTestCase {
         // asserts fewer detected gaps under the wider hook floor, not an exact merge-to-one-event count.
         let merged = UnitExtractor.rhythmGaps(from: signal, sampleRate: sr, minDistSec: UnitExtractor.hookMinDistSec)
         let split = UnitExtractor.rhythmGaps(from: signal, sampleRate: sr, minDistSec: UnitExtractor.gulpMinDistSec)
-        XCTAssertEqual(split.count, 2, "three 0.5s-apart bursts stay separate under the 0.22s gulp floor — two gaps")
-        XCTAssertLessThan(merged.count, split.count, "the 0.70s hook floor must merge at least one adjacent pair")
+        #expect(split.count == 2, "three 0.5s-apart bursts stay separate under the 0.22s gulp floor — two gaps")
+        #expect(merged.count < split.count, "the 0.70s hook floor must merge at least one adjacent pair")
     }
 }

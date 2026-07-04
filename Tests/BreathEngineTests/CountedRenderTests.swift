@@ -1,10 +1,12 @@
-import XCTest
+import Testing
+import Foundation
 @testable import BreathEngine
 
-final class CountedRenderTests: XCTestCase {
+struct CountedRenderTests {
     /// `assembleCounted` cycles through the recording's real units to fill `count`. With two
     /// distinct units (different amplitude) and count 4 it should lay down u0,u1,u0,u1 — length =
     /// 4 units, one audible event per slot, and the alternating units must not all be identical.
+    @Test
     func testCyclesUnitsToFillCount() {
         let sr = 44_100.0
         let settings = AssemblerSettings(sampleRate: sr)
@@ -22,7 +24,7 @@ final class CountedRenderTests: XCTestCase {
 
         let out = BreathAssembler.assembleCounted(units: units, count: count, settings: settings)
 
-        XCTAssertEqual(out.count, unitFrames * count, "cycles units to fill the requested count")
+        #expect(out.count == unitFrames * count, "cycles units to fill the requested count")
 
         var peaks = [Float]()
         for k in 0..<count {
@@ -30,12 +32,12 @@ final class CountedRenderTests: XCTestCase {
             let end = min(out.count, start + toneFrames)
             peaks.append(rms(Array(out[start..<end])))
         }
-        XCTAssertEqual(peaks.count, count)
+        #expect(peaks.count == count)
         for (k, p) in peaks.enumerated() {
-            XCTAssertGreaterThan(p, 0.001, "event \(k) should be audible")
+            #expect(p > 0.001, "event \(k) should be audible")
         }
         let allEqual = peaks.dropFirst().allSatisfy { abs($0 - peaks[0]) < 1e-6 }
-        XCTAssertFalse(allEqual, "cycling distinct units should make alternating events differ: \(peaks)")
+        #expect(!(allEqual), "cycling distinct units should make alternating events differ: \(peaks)")
     }
 
     private func rms(_ samples: [Float]) -> Float {

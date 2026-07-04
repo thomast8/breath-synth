@@ -13,7 +13,7 @@ required to run the examples below.
 
 - macOS 13+
 - Swift 6.3 toolchain
-- Xcode if you want to run the XCTest suite on macOS
+- Xcode if you want to run the test suite on macOS
 
 ## Build and test
 
@@ -23,7 +23,8 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test
 ```
 
 The `DEVELOPER_DIR` prefix is only needed when `xcode-select` points at Command
-Line Tools, since Apple's CLT install does not include XCTest.
+Line Tools, since swift-testing's runtime isn't wired up there. Tests use
+swift-testing (`import Testing`, `@Test`, `#expect`/`#require`).
 
 ## Quick start
 

@@ -9,9 +9,9 @@ timing/DSP primitive and technique/mode catalogs live in the CLI/app layer.
 
 ```sh
 swift build                        # or: make build  →  dist/breath, dist/breath-debug
-swift test                         # needs the Xcode toolchain (XCTest is absent in CommandLineTools);
-                                   # if `xcode-select -p` points at CLT, prefix:
-                                   # DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test
+swift test                         # needs the Xcode toolchain (swift-testing's runtime isn't wired up
+                                   # under bare CommandLineTools); if `xcode-select -p` points at CLT,
+                                   # prefix: DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test
 swift run breath <subcommand> ...  # CLI: render | play | cycle | sequence
 swift run breath-debug             # SwiftUI debug app (reads ./Assets/breaths)
 bash scripts/make-debug-app.sh     # → dist/BreathDebug.app (visible in Finder; bundles palette, ad-hoc signed)
@@ -101,7 +101,8 @@ you can drag to seek; Pause/Play/Stop/Save-WAV. Every action is fanned out to a 
 
 ## Gotchas
 
-- `swift test` needs Xcode (see above). Tests are XCTest under `Tests/BreathEngineTests/`.
+- `swift test` needs Xcode (see above). Tests use swift-testing (`import Testing`, `@Test`, `#expect`/
+  `#require`) under `Tests/BreathEngineTests/` and `Tests/BreathBankTests/`.
 - Editing a recording in `Assets/breaths/` changes the render verbatim for counted/oneShot styles
   (no synthesis hides it). Update the manifest's `durationSec` if length changes; keep a backup.
 - `recovery` is a verbatim slice — its "glottal stop" artifacts are in the recording, not a join bug

@@ -1,4 +1,5 @@
-import XCTest
+import Testing
+import Foundation
 import BreathBank
 import BreathEngine
 
@@ -7,7 +8,7 @@ import BreathEngine
 /// single-take loop it replaces. Built with the engine's *default* settings (denoise on) so the bank's
 /// `preparedSig` matches what the engine expects and the pool is actually adopted.
 @MainActor
-final class PoolRenderTests: XCTestCase {
+struct PoolRenderTests {
     private let sr = AudioConstants.workingSampleRate
 
     private func noise(seed: UInt64, count: Int, amplitude: Float) -> [Float] {
@@ -48,6 +49,7 @@ final class PoolRenderTests: XCTestCase {
         BreathSpec(type: .inhale, durationSec: 8, style: "calm", seed: seed)
     }
 
+    @Test
     func testPooledRenderIsDeterministicAndSeedDependent() throws {
         let (bundle, cleanup) = try buildCalmBank()
         defer { cleanup() }
@@ -55,13 +57,14 @@ final class PoolRenderTests: XCTestCase {
 
         let a = try engine.renderSamples(spec(seed: 42))
         let b = try engine.renderSamples(spec(seed: 42))
-        XCTAssertEqual(a, b, "same seed → identical pooled render")
+        #expect(a == b, "same seed → identical pooled render")
 
         let c = try engine.renderSamples(spec(seed: 99))
-        XCTAssertEqual(a.count, c.count)
-        XCTAssertNotEqual(a, c, "a different seed draws a different grain succession")
+        #expect(a.count == c.count)
+        #expect(a != c, "a different seed draws a different grain succession")
     }
 
+    @Test
     func testPoolChangesRenderVersusSingleTextureLoop() throws {
         let (bundle, cleanup) = try buildCalmBank()
         defer { cleanup() }
@@ -71,8 +74,8 @@ final class PoolRenderTests: XCTestCase {
         try FileManager.default.removeItem(at: bundle.appendingPathComponent("fragments"))
         let single = try BreathEngine.load(assetsDirectory: bundle).renderSamples(spec(seed: 7))
 
-        XCTAssertEqual(pooled.count, single.count)
-        XCTAssertNotEqual(pooled, single, "the cross-take grain pool renders differently from the single-take loop")
+        #expect(pooled.count == single.count)
+        #expect(pooled != single, "the cross-take grain pool renders differently from the single-take loop")
     }
 
     /// Packing renders from the banked cross-take core + cadence pools. Rigorous + hermetic: the
@@ -82,6 +85,7 @@ final class PoolRenderTests: XCTestCase {
     /// raw take.
     /// A banked counted render with no explicit count must default to ONE cadence take's worth of
     /// gulps, not the pooled cross-take total (which would scale the breath with the take count).
+    @Test
     func testBankedCountedDefaultIsOneTakeNotPooledTotal() throws {
         let cap = try tempDir()
         let out = try tempDir()
@@ -114,16 +118,17 @@ final class PoolRenderTests: XCTestCase {
         let bank = try FragmentBank.load(from: out.appendingPathComponent("fragments/packing_inhale.frags.json"))
         let perTake = Dictionary(grouping: bank.acceptedFragments(kind: .gap), by: \.file).mapValues(\.count)
         let totalGaps = bank.acceptedFragments(kind: .gap).count
-        XCTAssertGreaterThan(perTake.count, 1, "two cadence takes pooled")
+        #expect(perTake.count > 1, "two cadence takes pooled")
 
         let manifest = try BreathManifest.load(from: out.appendingPathComponent("manifest.json"))
         let library = AssetLibrary(baseURL: out, manifest: manifest)
-        let defaultEvents = try XCTUnwrap(library.defaultCountedEvents(style: "packing", type: .inhale, expectedSig: nil))
-        XCTAssertLessThan(defaultEvents, totalGaps + 1, "default must not be the pooled cross-take total")
+        let defaultEvents = try #require(library.defaultCountedEvents(style: "packing", type: .inhale, expectedSig: nil))
+        #expect(defaultEvents < totalGaps + 1, "default must not be the pooled cross-take total")
         let median = perTake.values.sorted()[perTake.count / 2]
-        XCTAssertEqual(defaultEvents, median + 1, "default is one cadence take's worth of gulps")
+        #expect(defaultEvents == median + 1, "default is one cadence take's worth of gulps")
     }
 
+    @Test
     func testPackingRendersFromBankPoolMatchingAssembleHybrid() throws {
         let cap = try tempDir()
         let out = try tempDir()
@@ -160,7 +165,7 @@ final class PoolRenderTests: XCTestCase {
         let engine = try BreathEngine.load(assetsDirectory: out)
         let a = try engine.renderCountedSamples(style: "packing", type: .inhale, count: 12, seed: 7)
         let b = try engine.renderCountedSamples(style: "packing", type: .inhale, count: 12, seed: 7)
-        XCTAssertEqual(a, b, "same seed → identical pooled hybrid render")
+        #expect(a == b, "same seed → identical pooled hybrid render")
 
         // Reconstruct the expected render from the bank pool exactly as the engine's counted path does:
         // accepted cores re-cut + declicked from the cache, accepted gaps in order, assembleHybrid at
@@ -171,18 +176,19 @@ final class PoolRenderTests: XCTestCase {
             UnitExtractor.declickedCore(Array(cache[$0.startFrame..<$0.endFrame]), sampleRate: sr)
         }
         let gaps = bank.acceptedFragments(kind: .gap).compactMap(\.gapToNext).filter { $0 > 0 }
-        XCTAssertFalse(cores.isEmpty)
-        XCTAssertFalse(gaps.isEmpty)
+        #expect(!(cores.isEmpty))
+        #expect(!(gaps.isEmpty))
         var expected = BreathAssembler.assembleHybrid(cores: cores, gaps: gaps, count: 12,
                                                       settings: AssemblerSettings(), seed: 7)
         let gain = Float(Variation.dbToGain(-1.0))
         expected = expected.map { min(1, max(-1, $0 * gain)) }
-        XCTAssertEqual(a, expected, "engine counted render equals assembleHybrid over the accepted pool")
+        #expect(a == expected, "engine counted render equals assembleHybrid over the accepted pool")
     }
 
     /// frc/rv (oneShot) restrict the take pick to the bank's accepted takes. The rejected take here is
     /// distinctly LONGER (and clipped, so it's rejected): a no-bank engine sometimes renders that long
     /// length across seeds, but the bank engine — filtered to the short accepted takes — never does.
+    @Test
     func testOneShotPickRestrictedToAcceptedTakes() throws {
         let cap = try tempDir()
         let out = try tempDir()
@@ -214,8 +220,8 @@ final class PoolRenderTests: XCTestCase {
         _ = try BankBuilder.build(capturesDir: cap, assetsDir: cap, outDir: out, builtAt: "test")
 
         let bank = try FragmentBank.load(from: out.appendingPathComponent("fragments/frc_exhale.frags.json"))
-        XCTAssertEqual(bank.fragments.filter { !$0.accept }.map(\.file), ["frc_4.wav"])
-        XCTAssertEqual(Set(bank.acceptedFragments(kind: .oneShotBody).map(\.file)),
+        #expect(bank.fragments.filter { !$0.accept }.map(\.file) == ["frc_4.wav"])
+        #expect(Set(bank.acceptedFragments(kind: .oneShotBody).map(\.file)) ==
                        ["frc_1.wav", "frc_2.wav", "frc_3.wav"])
 
         func lengths(_ engine: BreathEngine) throws -> Set<Int> {
@@ -231,12 +237,13 @@ final class PoolRenderTests: XCTestCase {
         let unbanked = try lengths(BreathEngine.load(assetsDirectory: out))
 
         let longest = unbanked.max() ?? 0           // the long frc_4 body — only reachable without the bank
-        XCTAssertGreaterThan(longest, banked.max() ?? 0, "no-bank can draw the long rejected take")
-        XCTAssertFalse(banked.contains(longest), "the bank never renders the rejected take")
+        #expect(longest > banked.max() ?? 0, "no-bank can draw the long rejected take")
+        #expect(!(banked.contains(longest)), "the bank never renders the rejected take")
     }
 
     /// Consecutive cycles must not be the same buffer repeated: the per-cycle golden-ratio seed makes
     /// each cycle draw an independent grain succession from the pool.
+    @Test
     func testSequenceCyclesDrawIndependentlyFromPool() throws {
         let (bundle, cleanup) = try buildCalmBank()
         defer { cleanup() }
@@ -249,20 +256,21 @@ final class PoolRenderTests: XCTestCase {
         // Slice the inhale of cycle 0 and cycle 1 (each cycle = inhale ++ exhale, no holds) and compare.
         let inhaleLen = Segments.frames(seconds: 8, sampleRate: sr)
         let cycleLen = inhaleLen * 2
-        XCTAssertGreaterThanOrEqual(full.count, cycleLen * 2)
+        #expect(full.count >= cycleLen * 2)
         let inhale0 = Array(full[0..<inhaleLen])
         let inhale1 = Array(full[cycleLen..<(cycleLen + inhaleLen)])
-        XCTAssertNotEqual(inhale0, inhale1, "consecutive cycles must not be the identical buffer")
+        #expect(inhale0 != inhale1, "consecutive cycles must not be the identical buffer")
     }
 
     /// The gitignored prepared caches must regenerate bit-for-bit from the committed takes + banks, so
     /// a fresh checkout (no caches) plus `prepare-caches` renders identically to the freshly-built bundle.
+    @Test
     func testRegenerateCachesReproducesBitIdentical() throws {
         let (bundle, cleanup) = try buildCalmBank()
         defer { cleanup() }
         let cacheURL = bundle.appendingPathComponent("calm_inhale_1.prepared.wav")
         let before = try AudioIO.decodeMono(url: cacheURL)
-        XCTAssertFalse(before.isEmpty)
+        #expect(!(before.isEmpty))
         let renderBefore = try BreathEngine.load(assetsDirectory: bundle).renderSamples(spec(seed: 3))
 
         // Drop every prepared cache, as a fresh checkout would (they're gitignored).
@@ -270,14 +278,14 @@ final class PoolRenderTests: XCTestCase {
         where url.lastPathComponent.hasSuffix(".prepared.wav") {
             try FileManager.default.removeItem(at: url)
         }
-        XCTAssertFalse(FileManager.default.fileExists(atPath: cacheURL.path))
+        #expect(!(FileManager.default.fileExists(atPath: cacheURL.path)))
 
         let written = try BankBuilder.regenerateCaches(assetsDir: bundle)
-        XCTAssertTrue(written.contains("calm_inhale_1.prepared.wav"))
+        #expect(written.contains("calm_inhale_1.prepared.wav"))
         let after = try AudioIO.decodeMono(url: cacheURL)
-        XCTAssertEqual(before, after, "regenerated cache is bit-identical to the build's")
+        #expect(before == after, "regenerated cache is bit-identical to the build's")
 
         let renderAfter = try BreathEngine.load(assetsDirectory: bundle).renderSamples(spec(seed: 3))
-        XCTAssertEqual(renderBefore, renderAfter, "render unchanged after cache regeneration")
+        #expect(renderBefore == renderAfter, "render unchanged after cache regeneration")
     }
 }

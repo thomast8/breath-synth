@@ -1,11 +1,11 @@
-import XCTest
+import Testing
 import BreathBank
 import BreathEngine
 
 /// The segmenter must cut fragments whose offsets reproduce the exact audio the engine renders, with
 /// the same grain geometry as `recordedShapeBranch` and the same cores as `assembleHybrid`. Denoise
 /// is off so the prepared signal is a deterministic function of the input (trim + high-pass only).
-final class SegmenterTests: XCTestCase {
+struct SegmenterTests {
     private let sr = AudioConstants.workingSampleRate
     private var settings: AssemblerSettings { AssemblerSettings(enableSpectralDenoise: false) }
 
@@ -16,27 +16,29 @@ final class SegmenterTests: XCTestCase {
 
     // MARK: - texture → grains
 
+    @Test
     func testTextureGrainsTileWithEngineGeometry() {
         let take = noise(seed: 1, count: Int(10 * sr), amplitude: 0.25)
         let out = Segmenter.segment(rawTake: take, role: "texture", type: .inhale,
                                     settings: settings, roomToneProfile: nil)
-        let texture = try? XCTUnwrap(out.cacheSignal)
+        let texture = try? #require(out.cacheSignal)
         guard let texture else { return }
 
         let grain = min(texture.count, Segments.frames(seconds: 2.5, sampleRate: sr))
-        XCTAssertGreaterThanOrEqual(out.fragments.count, 3, "a 10 s take should yield several grains")
+        #expect(out.fragments.count >= 3, "a 10 s take should yield several grains")
         for f in out.fragments {
-            XCTAssertEqual(f.kind, .grain)
-            XCTAssertEqual(f.endFrame - f.startFrame, grain, "uniform grain length")
-            XCTAssertEqual(Array(texture[f.startFrame..<f.endFrame]), f.audio, "offset reproduces the grain audio")
+            #expect(f.kind == .grain)
+            #expect(f.endFrame - f.startFrame == grain, "uniform grain length")
+            #expect(Array(texture[f.startFrame..<f.endFrame]) == f.audio, "offset reproduces the grain audio")
         }
         // Stride mirrors the engine: 2.5 s grain − 0.7 s crossfade.
         let stride = out.fragments[1].startFrame - out.fragments[0].startFrame
-        XCTAssertEqual(stride, grain - Segments.frames(seconds: 0.7, sampleRate: sr))
+        #expect(stride == grain - Segments.frames(seconds: 0.7, sampleRate: sr))
     }
 
     // MARK: - oneShotBody → whole trimmed maneuver
 
+    @Test
     func testOneShotBodyIsWholeTrimmedBodyAndNeedsNoCache() {
         var sig = [Float](repeating: 0, count: Int(0.5 * sr))
         sig += noise(seed: 2, count: Int(3 * sr), amplitude: 0.3)
@@ -44,19 +46,20 @@ final class SegmenterTests: XCTestCase {
 
         let out = Segmenter.segment(rawTake: sig, role: "oneShotBody", type: .exhale,
                                     settings: settings, roomToneProfile: nil)
-        XCTAssertNil(out.cacheSignal, "frc/rv are re-derived per take at render — no on-disk cache")
-        XCTAssertEqual(out.fragments.count, 1)
+        #expect(out.cacheSignal == nil, "frc/rv are re-derived per take at render — no on-disk cache")
+        #expect(out.fragments.count == 1)
         let body = out.fragments[0]
-        XCTAssertEqual(body.kind, .oneShotBody)
-        XCTAssertEqual(body.startFrame, 0)
-        XCTAssertEqual(body.endFrame, body.audio.count)
-        XCTAssertLessThan(body.audio.count, sig.count, "the padded silence is trimmed off")
-        XCTAssertGreaterThan(body.audio.count, Int(2 * sr), "the ~3 s body survives")
-        XCTAssertNotNil(body.peakHeight)
+        #expect(body.kind == .oneShotBody)
+        #expect(body.startFrame == 0)
+        #expect(body.endFrame == body.audio.count)
+        #expect(body.audio.count < sig.count, "the padded silence is trimmed off")
+        #expect(body.audio.count > Int(2 * sr), "the ~3 s body survives")
+        #expect(body.peakHeight != nil)
     }
 
     // MARK: - cores → declicked gulp events
 
+    @Test
     func testCoresReproduceDeclickedPreparedSlices() {
         var sig = [Float]()
         for i in 0..<6 {
@@ -65,23 +68,24 @@ final class SegmenterTests: XCTestCase {
         }
         let out = Segmenter.segment(rawTake: sig, role: "cores", type: .inhale,
                                     settings: settings, roomToneProfile: nil)
-        let prepared = try? XCTUnwrap(out.cacheSignal)
+        let prepared = try? #require(out.cacheSignal)
         guard let prepared else { return }
 
-        XCTAssertGreaterThanOrEqual(out.fragments.count, 4, "≈6 separated bursts detected")
+        #expect(out.fragments.count >= 4, "≈6 separated bursts detected")
         for f in out.fragments {
-            XCTAssertEqual(f.kind, .gulpCore)
+            #expect(f.kind == .gulpCore)
             let expected = UnitExtractor.declickedCore(Array(prepared[f.startFrame..<f.endFrame]), sampleRate: sr)
-            XCTAssertEqual(f.audio, expected, "offset + declick reproduces the rendered core")
-            XCTAssertNotNil(f.peakHeight)
+            #expect(f.audio == expected, "offset + declick reproduces the rendered core")
+            #expect(f.peakHeight != nil)
         }
-        XCTAssertNotNil(out.fragments.first?.gapToNext, "interior cores carry the inter-onset gap")
-        XCTAssertNil(out.fragments.last?.gapToNext, "the last core has no successor")
+        #expect(out.fragments.first?.gapToNext != nil, "interior cores carry the inter-onset gap")
+        #expect(out.fragments.last?.gapToNext == nil, "the last core has no successor")
     }
 
     /// Invariant #2 against the engine itself: the bank's core audios must equal what the engine
     /// renders via `UnitExtractor.gulpCores(prepared)` — not merely be self-consistent. This pins the
     /// `gulpCores ≡ gulpCoreRanges.map { declickedCore }` identity that PR6's render path relies on.
+    @Test
     func testCoresMatchEngineGulpCoresExactly() {
         var sig = [Float]()
         for i in 0..<6 {
@@ -90,13 +94,14 @@ final class SegmenterTests: XCTestCase {
         }
         let out = Segmenter.segment(rawTake: sig, role: "cores", type: .inhale,
                                     settings: settings, roomToneProfile: nil)
-        let prepared = try? XCTUnwrap(out.cacheSignal)
+        let prepared = try? #require(out.cacheSignal)
         guard let prepared else { return }
-        XCTAssertEqual(out.fragments.map(\.audio), UnitExtractor.gulpCores(from: prepared, sampleRate: sr))
+        #expect(out.fragments.map(\.audio) == UnitExtractor.gulpCores(from: prepared, sampleRate: sr))
     }
 
     // MARK: - gaps → cadence intervals
 
+    @Test
     func testGapsAreRhythmIntervalsWithNoAudio() throws {
         var sig = [Float]()
         for i in 0..<6 {
@@ -105,16 +110,16 @@ final class SegmenterTests: XCTestCase {
         }
         let out = Segmenter.segment(rawTake: sig, role: "gaps", type: .inhale,
                                     settings: settings, roomToneProfile: nil)
-        XCTAssertNil(out.cacheSignal)
-        XCTAssertGreaterThanOrEqual(out.fragments.count, 3)
+        #expect(out.cacheSignal == nil)
+        #expect(out.fragments.count >= 3)
         var lastStart = -1
         for f in out.fragments {
-            XCTAssertEqual(f.kind, .gap)
-            XCTAssertTrue(f.audio.isEmpty)
-            let gap = try XCTUnwrap(f.gapToNext)
-            XCTAssertGreaterThan(gap, 0)
-            XCTAssertEqual(f.endFrame, f.startFrame + gap)
-            XCTAssertGreaterThan(f.startFrame, lastStart, "onset offsets increase so the cadence order survives a stable sort")
+            #expect(f.kind == .gap)
+            #expect(f.audio.isEmpty)
+            let gap = try #require(f.gapToNext)
+            #expect(gap > 0)
+            #expect(f.endFrame == f.startFrame + gap)
+            #expect(f.startFrame > lastStart, "onset offsets increase so the cadence order survives a stable sort")
             lastStart = f.startFrame
         }
     }
@@ -124,6 +129,7 @@ final class SegmenterTests: XCTestCase {
     /// Recovery's hook-breath double-sip must merge at `hookMinDistSec`, not the packing-tuned
     /// `gulpMinDistSec` default — aligning `Segmenter`'s bank-side geometry (cores and gaps) with the
     /// engine's own one-take `UnitExtractor.extract` render path, which already merges at this floor.
+    @Test
     func testCoresMinEventDistSecMergesRecoverySpacing() {
         var sig = [Float]()
         for i in 0..<4 {
@@ -134,10 +140,11 @@ final class SegmenterTests: XCTestCase {
                                            roomToneProfile: nil, minEventDistSec: UnitExtractor.gulpMinDistSec)
         let hookSpaced = Segmenter.segment(rawTake: sig, role: "cores", type: .inhale, settings: settings,
                                            roomToneProfile: nil, minEventDistSec: UnitExtractor.hookMinDistSec)
-        XCTAssertGreaterThan(gulpSpaced.fragments.count, hookSpaced.fragments.count,
+        #expect(gulpSpaced.fragments.count > hookSpaced.fragments.count,
                              "the 0.22s floor must resolve more distinct cores than the 0.70s floor on the same audio")
     }
 
+    @Test
     func testGapsMinEventDistSecMergesRecoverySpacing() {
         var sig = [Float]()
         for i in 0..<4 {
@@ -148,13 +155,14 @@ final class SegmenterTests: XCTestCase {
                                            roomToneProfile: nil, minEventDistSec: UnitExtractor.gulpMinDistSec)
         let hookSpaced = Segmenter.segment(rawTake: sig, role: "gaps", type: .inhale, settings: settings,
                                            roomToneProfile: nil, minEventDistSec: UnitExtractor.hookMinDistSec)
-        XCTAssertGreaterThan(gulpSpaced.fragments.count, hookSpaced.fragments.count,
+        #expect(gulpSpaced.fragments.count > hookSpaced.fragments.count,
                              "the 0.22s floor must resolve more distinct gaps than the 0.70s floor on the same audio")
     }
 
+    @Test
     func testEventSpacingForStyle() {
-        XCTAssertEqual(Segmenter.eventSpacing(forStyle: "recovery"), UnitExtractor.hookMinDistSec)
-        XCTAssertEqual(Segmenter.eventSpacing(forStyle: "packing"), UnitExtractor.gulpMinDistSec)
-        XCTAssertEqual(Segmenter.eventSpacing(forStyle: "calm"), UnitExtractor.gulpMinDistSec)
+        #expect(Segmenter.eventSpacing(forStyle: "recovery") == UnitExtractor.hookMinDistSec)
+        #expect(Segmenter.eventSpacing(forStyle: "packing") == UnitExtractor.gulpMinDistSec)
+        #expect(Segmenter.eventSpacing(forStyle: "calm") == UnitExtractor.gulpMinDistSec)
     }
 }
