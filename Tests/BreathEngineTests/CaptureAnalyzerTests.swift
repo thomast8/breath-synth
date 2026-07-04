@@ -18,7 +18,9 @@ struct CaptureAnalyzerTests {
     }
 
     /// `count` constant-amplitude bursts, each `widthSec` long, separated by silence to `spacingSec`.
-    private func impulses(_ count: Int, spacingSec: Double, widthSec: Double = 0.03, amp: Float = 0.3) -> [Float] {
+    /// Default width clears `CaptureAnalyzer`'s `minEventWidthSec` (0.10s) with margin — narrower than
+    /// that, every burst is rejected as `run-ended-too-soon` before it can be counted as an event.
+    private func impulses(_ count: Int, spacingSec: Double, widthSec: Double = 0.15, amp: Float = 0.3) -> [Float] {
         var out: [Float] = []
         for _ in 0..<count {
             out += tone(widthSec, amp)
@@ -371,7 +373,7 @@ struct CaptureAnalyzerTests {
     }
 
     @Test func refractoryPreventsDoubleCount() {
-        let signal = silence(0.3) + impulses(8, spacingSec: 0.15) + silence(1.0)  // 0.15 < 0.22 refractory
+        let signal = silence(0.3) + impulses(8, spacingSec: 0.15, widthSec: 0.03) + silence(1.0)  // 0.15 < 0.22 refractory
         let (_, analyzer) = run(.cleanEvents(minGapSec: 0.1, maxTakeSec: 20, trailingSilenceSec: 0.8), signal)
         #expect(analyzer.eventCount < 8)
     }
