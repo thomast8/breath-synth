@@ -120,8 +120,8 @@ swift run breath-debug        # reads Assets/breaths relative to the package roo
 For a proper Dock app that bundles the palette (so it runs with no working directory):
 
 ```sh
-bash scripts/make-debug-app.sh   # builds + ad-hoc-signs .build/BreathDebug.app
-open .build/BreathDebug.app
+bash scripts/make-debug-app.sh   # builds + ad-hoc-signs dist/BreathDebug.app
+open dist/BreathDebug.app
 ```
 
 Four modes, each with its own style/direction pickers (filtered to what the palette

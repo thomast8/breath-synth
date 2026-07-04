@@ -10,10 +10,15 @@ import Foundation
 ///   take (the deliberately-separated packs) are laid out at another take's natural rhythm.
 public enum UnitExtractor {
     /// Adjacent event segments + detected count. Tiny input or <2 events returns `([source], 1)`.
-    /// Min-distance between detected events. Recovery hooks are a double sip ~0.5 s apart that must
-    /// merge into one event (0.7 s); packing gulps can follow much faster, so the hybrid path uses a
-    /// small distance to catch the true cadence.
-    public static let hookMinDistSec = 0.70
+    /// Min-distance between detected events. Recovery hooks are a double sip that must merge into one
+    /// event; packing gulps can follow much faster, so the hybrid path uses a small distance to catch
+    /// the true cadence. Real-hardware data (PR #11): one user's own in/out sip gap measured 0.73–0.78s
+    /// — right on top of the old 0.70s floor, so the merge succeeded or failed depending on which side
+    /// of that boundary a given hook happened to land, undercounting inconsistently. 0.85s clears that
+    /// with margin while staying well under an observed real between-breath gap (1.77s) — still leaves
+    /// no room for someone who does genuinely back-to-back hooks with almost no gap; there's no single
+    /// constant that serves both extremes, so this trades toward the failure mode actually observed.
+    public static let hookMinDistSec = 0.85
     public static let gulpMinDistSec = 0.22
 
     public static func extract(
@@ -43,25 +48,56 @@ public enum UnitExtractor {
 
     /// One clean, declicked core per detected event (the transient plus a short tail), aligned so the
     /// event begins near the start — for placing standalone at an externally-supplied rhythm.
-    public static func gulpCores(from source: [Float], sampleRate: Double) -> [[Float]] {
-        let peaks = detectPeaks(source, sampleRate: sampleRate, minDistSec: gulpMinDistSec)
-        guard !peaks.isEmpty else { return source.count > 1 ? [source] : [] }
+    /// Delegates to `gulpCoreRanges` so the identity a fragment bank relies on holds *by construction*
+    /// on every path (detected events, no events, degenerate windows): a bank that stores the ranges
+    /// and re-cuts `declickedCore(prepared[range])` reproduces this exactly.
+    public static func gulpCores(
+        from source: [Float], sampleRate: Double, minDistSec: Double = gulpMinDistSec
+    ) -> [[Float]] {
+        gulpCoreRanges(from: source, sampleRate: sampleRate, minDistSec: minDistSec)
+            .map { declicked(Array(source[$0]), sampleRate: sampleRate) }
+    }
+
+    /// The source-frame ranges `gulpCores` slices (before declicking) — the offsets a fragment bank
+    /// stores so a core can be re-cut from the cached prepared take. The identity is unconditional:
+    /// `gulpCores(...)` is exactly `gulpCoreRanges(...).map { declickedCore(prepared[$0], ...) }`.
+    /// A take with no detected events yields the whole-source range (or none when too short).
+    /// `minDistSec` defaults to the packing gulp spacing; recovery callers pass `hookMinDistSec` so a
+    /// double-sip's in/out halves merge into one event here too, matching `extract`'s existing merge.
+    public static func gulpCoreRanges(
+        from source: [Float], sampleRate: Double, minDistSec: Double = gulpMinDistSec
+    ) -> [Range<Int>] {
+        let peaks = detectPeaks(source, sampleRate: sampleRate, minDistSec: minDistSec)
+        guard !peaks.isEmpty else { return source.count > 1 ? [0..<source.count] : [] }
+        let ranges = coreRanges(forPeaks: peaks, count: source.count, sampleRate: sampleRate)
+        return ranges.isEmpty ? (source.count > 1 ? [0..<source.count] : []) : ranges
+    }
+
+    /// Declick a re-cut core (short raised-cosine fade-in/out + zeroed endpoints) so it is click-free
+    /// when placed in silence. Public so a fragment bank reproduces the engine's exact core audio.
+    public static func declickedCore(_ samples: [Float], sampleRate: Double) -> [Float] {
+        declicked(samples, sampleRate: sampleRate)
+    }
+
+    /// The `[pre-roll, post-tail]` window around each detected event, clipped to the source bounds.
+    private static func coreRanges(forPeaks peaks: [Int], count: Int, sampleRate: Double) -> [Range<Int>] {
         let pre = Int(0.08 * sampleRate)
         let post = Int(0.35 * sampleRate)
-        var cores: [[Float]] = []
+        var ranges: [Range<Int>] = []
         for p in peaks {
             let lo = max(0, p - pre)
-            let hi = min(source.count, p + post)
-            guard hi - lo > 4 else { continue }
-            cores.append(declicked(Array(source[lo..<hi]), sampleRate: sampleRate))
+            let hi = min(count, p + post)
+            if hi - lo > 4 { ranges.append(lo..<hi) }
         }
-        return cores.isEmpty ? [source] : cores
+        return ranges
     }
 
     /// The inter-onset gaps (in samples) between detected events — the recording's natural rhythm.
-    /// Returns `[]` when fewer than two events are found.
-    public static func rhythmGaps(from source: [Float], sampleRate: Double) -> [Int] {
-        let peaks = detectPeaks(source, sampleRate: sampleRate, minDistSec: gulpMinDistSec)
+    /// Returns `[]` when fewer than two events are found. `minDistSec`: see `gulpCoreRanges`.
+    public static func rhythmGaps(
+        from source: [Float], sampleRate: Double, minDistSec: Double = gulpMinDistSec
+    ) -> [Int] {
+        let peaks = detectPeaks(source, sampleRate: sampleRate, minDistSec: minDistSec)
         guard peaks.count >= 2 else { return [] }
         var gaps: [Int] = []
         for i in 1..<peaks.count { gaps.append(max(1, peaks[i] - peaks[i - 1])) }

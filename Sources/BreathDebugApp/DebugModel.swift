@@ -46,8 +46,8 @@ final class DebugModel {
     }
 
     /// Stats for the most recent render, shown next to the waveform. `durationSec` is the rendered
-    /// buffer (one cycle in Cycle mode); `totalSec`, when set, is the longer length that will actually
-    /// play (Cycle mode plays the buffer N times) so the displayed duration is never silently wrong.
+    /// buffer's length, which now equals the full playback length for every task (Cycle mode renders
+    /// all its cycles into the buffer rather than replaying one). `totalSec` is vestigial — now nil.
     struct RenderStats: Equatable {
         var taskName: String
         var detail: String
@@ -177,9 +177,10 @@ final class DebugModel {
         case .single, .counted:
             return min(Double(played) / Double(total), 1)
         case .cycle:
+            // The buffer is now the whole cycleCount-cycle block (like sequence): sweep it once —
+            // looping wraps at the block, finite clamps at the end.
             if cycleLoop { return Double(played % total) / Double(total) }
-            if played >= total * AVAudioFramePosition(max(1, cycleCount)) { return 1 }
-            return Double(played % total) / Double(total)
+            return min(Double(played) / Double(total), 1)
         case .sequence:
             if seqLoop { return Double(played % total) / Double(total) }
             return min(Double(played) / Double(total), 1)
@@ -305,7 +306,7 @@ final class DebugModel {
             let repeats: Int
             switch self.task {
             case .single, .counted: loop = false; repeats = 0
-            case .cycle: loop = self.cycleLoop; repeats = max(0, self.cycleCount - 1)
+            case .cycle: loop = self.cycleLoop; repeats = 0   // renderCycle returns all cycleCount cycles
             case .sequence: loop = self.seqLoop; repeats = 0
             }
             self.playbackStartFrame = startFrame
@@ -427,7 +428,6 @@ final class DebugModel {
         let buffer: AVAudioPCMBuffer
         var detail = ""
         var bounds: [Double] = []
-        var totalSec: Double?
 
         switch task {
         case .single:
@@ -441,17 +441,15 @@ final class DebugModel {
             detail = "\(countedStyle) \(countedType.rawValue) · count \(count.map(String.init) ?? "detected") · seed \(seed.map(String.init) ?? "stable")"
         case .cycle:
             let spec = cycleSpec()
-            buffer = try engine.renderCycle(spec)               // one cycle; playback repeats it
+            buffer = try engine.renderCycle(spec)               // all cycleCount cycles, each decorrelated
             bounds = cycleBoundaries()
+            let count = max(1, cycleCount)
             let cycleLen = cycleInhaleDur + cycleHoldIn + cycleExhaleDur + cycleHoldOut
             detail = "in \(cycleInhaleStyle) \(fmt(cycleInhaleDur))s / hold \(fmt(cycleHoldIn))s / out \(cycleExhaleStyle) \(fmt(cycleExhaleDur))s / hold \(fmt(cycleHoldOut))s"
-            if cycleLoop {
-                detail += " · loops one cycle"
-            } else {
-                let count = max(1, cycleCount)
-                detail += " · plays \(count)× → \(fmt(cycleLen * Double(count)))s"
-                totalSec = cycleLen * Double(count)
-            }
+            let plural = count == 1 ? "" : "s"
+            detail += cycleLoop
+                ? " · loops \(count) distinct cycle\(plural)"
+                : " · \(count) distinct cycle\(plural) → \(fmt(cycleLen * Double(count)))s"
         case .sequence:
             let plan = try makePlanCapturingSummary()
             buffer = try engine.renderSequence(plan)
@@ -460,7 +458,7 @@ final class DebugModel {
         }
 
         let renderMs = Double(DispatchTime.now().uptimeNanoseconds &- t0.uptimeNanoseconds) / 1_000_000
-        updateDisplay(buffer: buffer, detail: detail, boundaries: bounds, totalSec: totalSec, renderMs: renderMs)
+        updateDisplay(buffer: buffer, detail: detail, boundaries: bounds, totalSec: nil, renderMs: renderMs)
         if case .rendering = phase { phase = .idle }
         return buffer
     }
@@ -583,14 +581,22 @@ final class DebugModel {
     // MARK: - Boundaries (waveform phase/cycle guides, as fractions of total)
 
     private func cycleBoundaries() -> [Double] {
+        // The buffer is `cycleCount` whole cycles, so mark every cycle's phase boundaries plus each
+        // cycle seam, as fractions of the full multi-cycle length (not just one cycle's phases).
         let segments = [cycleInhaleDur, cycleHoldIn, cycleExhaleDur, cycleHoldOut]
-        let total = segments.reduce(0, +)
-        guard total > 0 else { return [] }
+        let cycleLen = segments.reduce(0, +)
+        let count = max(1, cycleCount)
+        let total = cycleLen * Double(count)
+        guard cycleLen > 0, total > 0 else { return [] }
         var marks: [Double] = []
-        var acc = 0.0
-        for segment in segments.dropLast() {
-            acc += segment
-            marks.append(acc / total)
+        for cycle in 0..<count {
+            let base = Double(cycle) * cycleLen
+            var acc = 0.0
+            for segment in segments.dropLast() {
+                acc += segment
+                marks.append((base + acc) / total)
+            }
+            if cycle < count - 1 { marks.append((base + cycleLen) / total) } // cycle seam
         }
         return marks
     }

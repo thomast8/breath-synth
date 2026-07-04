@@ -47,6 +47,9 @@ public final class BreathEngine {
     /// to every render so the denoiser subtracts the measured floor instead of estimating
     /// one. `nil` when no profile is configured or it failed to load (denoiser falls back).
     private let noiseProfile: [Float]?
+    /// The prepare-config signature the engine expects a fragment bank to carry; a bank whose
+    /// `preparedSig` differs is ignored (the render falls back to the single-take path).
+    private let bankSig: String
     private var player: BreathPlayer?
     private var cache: [String: AVAudioPCMBuffer] = [:]
     private var cacheOrder: [String] = []
@@ -78,6 +81,7 @@ public final class BreathEngine {
         } else {
             noiseProfile = nil
         }
+        bankSig = FragmentBank.preparedSignature(settings: config.settings, roomToneProfile: noiseProfile)
     }
 
     /// Convenience: build an engine from a manifest.json file in `assetsDirectory`.
@@ -102,7 +106,17 @@ public final class BreathEngine {
         let seed = spec.seed ?? Variation.stableSeed(for: spec)
         var rng = SeededRNG(seed: seed)
         let deltas = Variation.draw(spec.variation, rng: &rng)
-        let clips = try library.sourceClips(style: spec.style, type: spec.type, rng: &rng)
+        // frc/rv (oneShot) restrict the take pick to the bank's accepted takes; nil ⇒ no filter ⇒
+        // byte-identical pick. The same single seeded draw is used, so the stream doesn't shift.
+        let acceptedOneShot = library.oneShotBodyAcceptedFiles(style: spec.style, type: spec.type, expectedSig: bankSig)
+        let clips = try library.sourceClips(style: spec.style, type: spec.type, rng: &rng,
+                                            acceptedOneShot: acceptedOneShot)
+        // Banked textured styles render from the cross-take accepted-grain pool. Loaded after the
+        // take pick and drawing no RNG, so the seed stream — and thus the no-bank render — is
+        // byte-identical whether or not a bank is present.
+        let grainPool = mode == .textured
+            ? library.grainPool(style: spec.style, type: spec.type, expectedSig: bankSig)
+            : nil
         var samples = BreathAssembler.assemble(
             type: spec.type,
             durationSec: spec.clampedDurationSec,
@@ -112,7 +126,8 @@ public final class BreathEngine {
             seed: seed,
             mode: mode,
             style: spec.style,
-            noiseProfile: noiseProfile
+            noiseProfile: noiseProfile,
+            grainPool: grainPool
         )
         applyMasterGainAndClamp(&samples, extraGain: spec.gain)
         return samples
@@ -129,13 +144,35 @@ public final class BreathEngine {
         return buffer
     }
 
-    /// Render a full inhale/hold/exhale/hold cycle into a single buffer.
+    /// Render `max(1, cycle.cycles)` inhale/hold/exhale/hold cycles into one buffer, each cycle
+    /// re-seeded so consecutive cycles draw independent samples (no "ABC ABC ABC" repeat) while
+    /// staying reproducible. Cycle 0 matches a single-cycle render of the spec.
     public func renderCycle(_ cycle: CycleSpec) throws -> AVAudioPCMBuffer {
-        var samples = try renderSamples(cycle.inhale)
+        try makeBuffer(renderCyclesSamples(cycle, count: max(1, cycle.cycles)))
+    }
+
+    /// One cycle's samples, decorrelated by `cycleIndex` (golden-ratio seed stride, as sequences use).
+    public func renderCycleSamples(_ cycle: CycleSpec, cycleIndex: Int = 0) throws -> [Float] {
+        var samples = try renderSamples(decorrelated(cycle.inhale, cycleIndex: cycleIndex))
         samples += silence(seconds: cycle.holdAfterInhaleSec)
-        samples += try renderSamples(cycle.exhale)
+        samples += try renderSamples(decorrelated(cycle.exhale, cycleIndex: cycleIndex))
         samples += silence(seconds: cycle.holdAfterExhaleSec)
-        return try makeBuffer(samples)
+        return samples
+    }
+
+    private func renderCyclesSamples(_ cycle: CycleSpec, count: Int) throws -> [Float] {
+        var samples: [Float] = []
+        for index in 0..<max(1, count) { samples += try renderCycleSamples(cycle, cycleIndex: index) }
+        return samples
+    }
+
+    /// Per-cycle decorrelated copy of a breath spec: stride the seed by `cycleIndex` with the golden
+    /// ratio so consecutive cycles differ yet stay reproducible. Index 0 is the spec's own seed.
+    private func decorrelated(_ base: BreathSpec, cycleIndex: Int) -> BreathSpec {
+        var spec = base
+        let baseSeed = base.seed ?? Variation.stableSeed(for: base)
+        spec.seed = baseSeed &+ UInt64(cycleIndex) &* 0x9E37_79B9_7F4A_7C15
+        return spec
     }
 
     /// Render a planned sequence (a whole number of pattern cycles) to mono samples.
@@ -181,7 +218,18 @@ public final class BreathEngine {
         let sr = config.sampleRate
         var body: [Float]
 
-        if palette.oneShot.count >= 2 {
+        if let cores = library.gulpCorePool(style: style, type: type, expectedSig: bankSig),
+           let gaps = library.rhythmGapPool(style: style, type: type, expectedSig: bankSig) {
+            // Banked hybrid: cross-take accepted gulp cores laid out at the pooled cadence. Seeded by
+            // `resolvedSeed`, so identical to the single-take hybrid in shape but drawing from the full
+            // graded pool. No bank ⇒ the pools are nil and we fall through to the take-based paths,
+            // which stay byte-identical. A nil count defaults to ONE cadence take's worth of gulps, not
+            // the pooled cross-take total (which would scale the breath with the number of takes).
+            let n = count
+                ?? library.defaultCountedEvents(style: style, type: type, expectedSig: bankSig)
+                ?? (gaps.count + 1)
+            body = BreathAssembler.assembleHybrid(cores: cores, gaps: gaps, count: n, settings: config.settings, seed: resolvedSeed)
+        } else if palette.oneShot.count >= 2 {
             // Hybrid: cores from take 0 (separated packs), rhythm from take 1 (natural cadence).
             let coreSrc = BreathAssembler.prepareSource(
                 try library.samples(for: palette.oneShot[0].file), settings: config.settings, noiseProfile: noiseProfile)
@@ -262,16 +310,21 @@ public final class BreathEngine {
         try await playerInstance().playOnce(buffer)
     }
 
-    /// Play a cycle. Loops forever (non-blocking) when `cycle.loop`, otherwise plays
-    /// `cycle.cycles` times and returns when done.
+    /// Play a cycle. When `cycle.loop`, loops a BLOCK of distinct cycles forever (non-blocking) so the
+    /// repeat period is many breaths, not one. Otherwise plays `cycle.cycles` distinct cycles once and
+    /// returns when done. Either way no two consecutive breaths are the identical buffer replayed.
     public func playCycle(_ cycle: CycleSpec) async throws {
-        let buffer = try renderCycle(cycle)
         if cycle.loop {
-            try playerInstance().loopForever(buffer)
+            let block = try makeBuffer(renderCyclesSamples(cycle, count: Self.loopBlockCycles))
+            try playerInstance().loopForever(block)
         } else {
-            try await playerInstance().play(buffer, times: max(1, cycle.cycles))
+            try await playerInstance().playOnce(renderCycle(cycle))
         }
     }
+
+    /// Distinct cycles rendered into a looped block so an infinite cycle doesn't audibly repeat a
+    /// single breath. Eight breaths is well past the point the repeat is perceptible under holds.
+    private static let loopBlockCycles = 8
 
     /// Play a planned sequence as one buffer. Loops the whole sequence forever
     /// (non-blocking) when `loop`, otherwise plays it once and returns when done.
@@ -405,7 +458,10 @@ public final class BreathEngine {
 
     private func cacheKey(_ spec: BreathSpec) -> String {
         let seed = spec.seed ?? Variation.stableSeed(for: spec)
-        return sourceCachePrefix + "|" + Variation.canonicalString(spec) + "|seed:\(seed)"
+        // Fold in the bank fingerprint so a regrade (changed accept set / rebuilt bank) invalidates
+        // any stale cached buffer for this (style, type) instead of replaying pre-regrade audio.
+        let bank = library.bankFingerprint(style: spec.style, type: spec.type, expectedSig: bankSig)
+        return sourceCachePrefix + "|" + Variation.canonicalString(spec) + "|seed:\(seed)|bank:\(bank)"
     }
 
     private var sourceCachePrefix: String { "assets" }

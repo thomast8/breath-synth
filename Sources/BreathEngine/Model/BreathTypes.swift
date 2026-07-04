@@ -112,6 +112,8 @@ public enum BreathError: Error, CustomStringConvertible, Equatable {
     case assetNotFound(String)
     case audioFormatUnavailable
     case unsupportedManifestVersion(found: Int, supported: Int)
+    /// A fragment-bank sidecar's schema version is newer than this build supports.
+    case unsupportedBankVersion(found: Int, supported: Int)
     case ioFailure(String)
     /// A counted style (e.g. recovery, packing) was asked for via a duration-based render.
     case styleRequiresCount(BreathStyle)
@@ -128,6 +130,8 @@ public enum BreathError: Error, CustomStringConvertible, Equatable {
             return "Could not create the working audio format."
         case let .unsupportedManifestVersion(found, supported):
             return "Manifest version \(found) is newer than supported (\(supported)). Update breath-synth or use a matching manifest."
+        case let .unsupportedBankVersion(found, supported):
+            return "Fragment-bank version \(found) is newer than supported (\(supported)). Update breath-synth or rebuild the bank."
         case let .ioFailure(message):
             return "Audio I/O failure: \(message)"
         case let .styleRequiresCount(style):
