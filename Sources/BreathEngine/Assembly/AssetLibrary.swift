@@ -214,8 +214,10 @@ public final class AssetLibrary {
     }
 
     /// Decode a file to mono Float32 at `targetRate`, resampling/downmixing as needed. `nonisolated`
-    /// and `public` so the app-layer `breath-bank` builder decodes enrollment takes through the exact
-    /// same path the engine uses for its assets (no decode drift between build and render).
+    /// and `public` for callers outside the engine's main-actor isolation. `BreathBank`'s `AudioIO`
+    /// has its own independent copy of this (it can't depend on this Apple-only target — see that
+    /// file's doc comment), so the two are no longer the same call path; keep them in sync by
+    /// inspection if either changes.
     public nonisolated static func loadMonoSamples(url: URL, targetRate: Double) throws -> [Float] {
         let file: AVAudioFile
         do {
@@ -224,36 +226,39 @@ public final class AssetLibrary {
             throw BreathError.ioFailure("opening \(url.lastPathComponent): \(error.localizedDescription)")
         }
         let inFormat = file.processingFormat
-        let frameCount = AVAudioFrameCount(file.length)
-        guard frameCount > 0,
-              let inBuffer = AVAudioPCMBuffer(pcmFormat: inFormat, frameCapacity: frameCount) else {
-            return []
-        }
-        do {
-            try file.read(into: inBuffer)
-        } catch {
-            throw BreathError.ioFailure("reading \(url.lastPathComponent): \(error.localizedDescription)")
-        }
-
-        // `processingFormat` is always deinterleaved Float32, so floatChannelData is valid.
-        let frames = Int(inBuffer.frameLength)
-        guard frames > 0, let channelData = inBuffer.floatChannelData else { return [] }
+        guard file.length > 0 else { return [] }
         let channelCount = Int(inFormat.channelCount)
 
-        // Downmix to mono.
-        var mono = [Float](repeating: 0, count: frames)
-        for c in 0..<channelCount {
-            let ptr = channelData[c]
-            for i in 0..<frames { mono[i] += ptr[i] }
-        }
-        if channelCount > 1 {
-            let scale = 1 / Float(channelCount)
-            for i in 0..<frames { mono[i] *= scale }
+        // `AVAudioFile.read(into:)` is NOT guaranteed to fill a large buffer in one call (observed:
+        // a 13230-frame mono Float32 WAV under-read to 12277 frames on a single call, though the
+        // bundled AIFC assets happen not to trigger it) — loop reading fixed-size chunks until EOF.
+        var mono: [Float] = []
+        mono.reserveCapacity(Int(file.length))
+        let chunkFrames: AVAudioFrameCount = 65_536
+        while file.framePosition < file.length {
+            guard let chunk = AVAudioPCMBuffer(pcmFormat: inFormat, frameCapacity: chunkFrames) else { break }
+            do {
+                try file.read(into: chunk)
+            } catch {
+                throw BreathError.ioFailure("reading \(url.lastPathComponent): \(error.localizedDescription)")
+            }
+            let frames = Int(chunk.frameLength)
+            guard frames > 0, let channelData = chunk.floatChannelData else { break }
+            if channelCount == 1 {
+                mono.append(contentsOf: UnsafeBufferPointer(start: channelData[0], count: frames))
+            } else {
+                let scale = 1 / Float(channelCount)
+                for i in 0..<frames {
+                    var sum: Float = 0
+                    for c in 0..<channelCount { sum += channelData[c][i] }
+                    mono.append(sum * scale)
+                }
+            }
         }
 
         // Resample to the working rate if needed (linear interp, matching the rest of the engine).
         if inFormat.sampleRate != targetRate {
-            let target = Int((Double(frames) * targetRate / inFormat.sampleRate).rounded())
+            let target = Int((Double(mono.count) * targetRate / inFormat.sampleRate).rounded())
             mono = Resample.toFrames(mono, target)
         }
         return mono

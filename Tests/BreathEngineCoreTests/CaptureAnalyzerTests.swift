@@ -703,26 +703,32 @@ struct CaptureAnalyzerTests {
         let url = assetURL(name)
         let file = try AVAudioFile(forReading: url)
         let inFormat = file.processingFormat
-        let frameCount = AVAudioFrameCount(file.length)
-        guard frameCount > 0,
-              let inBuffer = AVAudioPCMBuffer(pcmFormat: inFormat, frameCapacity: frameCount) else {
-            return []
-        }
-        try file.read(into: inBuffer)
-        let frames = Int(inBuffer.frameLength)
-        guard frames > 0, let channelData = inBuffer.floatChannelData else { return [] }
+        guard file.length > 0 else { return [] }
         let channelCount = Int(inFormat.channelCount)
-        var mono = [Float](repeating: 0, count: frames)
-        for c in 0..<channelCount {
-            let ptr = channelData[c]
-            for i in 0..<frames { mono[i] += ptr[i] }
-        }
-        if channelCount > 1 {
-            let scale = 1 / Float(channelCount)
-            for i in 0..<frames { mono[i] *= scale }
+
+        // `AVAudioFile.read(into:)` isn't guaranteed to fill a large buffer in one call — see
+        // `AudioIO.decodeMono`'s doc comment for the repro. Loop until EOF.
+        var mono: [Float] = []
+        mono.reserveCapacity(Int(file.length))
+        let chunkFrames: AVAudioFrameCount = 65_536
+        while file.framePosition < file.length {
+            guard let chunk = AVAudioPCMBuffer(pcmFormat: inFormat, frameCapacity: chunkFrames) else { break }
+            try file.read(into: chunk)
+            let frames = Int(chunk.frameLength)
+            guard frames > 0, let channelData = chunk.floatChannelData else { break }
+            if channelCount == 1 {
+                mono.append(contentsOf: UnsafeBufferPointer(start: channelData[0], count: frames))
+            } else {
+                let scale = 1 / Float(channelCount)
+                for i in 0..<frames {
+                    var sum: Float = 0
+                    for c in 0..<channelCount { sum += channelData[c][i] }
+                    mono.append(sum * scale)
+                }
+            }
         }
         if inFormat.sampleRate != targetRate {
-            let target = Int((Double(frames) * targetRate / inFormat.sampleRate).rounded())
+            let target = Int((Double(mono.count) * targetRate / inFormat.sampleRate).rounded())
             mono = Resample.toFrames(mono, target)
         }
         return mono
