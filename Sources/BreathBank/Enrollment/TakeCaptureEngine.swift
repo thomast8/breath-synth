@@ -49,15 +49,15 @@ public actor TakeCaptureEngine {
     private var detection: CaptureDetection = .fixedDuration(seconds: 5)
     private var rollingFloor = RollingNoiseFloor()
     private var ambientGateRMS: Float?
-    private var onTakeAmbient: (([Float]) -> Void)?
+    private var onTakeAmbient: (([Float]) async -> Void)?
     private var takes = 1
     private var isCycle = false
     private var isFinalPhase = false
     private var isFixed = false
     private var minPhaseFrames = 0
     private var fileURL: ((Int, SegmentLabel) -> URL)?
-    private var onSegment: ((Int, SegmentLabel, URL, [Int], [CaptureAnalyzer.SpectralCandidate]) -> Void)?
-    private var onFinished: (() -> Void)?
+    private var onSegment: ((Int, SegmentLabel, URL, [Int], [CaptureAnalyzer.SpectralCandidate]) async -> Void)?
+    private var onFinished: (() async -> Void)?
     private var onTakeReview: ((_ takeIndex: Int, _ segments: [(label: SegmentLabel, url: URL)]) async -> TakeReview)?
     /// `true` while a written-but-unemitted take awaits its `onTakeReview` verdict — `armed` is already
     /// false for the whole wait (set by `consume` on `takeEnded`), so `feed` can't start a new take, but
@@ -86,11 +86,11 @@ public actor TakeCaptureEngine {
         onSegment: @escaping (
             _ takeIndex: Int, _ label: SegmentLabel, _ url: URL, _ intervalsFrames: [Int],
             _ spectralCandidates: [CaptureAnalyzer.SpectralCandidate]
-        ) -> Void,
-        onFinished: @escaping () -> Void,
+        ) async -> Void,
+        onFinished: @escaping () async -> Void,
         onTakeReview: ((_ takeIndex: Int, _ segments: [(label: SegmentLabel, url: URL)]) async -> TakeReview)? = nil,
         ambientGateRMS: Float? = nil,
-        onTakeAmbient: (([Float]) -> Void)? = nil
+        onTakeAmbient: (([Float]) async -> Void)? = nil
     ) {
         guard !isRecording else { return }
         self.sampleRate = sampleRate
@@ -145,7 +145,7 @@ public actor TakeCaptureEngine {
     /// Feed the next chunk of mono samples at `sampleRate`. Cheap when not armed (between takes / during
     /// review): only the raw-RMS level fallback updates, same as `BreathRecorder`'s tap when `box.armed`
     /// is false.
-    public func feed(_ mono: [Float]) {
+    public func feed(_ mono: [Float]) async {
         guard isRecording else { return }
         var offset = 0
         while offset < mono.count {
@@ -161,15 +161,15 @@ public actor TakeCaptureEngine {
             let events = analyzer.ingest(sub)
             let request = consume(events)
             refreshLiveState()
-            if let request { finalize(request) }
+            if let request { await finalize(request) }
         }
     }
 
     /// Manual override: finalize the in-progress take now (writes what's captured so far).
-    public func stopCurrentTake() {
+    public func stopCurrentTake() async {
         guard isRecording, armed else { return }
         if let request = consume(analyzer.flush()) {
-            finalize(request)
+            await finalize(request)
         }
     }
 
@@ -199,7 +199,7 @@ public actor TakeCaptureEngine {
 
     // MARK: Take lifecycle
 
-    private func finalize(_ request: FinalizeRequest) {
+    private func finalize(_ request: FinalizeRequest) async {
         guard isRecording, let fileURL, onSegment != nil else { return }
         if isFixed {
             lastNoiseFloorRMS = request.meanFloor
@@ -211,7 +211,7 @@ public actor TakeCaptureEngine {
                 currentNoiseFloorRMS = rollingFloor.value
             }
             // Same "still valid data even if redone" reasoning as the rolling floor above.
-            onTakeAmbient?(request.ambientSamples)
+            await onTakeAmbient?(request.ambientSamples)
         }
 
         let issue = takeIssue(request)
@@ -253,7 +253,7 @@ public actor TakeCaptureEngine {
         }
 
         if decision == .emit {
-            emit(written, request: request)
+            await emit(written, request: request)
             return
         }
 
@@ -290,22 +290,24 @@ public actor TakeCaptureEngine {
             arm()
         case .emit:
             reviewing = false
-            emit(written, request: request)
+            await emit(written, request: request)
         }
     }
 
     /// Fire `onSegment` for already-written segments and advance the session — the shared tail of the
-    /// immediate-accept and post-review-accept paths.
-    private func emit(_ written: [(label: SegmentLabel, url: URL)], request: FinalizeRequest) {
+    /// immediate-accept and post-review-accept paths. `onSegment`/`onFinished` are awaited (not fired via
+    /// a detached `Task`) so ordering across a multi-segment take (e.g. cycle's inhale-then-exhale) is
+    /// guaranteed, exactly as calling them synchronously in sequence would be.
+    private func emit(_ written: [(label: SegmentLabel, url: URL)], request: FinalizeRequest) async {
         guard let onSegment else { return }
         for (label, url) in written {
-            onSegment(takeIndex, label, url, request.intervals, request.spectralCandidates)
+            await onSegment(takeIndex, label, url, request.intervals, request.spectralCandidates)
         }
         takeIndex += 1
         if takeIndex >= takes {
             let finished = onFinished
             teardown()
-            finished?()
+            await finished?()
         } else {
             arm()
         }
