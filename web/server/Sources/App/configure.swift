@@ -59,14 +59,27 @@ private func configureEnrollmentSessions(_ app: Application) {
     app.enrollmentSessions = registry
     let idleTimeout: TimeInterval = 30 * 60
     let sweepInterval: UInt64 = 5 * 60 * 1_000_000_000
-    Task.detached {
+    // Captures only `registry` + `logger` (not `app` itself, a strong `class` reference) and is
+    // cancelled on shutdown via the lifecycle hook below — otherwise this loop (and everything it
+    // closes over) outlives `app.asyncShutdown()`, which a per-test `Application` hits on every test.
+    let logger = app.logger
+    let sweepTask = Task.detached {
         while !Task.isCancelled {
             try? await Task.sleep(nanoseconds: sweepInterval)
+            guard !Task.isCancelled else { return }
             let evicted = await registry.evictIdle(olderThan: idleTimeout)
             if !evicted.isEmpty {
-                app.logger.info("Evicted \(evicted.count) idle enrollment session(s)")
+                logger.info("Evicted \(evicted.count) idle enrollment session(s)")
             }
         }
+    }
+    app.lifecycle.use(EnrollmentSessionSweepLifecycle(task: sweepTask))
+}
+
+private struct EnrollmentSessionSweepLifecycle: LifecycleHandler {
+    let task: Task<Void, Never>
+    func shutdown(_ app: Application) {
+        task.cancel()
     }
 }
 

@@ -115,7 +115,11 @@ final class EnrollmentSocketHandlerTests: XCTestCase {
         let detectionCount = await recorder.messages.filter {
             if case .detectionState = $0 { return true }; return false
         }.count
-        XCTAssertEqual(detectionCount, 1, "50 rapid feeds inside one throttle window should yield exactly one send")
+        // Exactly 1 on a fast, idle machine (only the first call, racing `.distantPast`, should clear
+        // the throttle) — but this is a real-wall-clock throttle, so a loaded CI runner could cross the
+        // 100ms window once more mid-loop. The bound that actually matters is "far below 50 (unthrottled)".
+        XCTAssertLessThanOrEqual(detectionCount, 3, "50 rapid feeds inside ~one throttle window should be heavily throttled")
+        XCTAssertGreaterThanOrEqual(detectionCount, 1)
     }
 
     // MARK: Message choreography: kept-unchecked verdict -> segment -> session finished

@@ -52,24 +52,48 @@ struct EnrollmentSocketController {
             }
         )
 
+        // Vapor invokes `onText`/`onBinary` serially, in arrival order, on the connection's event loop —
+        // but spawning an independent `Task` per callback throws that ordering away (Swift makes no
+        // guarantee unstructured tasks *begin* in creation order), which could let a `startStep` race
+        // behind an audio chunk and silently wedge the session (feed to an unarmed engine, dropped).
+        // `continuation.yield` is synchronous, so enqueuing happens in the exact order Vapor calls back;
+        // one consumer `Task` then drains the queue and awaits `handler` strictly in that order.
+        let (frames, continuation) = AsyncStream<InboundFrame>.makeStream()
         ws.onText { _, text in
-            Task { await handler.handle(text: text) }
+            continuation.yield(.text(text))
         }
         ws.onBinary { _, buffer in
-            let bytes = [UInt8](buffer.readableBytesView)
-            Task { await handler.handle(binary: bytes) }
+            continuation.yield(.binary([UInt8](buffer.readableBytesView)))
         }
         ws.onClose.whenComplete { _ in
-            Task { await handler.handleDisconnect() }
+            continuation.yield(.disconnect)
+            continuation.finish()
+        }
+        Task {
+            for await frame in frames {
+                switch frame {
+                case let .text(text): await handler.handle(text: text)
+                case let .binary(bytes): await handler.handle(binary: bytes)
+                case .disconnect: await handler.handleDisconnect()
+                }
+            }
         }
     }
 
+    private enum InboundFrame: Sendable {
+        case text(String)
+        case binary([UInt8])
+        case disconnect
+    }
+
     /// Persists one `Take` row per (step, lane) sharing `laneSlug` — see `lanesBySlug`'s doc comment.
-    /// Verdict fields are intentionally minimal (`accept: true`, no reason/advisory/fragment counts):
-    /// `segmentWritten` only ever fires for a take that was ultimately *accepted* (a redo never reaches
-    /// `emit()`, so it never reaches here), and the richer live verdict is already visible to the
-    /// participant in real time over the socket — archiving it to SQL too is a nice-to-have, not
-    /// required for the export pipeline (`SessionExporter` never reads these fields).
+    /// Verdict fields are intentionally minimal (`accept: true`, no reason/advisory/fragment counts): the
+    /// take this row describes was accepted at write time (a redo never reaches `emit()`, so it never
+    /// reaches here) — a *later* take at the same (laneSlug, role, takeIndex) can still demote this row
+    /// to `.redone` below, same as the row's own history always allowed. The richer live verdict is
+    /// already visible to the participant in real time over the socket — archiving it to SQL too is a
+    /// nice-to-have, not required for the export pipeline (`SessionExporter` filters on `status ==
+    /// .kept` and never reads the verdict fields at all).
     private static func persistSegment(
         sessionID: UUID, takeIndex: Int, laneSlug: String, filename: String, db: any Database,
         storage: any StorageDriver

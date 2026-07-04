@@ -56,7 +56,6 @@ enum ServerMessage: Encodable {
     case sessionState(SessionStateMessage)
     case detectionState(DetectionStateMessage)
     case ambientHold(AmbientHoldMessage)
-    case takeEnded(TakeEndedMessage)
     case takeVerdict(TakeVerdictMessage)
     case stepComplete(StepCompleteMessage)
     case roomToneReady(RoomToneReadyMessage)
@@ -68,7 +67,6 @@ enum ServerMessage: Encodable {
         case let .sessionState(payload): try payload.encode(to: encoder)
         case let .detectionState(payload): try payload.encode(to: encoder)
         case let .ambientHold(payload): try payload.encode(to: encoder)
-        case let .takeEnded(payload): try payload.encode(to: encoder)
         case let .takeVerdict(payload): try payload.encode(to: encoder)
         case let .stepComplete(payload): try payload.encode(to: encoder)
         case let .roomToneReady(payload): try payload.encode(to: encoder)
@@ -124,11 +122,6 @@ struct DetectionStateMessage: Encodable {
 struct AmbientHoldMessage: Encodable {
     let type = "ambientHold"
     let active: Bool
-}
-
-struct TakeEndedMessage: Encodable {
-    let type = "takeEnded"
-    let reason: String
 }
 
 struct TakeVerdictMessage: Encodable {
