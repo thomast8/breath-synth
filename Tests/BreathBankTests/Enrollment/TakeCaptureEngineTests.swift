@@ -123,6 +123,47 @@ struct TakeCaptureEngineTests {
         #expect(await engine.isRecording == false)
     }
 
+    // MARK: Structural-retake callback (web UI parity: the participant must be told when a redo happens)
+
+    @Test func structurallyInvalidCycleFiresOnTakeRetakeBeforeReArming() async throws {
+        let engine = makeEngine()
+        let recorder = CallRecorder()
+        let retakeLog = RetakeCallLog()
+        let dir = try makeTempDir()
+
+        await engine.start(
+            sampleRate: sr, takes: 1, detection: missingExhaleDetection, noiseFloorRMS: 0.001,
+            fileURL: { takeIndex, label in dir.appendingPathComponent("take\(takeIndex)_\(label.rawValue).wav") },
+            onSegment: { takeIndex, label, url, intervals, _ in
+                recorder.recordSegment(takeIndex, label, url, intervals)
+            },
+            onFinished: { recorder.recordFinished() },
+            onTakeRetake: { takeIndex, issue, retries in
+                await retakeLog.record(takeIndex: takeIndex, issue: issue, retries: retries)
+            }
+        )
+
+        // First attempt only: retries 0 < maxRetries 3, so this is a silent redo, not the force-accept —
+        // exactly the call `onTakeRetake` exists to surface to the participant.
+        await feed(engine, missingExhaleSignal())
+
+        let calls = await retakeLog.calls
+        #expect(calls.count == 1)
+        #expect(calls.first?.takeIndex == 0)
+        #expect(calls.first?.issue == .noPauseDetected)
+        #expect(calls.first?.retries == 1, "retries reflects the count after this attempt")
+        #expect(await engine.isRecording, "still a redo, not a force-accept")
+
+        // Drive to the force-accepted 4th attempt: `onTakeRetake` must not fire again once the take is
+        // actually emitted (that's `onSegment`'s job, a different signal).
+        for _ in 0..<3 {
+            await feed(engine, missingExhaleSignal())
+        }
+        let finalCalls = await retakeLog.calls
+        #expect(finalCalls.count == 3, "only the 3 genuine redos fire the callback, not the force-accepted 4th")
+        #expect(recorder.finishedCount == 1)
+    }
+
     // MARK: Noise-floor seeding + unconditional ambient emission
 
     @Test func redoneTakeStillUpdatesRollingFloorAndFiresAmbientCallback() async throws {
@@ -248,5 +289,19 @@ private actor ReviewCallLog {
     func segments(forCall number: Int) throws -> [(label: SegmentLabel, url: URL)] {
         guard calls.indices.contains(number - 1) else { throw MissingCall() }
         return calls[number - 1].segments
+    }
+}
+
+/// Records each `onTakeRetake` invocation for assertion.
+private actor RetakeCallLog {
+    struct Call: Equatable {
+        let takeIndex: Int
+        let issue: CaptureAnalyzer.TakeIssue
+        let retries: Int
+    }
+    private(set) var calls: [Call] = []
+
+    func record(takeIndex: Int, issue: CaptureAnalyzer.TakeIssue, retries: Int) {
+        calls.append(Call(takeIndex: takeIndex, issue: issue, retries: retries))
     }
 }

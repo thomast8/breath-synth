@@ -191,6 +191,45 @@ struct EnrollmentEngineTests {
         #expect(events[5] == .sessionFinished)
     }
 
+    // MARK: Structural-retake event propagation
+
+    @Test func eventStreamEmitsTakeRetakeOnAStructuralRedo() async throws {
+        let dirs = try makeDirs()
+        // A `.cycle` step whose fixture never produces a real exhale — every attempt is structurally
+        // invalid. `EnrollmentDetection.detection(for:)` fixes `.cycle`'s `postArmBlackoutSec` at 1.5s
+        // regardless of the step, and derives `maxCycleSec` as `maxSeconds * 2 + 6` — so with
+        // `maxSeconds: 0` that's a 6.0s absolute cap. The take only ever ends `.incomplete` when that
+        // cap is hit with no second phase detected (mirrors `TakeCaptureEngineTests`' own
+        // `missingExhaleDetection` fixture, which times out the same way against its own `maxCycleSec`),
+        // so the fixture's total (~7.3s: pre-onset silence past the blackout, a clear inhale, then a
+        // long trailing silence) must exceed 6.0s with real margin.
+        let step = EnrollmentStep(
+            title: "Calm breathing", prompt: "", demoReference: nil, takes: 1, renderMode: .textured,
+            detection: .cycle, minSeconds: 0.4, maxSeconds: 0, targetEvents: nil,
+            lanes: [
+                CaptureLane(label: .inhale, slug: "calm_inhale", style: "calm", type: .inhale, role: "texture", reference: nil),
+                CaptureLane(label: .exhale, slug: "calm_exhale", style: "calm", type: .exhale, role: "texture", reference: nil),
+            ]
+        )
+        let enrollment = EnrollmentEngine(outputDir: dirs.output, assetsDir: dirs.assets, sampleRate: sr, steps: [step])
+        let collector = EventCollector()
+        let stream = await enrollment.makeEventStream()
+        let consumer = Task {
+            for await event in stream { await collector.record(event) }
+        }
+
+        await enrollment.start()
+        await enrollment.startStepCapture()
+        // One attempt: retries 0 < maxRetries 3, so this is a silent structural redo, not the force-accept.
+        await feed(enrollment, silence(1.8) + tone(1.5) + silence(4.0))
+        await waitUntil { await collector.events.contains { if case .takeRetake = $0 { return true }; return false } }
+        await enrollment.finishEarly()
+        await consumer.value
+
+        let events = await collector.events
+        #expect(events.contains(.takeRetake(takeIndex: 0, issue: .noPauseDetected, retries: 1)), "\(events)")
+    }
+
     // MARK: Skipping a step
 
     @Test func skippingAStepRecordsItAndAdvancesWithoutCapturingATake() async throws {

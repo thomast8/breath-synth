@@ -59,6 +59,11 @@ public actor TakeCaptureEngine {
     private var onSegment: ((Int, SegmentLabel, URL, [Int], [CaptureAnalyzer.SpectralCandidate]) async -> Void)?
     private var onFinished: (() async -> Void)?
     private var onTakeReview: ((_ takeIndex: Int, _ segments: [(label: SegmentLabel, url: URL)]) async -> TakeReview)?
+    /// Fires on every silent structural redo (never on the force-accepted final attempt, and never for
+    /// a grader-triggered redo — that one is `onTakeReview`'s job) so a live UI can tell the participant
+    /// why a take just got thrown away instead of showing nothing (native's `retakeReason(_:)`/
+    /// `lastTakeIssue` equivalent, made push-based for a remote client that can't poll every `feed`).
+    private var onTakeRetake: ((_ takeIndex: Int, _ issue: CaptureAnalyzer.TakeIssue, _ retries: Int) async -> Void)?
     /// `true` while a written-but-unemitted take awaits its `onTakeReview` verdict — `armed` is already
     /// false for the whole wait (set by `consume` on `takeEnded`), so `feed` can't start a new take, but
     /// this additionally guards `continueReview`'s staleness check against `cancelTake`/`abort`.
@@ -90,7 +95,8 @@ public actor TakeCaptureEngine {
         onFinished: @escaping () async -> Void,
         onTakeReview: ((_ takeIndex: Int, _ segments: [(label: SegmentLabel, url: URL)]) async -> TakeReview)? = nil,
         ambientGateRMS: Float? = nil,
-        onTakeAmbient: (([Float]) async -> Void)? = nil
+        onTakeAmbient: (([Float]) async -> Void)? = nil,
+        onTakeRetake: ((_ takeIndex: Int, _ issue: CaptureAnalyzer.TakeIssue, _ retries: Int) async -> Void)? = nil
     ) {
         guard !isRecording else { return }
         self.sampleRate = sampleRate
@@ -104,6 +110,7 @@ public actor TakeCaptureEngine {
         self.onTakeReview = onTakeReview
         self.ambientGateRMS = ambientGateRMS
         self.onTakeAmbient = onTakeAmbient
+        self.onTakeRetake = onTakeRetake
         reviewing = false
         isFixed = detection.isFixedDuration
         isCycle = detection.isCycle
@@ -230,6 +237,9 @@ public actor TakeCaptureEngine {
 
         if decision == .redoNow {
             takeRetries += 1
+            if let issue {
+                await onTakeRetake?(takeIndex, issue, takeRetries)
+            }
             arm()
             return
         }

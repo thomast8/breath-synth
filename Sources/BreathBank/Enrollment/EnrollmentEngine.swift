@@ -38,6 +38,11 @@ public actor EnrollmentEngine {
         /// `currentStep`'s lanes for style/type/role/reference/renderMode. Fires once per lane sharing a
         /// take (a hybrid step like packing shares one physical file across two lanes/roles).
         case segmentWritten(takeIndex: Int, laneSlug: String, filename: String)
+        /// A silent structural redo (bad cycle balance, no pause, too-short phase, etc — see
+        /// `CaptureAnalyzer.TakeIssue`) — distinct from `takeVerdict`, which only ever reports the async
+        /// grader's ruling on a take that *did* get written. Never fires for the force-accepted final
+        /// retry (that take proceeds to `segmentWritten`/`takeVerdict` like any other).
+        case takeRetake(takeIndex: Int, issue: CaptureAnalyzer.TakeIssue, retries: Int)
         case takeVerdict(takeIndex: Int, check: LiveCheck)
         case stepComplete(nextStepIndex: Int, insertedFallbackNotice: String?)
         case sessionFinished
@@ -168,7 +173,10 @@ public actor EnrollmentEngine {
                 await self?.reviewTake(takeIndex: takeIndex, segments: segments, step: step) ?? .accept
             },
             ambientGateRMS: CaptureAnalyzer.noisyRoomFloorRMS,
-            onTakeAmbient: { [weak self] samples in await self?.poolAmbient(samples) }
+            onTakeAmbient: { [weak self] samples in await self?.poolAmbient(samples) },
+            onTakeRetake: { [weak self] takeIndex, issue, retries in
+                await self?.recordTakeRetake(takeIndex: takeIndex, issue: issue, retries: retries)
+            }
         )
         errorMessage = nil
     }
@@ -186,6 +194,10 @@ public actor EnrollmentEngine {
         }
         writeSessionManifest()
         eventContinuation?.yield(.segmentWritten(takeIndex: takeIndex, laneSlug: slug, filename: filename))
+    }
+
+    private func recordTakeRetake(takeIndex: Int, issue: CaptureAnalyzer.TakeIssue, retries: Int) {
+        eventContinuation?.yield(.takeRetake(takeIndex: takeIndex, issue: issue, retries: retries))
     }
 
     /// Pool a take's harvested quiet stretch toward the session's room-tone file, writing it once the
