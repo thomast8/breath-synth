@@ -191,6 +191,37 @@ final class EnrollmentSocketHandlerTests: XCTestCase {
         XCTAssertEqual(finalStage, .finished)
     }
 
+    // MARK: skipStep advances without requiring a take
+
+    func testSkipStepAdvancesWithoutCapturingATakeAndRecordsItSkipped() async throws {
+        let dir = try makeOutputDir()
+        let recorder = MessageRecorder()
+        let steps = [singleStep(slug: "packing_cadence"), singleStep(slug: "stepB")]
+        let handler = EnrollmentSocketHandler(
+            sessionID: UUID(), outputDir: dir, assetsDir: dir, steps: steps,
+            send: { message in await recorder.record(message) }
+        )
+        await handler.handle(.hello(sampleRate: sr, micSettings: nil))
+        await handler.handle(.startStep(stepIndex: 0))
+
+        await handler.handle(.skipStep)
+
+        let stepIndexAfterSkip = await handler.engine?.currentStepIndex
+        let skippedSteps = await handler.engine?.skippedSteps
+        XCTAssertEqual(stepIndexAfterSkip, 1, "skipping must advance to the next step")
+        XCTAssertEqual(skippedSteps, ["Test step"])
+
+        let messages = await recorder.messages
+        guard case let .stepComplete(payload)? = messages.last(where: {
+            if case .stepComplete = $0 { return true }; return false
+        }) else {
+            return XCTFail("expected a stepComplete message, got \(messages)")
+        }
+        XCTAssertEqual(payload.nextStepIndex, 1)
+        XCTAssertFalse(messages.contains { if case .takeVerdict = $0 { return true }; return false },
+                        "a skipped step must never produce a takeVerdict — no take was ever captured")
+    }
+
     private func waitUntil(timeout: TimeInterval = 5.0, _ condition: @escaping () async -> Bool) async throws {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {

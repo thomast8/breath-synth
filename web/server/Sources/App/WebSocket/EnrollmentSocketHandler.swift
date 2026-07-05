@@ -79,6 +79,8 @@ actor EnrollmentSocketHandler {
             await engine?.redoCurrentTake()
         case .overrideAmbientGate:
             await engine?.recordAnywayDespiteNoise()
+        case .skipStep:
+            await engine?.skipCurrentStep()
         }
     }
 

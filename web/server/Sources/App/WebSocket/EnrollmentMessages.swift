@@ -13,6 +13,9 @@ enum ClientMessage: Decodable {
     case redoTake
     /// A genuinely loud room must never trap the session behind the ambient gate.
     case overrideAmbientGate
+    /// The participant doesn't know this technique — abandon the current step with zero takes and
+    /// advance, recording the step as deliberately skipped rather than failed.
+    case skipStep
     /// Reconnecting after a dropped socket. `lastAckedTake` is currently informational only — recovery
     /// is the same re-arm-and-redo path `redoTake` already takes (see the plan's risk notes: a WS drop
     /// mid-take loses that take, and the server re-arms the same take index, exactly the native redo
@@ -40,6 +43,8 @@ enum ClientMessage: Decodable {
             self = .redoTake
         case "overrideAmbientGate":
             self = .overrideAmbientGate
+        case "skipStep":
+            self = .skipStep
         case "resume":
             self = .resume(lastAckedTake: try container.decode(Int.self, forKey: .lastAckedTake))
         default:

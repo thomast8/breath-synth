@@ -23,11 +23,52 @@ struct EnrollmentSocketController {
     }()
 
     static func attach(_ ws: WebSocket, sessionID: UUID, req: Request) async {
-        let outputDir: URL
+        // Vapor's async `webSocket` bridge runs this whole function inside an unstructured `Task`
+        // (`Task { await onUpgrade(...) }`), so the underlying channel can already be accepting frames
+        // — and the client can already be sending them, the instant it sees the HTTP 101 response —
+        // before this Task has even started running, let alone reached any particular line. Every
+        // `await` before `onText`/`onBinary` are registered widens a real window in which the client's
+        // first frame(s) (typically `hello`) silently vanish into WebSocketKit's default no-op handler,
+        // hanging the session forever with no error on either side. So: register the callbacks as the
+        // very first action, with zero `await` beforehand, queuing into the stream below; everything
+        // that legitimately needs to be async (session validation, storage resolution, building the
+        // handler) happens after, and any frames that arrive during that work are queued, not dropped.
+        let (frames, continuation) = AsyncStream<InboundFrame>.makeStream()
+        do {
+            // `onText`/`onBinary` write into a NIO-loop-confined box that asserts it's set from `ws`'s
+            // own event loop; `submit` hops onto it explicitly so this is safe regardless of which
+            // thread this function is actually running on when it reaches this point.
+            try await ws.eventLoop.submit {
+                ws.onText { _, text in continuation.yield(.text(text)) }
+                ws.onBinary { _, buffer in continuation.yield(.binary([UInt8](buffer.readableBytesView))) }
+                ws.onClose.whenComplete { _ in
+                    continuation.yield(.disconnect)
+                    continuation.finish()
+                }
+            }.get()
+        } catch {
+            req.logger.error("live session \(sessionID): failed to register socket callbacks: \(error)")
+            continuation.finish()
+            return
+        }
+
+        guard (try? await EnrollSession.find(sessionID, on: req.db)) != nil else {
+            try? await ws.close(code: .unacceptableData)
+            return
+        }
+
         let assetsDir = URL(fileURLWithPath: req.application.directory.workingDirectory)
             .appendingPathComponent("Resources/gold-refs", isDirectory: true)
+        let outputDir: URL
         do {
             outputDir = try await req.application.storageDriver.localURL(forKey: "sessions/\(sessionID)/raw")
+            // `localURL(forKey:)` only resolves a path-safety-checked URL — unlike `put(_:key:)`, it
+            // never creates the directory. `TakeCaptureEngine` writes segment WAVs directly into this
+            // directory via `AudioIO.writeMonoWAV` (bypassing `put` entirely), so without this the first
+            // write on every new session throws "no such file or directory" — and `finalize()` swallows
+            // that into a silent `teardown()` with no verdict, no error message, nothing sent to the
+            // client. The session just hangs forever after the very first take.
+            try FileManager.default.createDirectory(at: outputDir, withIntermediateDirectories: true)
         } catch {
             req.logger.error("live session \(sessionID): failed to resolve storage dir: \(error)")
             try? await ws.close()
@@ -58,17 +99,6 @@ struct EnrollmentSocketController {
         // behind an audio chunk and silently wedge the session (feed to an unarmed engine, dropped).
         // `continuation.yield` is synchronous, so enqueuing happens in the exact order Vapor calls back;
         // one consumer `Task` then drains the queue and awaits `handler` strictly in that order.
-        let (frames, continuation) = AsyncStream<InboundFrame>.makeStream()
-        ws.onText { _, text in
-            continuation.yield(.text(text))
-        }
-        ws.onBinary { _, buffer in
-            continuation.yield(.binary([UInt8](buffer.readableBytesView)))
-        }
-        ws.onClose.whenComplete { _ in
-            continuation.yield(.disconnect)
-            continuation.finish()
-        }
         Task {
             for await frame in frames {
                 switch frame {
