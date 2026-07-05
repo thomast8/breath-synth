@@ -1,40 +1,30 @@
-import { useState } from "react";
 import { LevelMeter } from "../components/LevelMeter";
-import type { CaptureController } from "../audio/CaptureController";
-
-const ROOM_TONE_SECONDS = 5;
+import type { StreamingCapture } from "../audio/StreamingCapture";
 
 interface Props {
-  capture: CaptureController;
+  capture: StreamingCapture;
   level: { rms: number; peak: number };
   micReady: boolean;
   micError: string | null;
-  onReady: (roomTone: Blob, sampleRate: number) => void;
+  connecting: boolean;
   error: string | null;
-  uploading: boolean;
+  onContinue: () => void;
+  onRequestStartOver: () => void;
 }
 
-/** Mic permission + a brief guided-silence room-tone capture — a dedicated step rather than the
- * native app's incremental per-take harvesting, since the server grades against one uploaded
- * room-tone clip per session (see SessionsController.uploadRoomTone) rather than an accumulating
- * pool. Simpler to implement correctly and only costs the participant a few seconds up front. */
-export function MicCheckScreen({ capture, level, micReady, micError, onReady, error, uploading }: Props) {
-  const [recordingRoomTone, setRecordingRoomTone] = useState(false);
-  const [countdown, setCountdown] = useState(ROOM_TONE_SECONDS);
-
-  function startRoomTone() {
-    setRecordingRoomTone(true);
-    setCountdown(ROOM_TONE_SECONDS);
-    const interval = setInterval(() => {
-      setCountdown((c) => Math.max(0, c - 1));
-    }, 1000);
-    capture.startTake(ROOM_TONE_SECONDS, ROOM_TONE_SECONDS + 2, () => {
-      clearInterval(interval);
-      const result = capture.finishTake("auto");
-      onReady(result.blob, result.sampleRate);
-    });
-  }
-
+/** Mic permission + level sanity only — room tone is no longer a dedicated step. It harvests
+ * silently server-side during the first technique steps, exactly like the native app's ambient
+ * pool, so there is nothing to record or upload here. */
+export function MicCheckScreen({
+  capture,
+  level,
+  micReady,
+  micError,
+  connecting,
+  error,
+  onContinue,
+  onRequestStartOver,
+}: Props) {
   const noiseSuppressionOn =
     capture.actualSettings?.noiseSuppression === true ||
     capture.actualSettings?.echoCancellation === true ||
@@ -50,10 +40,10 @@ export function MicCheckScreen({ capture, level, micReady, micError, onReady, er
         </p>
       )}
       {!micError && !micReady && <p>Requesting microphone access…</p>}
-      {micReady && !recordingRoomTone && (
+      {micReady && (
         <>
-          <p>Speak or breathe normally to check the level, then record a few seconds of silence.</p>
-          <LevelMeter rms={level.rms} active={micReady} />
+          <p>Speak or breathe normally to check the level.</p>
+          <LevelMeter level={level.rms} active={micReady} />
           {noiseSuppressionOn && (
             <p className="warning-text">
               This browser may be applying noise suppression or auto-gain to the mic input, which
@@ -61,19 +51,23 @@ export function MicCheckScreen({ capture, level, micReady, micError, onReady, er
               to disable it; this is logged either way.
             </p>
           )}
-          <button className="primary-button" onClick={startRoomTone}>
-            Record room tone ({ROOM_TONE_SECONDS}s of quiet)
+          {error && (
+            <p className="error-text">
+              Couldn't connect to the server: {error} Check your connection and try again.
+            </p>
+          )}
+          <button className="primary-button" disabled={connecting} onClick={onContinue}>
+            {connecting ? "Connecting…" : "Continue"}
           </button>
+          <p className="hint-text">
+            Your progress saves automatically as you go — it's safe to close this tab and come back
+            later.
+          </p>
         </>
       )}
-      {recordingRoomTone && (
-        <div className="capture-status">
-          <p>Stay quiet… {countdown}s</p>
-          <LevelMeter rms={level.rms} active />
-        </div>
-      )}
-      {uploading && <p>Uploading room tone…</p>}
-      {error && <p className="error-text">{error}</p>}
+      <button className="link-button" onClick={onRequestStartOver}>
+        Start over
+      </button>
     </div>
   );
 }

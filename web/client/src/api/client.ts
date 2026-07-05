@@ -4,8 +4,6 @@ import type {
   ParticipantCreateRequest,
   SessionCreateRequest,
   SessionStatus,
-  TakeUploadFields,
-  TakeVerdictResponse,
 } from "./types";
 
 class ApiError extends Error {
@@ -42,45 +40,21 @@ export async function createSession(req: SessionCreateRequest): Promise<EnrollSe
   return postJSON<EnrollSession>("/api/sessions", req);
 }
 
-export async function uploadRoomTone(
-  sessionID: string,
-  audio: Blob,
-  sampleRate: number,
-): Promise<EnrollSession> {
-  const form = new FormData();
-  form.append("sampleRate", String(sampleRate));
-  form.append("audio", audio, "room_tone.wav");
-  const res = await fetch(`/api/sessions/${sessionID}/room-tone`, { method: "POST", body: form });
-  return asJSON<EnrollSession>(res);
-}
-
-export async function uploadTake(
-  sessionID: string,
-  audio: Blob,
-  fields: TakeUploadFields,
-): Promise<TakeVerdictResponse> {
-  const form = new FormData();
-  form.append("stepSlug", fields.stepSlug);
-  form.append("laneSlug", fields.laneSlug);
-  form.append("style", fields.style);
-  form.append("breathType", fields.breathType);
-  form.append("renderMode", fields.renderMode);
-  form.append("role", fields.role);
-  form.append("takeIndex", String(fields.takeIndex));
-  if (fields.reference != null) form.append("reference", fields.reference);
-  if (fields.minSeconds != null) form.append("minSeconds", String(fields.minSeconds));
-  if (fields.maxSeconds != null) form.append("maxSeconds", String(fields.maxSeconds));
-  form.append("sampleRate", String(fields.sampleRate));
-  form.append("audio", audio, `${fields.laneSlug}_take${fields.takeIndex}.wav`);
-  const res = await fetch(`/api/sessions/${sessionID}/takes`, { method: "POST", body: form });
-  return asJSON<TakeVerdictResponse>(res);
-}
-
 export async function completeSession(
   sessionID: string,
   status: SessionStatus,
 ): Promise<EnrollSession> {
   return postJSON<EnrollSession>(`/api/sessions/${sessionID}/complete`, { status });
+}
+
+/** Self-serve deletion — the participant's own ID is the sole capability token (no other auth).
+ * Cascades server-side through their sessions, takes, and stored audio. */
+export async function deleteParticipant(participantID: string): Promise<void> {
+  const res = await fetch(`/api/participants/${participantID}`, { method: "DELETE" });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new ApiError(res.status, text || res.statusText);
+  }
 }
 
 export { ApiError };

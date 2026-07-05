@@ -1,9 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { LevelMeter } from "../components/LevelMeter";
-import { uploadTake } from "../api/client";
-import type { CaptureController, CaptureEndReason } from "../audio/CaptureController";
-import type { UploadQueue } from "../state/uploadQueue";
-import type { Step } from "../script";
+import type { DetectionState, StepSnapshot, TakeVerdict } from "../ws/protocol";
 
 const REASON_TEXT: Record<string, string> = {
   clipped: "that one clipped — try a bit farther from the mic",
@@ -20,58 +17,67 @@ function friendlyReason(reason: string | null): string {
 }
 
 interface Props {
-  step: Step;
+  step: StepSnapshot;
   stepNumber: number;
   totalSteps: number;
-  sessionId: string;
-  capture: CaptureController;
-  level: { rms: number; peak: number };
-  uploadQueue: UploadQueue;
-  onStepComplete: () => void;
+  armed: boolean;
+  detection: DetectionState | null;
+  ambientHold: boolean;
+  lastVerdict: TakeVerdict | null;
+  stepNotice: string | null;
+  roomToneReady: boolean;
+  clientLevel: { rms: number; peak: number };
+  onStartStep: () => void;
+  onStopTake: () => void;
+  onOverrideAmbientGate: () => void;
+  onSkipStep: () => void;
+  onRequestStartOver: () => void;
 }
 
-type Phase = "idle" | "recording" | "checking" | "redo";
-
+/** Fully server-driven — no manual record button. "Start step" arms the ported
+ * `TakeCaptureEngine` on the server; takes self-terminate and auto-advance across the whole step
+ * exactly as the native app, including automatic redo (a rejected take re-arms the same take index
+ * without the participant doing anything). `onStopTake` is a visible escape hatch only. */
 export function TechniqueStepScreen({
   step,
   stepNumber,
   totalSteps,
-  sessionId,
-  capture,
-  level,
-  uploadQueue,
-  onStepComplete,
+  armed,
+  detection,
+  ambientHold,
+  lastVerdict,
+  stepNotice,
+  roomToneReady,
+  clientLevel,
+  onStartStep,
+  onStopTake,
+  onOverrideAmbientGate,
+  onSkipStep,
+  onRequestStartOver,
 }: Props) {
-  const [takeNumber, setTakeNumber] = useState(1);
-  const [phase, setPhase] = useState<Phase>("idle");
-  const [elapsed, setElapsed] = useState(0);
-  const [redoReason, setRedoReason] = useState<string | null>(null);
-  const [advisory, setAdvisory] = useState<string[]>([]);
   const [demoPlaying, setDemoPlaying] = useState(false);
+  const [confirmingSkip, setConfirmingSkip] = useState(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
-  const elapsedTimer = useRef<number | null>(null);
-  const finishHandlerRef = useRef<((reason: CaptureEndReason) => void) | null>(null);
 
   useEffect(() => {
-    setTakeNumber(1);
-    setPhase("idle");
-    setRedoReason(null);
-    setAdvisory([]);
-  }, [step.id]);
-
-  useEffect(() => {
+    setConfirmingSkip(false);
     return () => {
-      if (elapsedTimer.current != null) window.clearInterval(elapsedTimer.current);
+      audioRef.current?.pause();
     };
-  }, []);
+  }, [step.title]);
 
   function playDemo() {
     if (!step.demoReference) return;
-    const audio = new Audio(`/demo/${step.demoReference}`);
+    // `demoReference` is the native catalog's asset filename (`.aifc`, for the macOS app's
+    // AVAudioPlayer) — browsers can't play AIFF-C at all, so `/demo` serves AAC (`.m4a`) versions
+    // transcoded by web/scripts/transcode-demo-refs.sh under the same basename.
+    const src = `/demo/${step.demoReference.replace(/\.aifc$/, ".m4a")}`;
+    const audio = new Audio(src);
     audioRef.current = audio;
     setDemoPlaying(true);
     audio.addEventListener("ended", () => setDemoPlaying(false));
-    void audio.play();
+    audio.addEventListener("error", () => setDemoPlaying(false));
+    void audio.play().catch(() => setDemoPlaying(false));
   }
 
   function stopDemo() {
@@ -79,119 +85,95 @@ export function TechniqueStepScreen({
     setDemoPlaying(false);
   }
 
-  async function uploadTakeToAllLanes(blob: Blob, sampleRate: number) {
-    const results = await Promise.all(
-      step.lanes.map((lane) =>
-        uploadQueue.enqueue(
-          `${sessionId}-${lane.slug}-${lane.role}-${takeNumber}-${Date.now()}`,
-          `${step.title} take ${takeNumber}`,
-          () =>
-            uploadTake(sessionId, blob, {
-              stepSlug: step.id,
-              laneSlug: lane.slug,
-              style: lane.style,
-              breathType: lane.type,
-              renderMode: lane.renderMode,
-              role: lane.role,
-              takeIndex: takeNumber,
-              reference: lane.reference,
-              minSeconds: step.minSeconds,
-              maxSeconds: step.maxSeconds,
-              sampleRate,
-              clientMeta: null,
-            }),
-        ),
-      ),
-    );
-
-    const rejected = results.find((r) => !r.accept);
-    const allAdvisory = Array.from(new Set(results.flatMap((r) => r.advisory)));
-    setAdvisory(allAdvisory);
-
-    if (rejected) {
-      setRedoReason(rejected.reason);
-      setPhase("redo");
-      return;
-    }
-
-    setRedoReason(null);
-    if (takeNumber >= step.takes) {
-      onStepComplete();
-    } else {
-      setTakeNumber((n) => n + 1);
-      setPhase("idle");
-    }
-  }
-
-  function startRecording() {
-    stopDemo();
-    setPhase("recording");
-    setElapsed(0);
-    elapsedTimer.current = window.setInterval(() => setElapsed((e) => e + 0.2), 200);
-
-    const finish = (reason: CaptureEndReason) => {
-      if (elapsedTimer.current != null) {
-        window.clearInterval(elapsedTimer.current);
-        elapsedTimer.current = null;
-      }
-      finishHandlerRef.current = null;
-      const result = capture.finishTake(reason);
-      setPhase("checking");
-      void uploadTakeToAllLanes(result.blob, result.sampleRate);
-    };
-    finishHandlerRef.current = finish;
-
-    capture.startTake(step.minSeconds, step.maxSeconds, () => finish("auto"));
-  }
-
-  function finishTakeManually() {
-    finishHandlerRef.current?.("manual");
-  }
+  const blackoutRemaining = detection?.blackoutRemaining ?? 0;
+  const takeNumber = Math.min((detection?.takeIndex ?? 0) + 1, step.takes);
 
   return (
     <div className="screen">
       <p className="progress-label">
-        Step {stepNumber} of {totalSteps} · Take {Math.min(takeNumber, step.takes)} of {step.takes}
+        Step {stepNumber} of {totalSteps}
+        {armed && ` · Take ${takeNumber} of ${step.takes}`}
       </p>
       <h1>{step.title}</h1>
       <p className="prompt">{step.prompt}</p>
 
-      {step.demoReference && phase === "idle" && (
+      {step.demoReference && !armed && (
         <button className="secondary-button" onClick={demoPlaying ? stopDemo : playDemo}>
           {demoPlaying ? "Stop demo" : "Play demo"}
         </button>
       )}
 
-      {phase === "idle" && (
-        <button className="primary-button record-button" onClick={startRecording}>
-          Start recording
-        </button>
+      {roomToneReady && <p className="hint-text">Room tone captured ✓</p>}
+
+      {!armed && !confirmingSkip && (
+        <>
+          <button className="primary-button record-button" onClick={onStartStep}>
+            Start step
+          </button>
+          <button className="link-button" onClick={() => setConfirmingSkip(true)}>
+            I don't know this technique — skip it
+          </button>
+        </>
       )}
 
-      {phase === "recording" && (
+      {!armed && confirmingSkip && (
         <div className="capture-status">
-          <p>Recording… {elapsed.toFixed(1)}s</p>
-          <LevelMeter rms={level.rms} active />
-          <button className="secondary-button" onClick={finishTakeManually}>
-            Finish this take
+          <p className="warning-text">
+            Skipping means we'll have no examples from you for "{step.title}" — that's completely
+            fine if you've never learned it.
+          </p>
+          <button className="secondary-button" onClick={onSkipStep}>
+            Yes, skip this step
+          </button>
+          <button className="secondary-button" onClick={() => setConfirmingSkip(false)}>
+            Never mind, let me try
           </button>
         </div>
       )}
 
-      {phase === "checking" && <p>Checking take…</p>}
-
-      {phase === "redo" && (
+      {armed && (
         <div className="capture-status">
-          <p className="warning-text">That one {friendlyReason(redoReason)} — let's try again.</p>
-          <button className="primary-button" onClick={startRecording}>
-            Record again
+          {blackoutRemaining > 0 ? (
+            <p>Get ready… {blackoutRemaining.toFixed(1)}s</p>
+          ) : (
+            <p>
+              Listening… {detection?.eventCount ? `${detection.eventCount} event(s) so far` : ""}
+            </p>
+          )}
+          <LevelMeter
+            level={detection?.level ?? clientLevel.rms}
+            threshold={detection?.activityThreshold}
+            active
+          />
+          {ambientHold && (
+            <p className="warning-text">
+              Room's too noisy for the mic to tell breath from background right now.{" "}
+              <button className="link-button" onClick={onOverrideAmbientGate}>
+                It's actually fine, keep going
+              </button>
+            </p>
+          )}
+          {detection?.gapTooClose && (
+            <p className="warning-text">Leave a clearer gap between hooks.</p>
+          )}
+          {lastVerdict?.outcome === "redo" && (
+            <p className="warning-text">That one {friendlyReason(lastVerdict.reason)} — redoing automatically.</p>
+          )}
+          {lastVerdict?.outcome === "keptUnchecked" && (
+            <p className="hint-text">Take kept (not yet graded).</p>
+          )}
+          {lastVerdict?.outcome === "accepted" && <p className="hint-text">Take accepted.</p>}
+          <button className="secondary-button" onClick={onStopTake}>
+            Stop this take
           </button>
         </div>
       )}
 
-      {advisory.length > 0 && phase === "idle" && (
-        <p className="advisory-text">Kept — the final build re-checks: {advisory.join(", ")}</p>
-      )}
+      {stepNotice && <p className="advisory-text">{stepNotice}</p>}
+
+      <button className="link-button" onClick={onRequestStartOver}>
+        Start over
+      </button>
     </div>
   );
 }

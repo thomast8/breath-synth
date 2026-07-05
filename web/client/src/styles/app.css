@@ -175,10 +175,45 @@ button:disabled {
   font-size: 0.85rem;
 }
 
+.hint-text {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.link-button {
+  background: none;
+  border: none;
+  padding: 0;
+  color: inherit;
+  text-decoration: underline;
+  font-size: inherit;
+}
+
 .done-check {
   align-self: center;
   font-size: 3rem;
   color: var(--accent);
+}
+
+.id-box {
+  border: 1px solid var(--border);
+  border-radius: 0.75rem;
+  padding: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.id-box-label {
+  font-size: 0.85rem;
+  color: var(--muted);
+  margin: 0;
+}
+
+.id-box-value {
+  font-size: 1rem;
+  word-break: break-all;
+  margin: 0;
 }
 
 .mono {

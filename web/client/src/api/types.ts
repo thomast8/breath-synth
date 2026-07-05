@@ -1,12 +1,9 @@
 // Mirrors web/server/Sources/App/DTOs/Requests.swift and the Fluent models — kept in sync by
 // inspection since the two live in different languages/packages.
 
-export type ExperienceLevel = "novice" | "intermediate" | "advanced" | "instructor";
-
 export interface Participant {
   id: string;
   pseudonym: string | null;
-  experienceLevel: ExperienceLevel;
   consentVersion: string;
   consentedAt: string;
   createdAt: string | null;
@@ -29,7 +26,6 @@ export interface EnrollSession {
 export interface ParticipantCreateRequest {
   inviteCode: string | null;
   pseudonym: string | null;
-  experienceLevel: ExperienceLevel;
   consentVersion: string;
 }
 
@@ -39,31 +35,4 @@ export interface SessionCreateRequest {
   sampleRate: number;
   userAgent: string | null;
   micConstraintsActual: Record<string, string> | null;
-}
-
-export interface TakeVerdictResponse {
-  takeID: string;
-  accept: boolean;
-  reason: string | null;
-  advisory: string[];
-  fragmentsAccepted: number;
-  fragmentsTotal: number;
-}
-
-export type BreathType = "inhale" | "exhale";
-export type RenderMode = "textured" | "oneShot" | "counted";
-
-export interface TakeUploadFields {
-  stepSlug: string;
-  laneSlug: string;
-  style: string;
-  breathType: BreathType;
-  renderMode: RenderMode;
-  role: string;
-  takeIndex: number;
-  reference: string | null;
-  minSeconds: number | null;
-  maxSeconds: number | null;
-  sampleRate: number;
-  clientMeta: Record<string, string> | null;
 }

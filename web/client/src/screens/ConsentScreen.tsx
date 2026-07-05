@@ -1,5 +1,4 @@
 import { useState } from "react";
-import type { ExperienceLevel } from "../api/types";
 
 const CONSENT_VERSION = "2026-07-01";
 
@@ -8,7 +7,6 @@ interface Props {
   onSubmit: (fields: {
     inviteCode: string | null;
     pseudonym: string | null;
-    experienceLevel: ExperienceLevel;
     consentVersion: string;
   }) => void;
   error: string | null;
@@ -18,7 +16,6 @@ interface Props {
 export function ConsentScreen({ requiresInviteCode, onSubmit, error, submitting }: Props) {
   const [inviteCode, setInviteCode] = useState("");
   const [pseudonym, setPseudonym] = useState("");
-  const [experienceLevel, setExperienceLevel] = useState<ExperienceLevel>("intermediate");
   const [agreed, setAgreed] = useState(false);
 
   const canSubmit = agreed && (!requiresInviteCode || inviteCode.trim().length > 0) && !submitting;
@@ -54,19 +51,6 @@ export function ConsentScreen({ requiresInviteCode, onSubmit, error, submitting 
         />
       </label>
 
-      <label className="field">
-        Freediving experience
-        <select
-          value={experienceLevel}
-          onChange={(e) => setExperienceLevel(e.target.value as ExperienceLevel)}
-        >
-          <option value="novice">Novice</option>
-          <option value="intermediate">Intermediate</option>
-          <option value="advanced">Advanced</option>
-          <option value="instructor">Instructor</option>
-        </select>
-      </label>
-
       <label className="checkbox-field">
         <input type="checkbox" checked={agreed} onChange={(e) => setAgreed(e.target.checked)} />
         I agree that my recorded breath audio and the details above can be used for research and
@@ -82,7 +66,6 @@ export function ConsentScreen({ requiresInviteCode, onSubmit, error, submitting 
           onSubmit({
             inviteCode: requiresInviteCode ? inviteCode.trim() : null,
             pseudonym: pseudonym.trim() || null,
-            experienceLevel,
             consentVersion: CONSENT_VERSION,
           })
         }

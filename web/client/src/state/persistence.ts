@@ -1,12 +1,10 @@
 /** Resume-where-you-left-off state, keyed in localStorage so a reload/crash mid-session doesn't
- * lose the participant/session identity or step progress. Deliberately minimal — the server is the
- * source of truth for what's actually been uploaded; this just avoids re-asking for consent and
- * re-walking completed steps. */
+ * lose the participant/session identity. Deliberately minimal — step/take progress lives entirely
+ * server-side now (the `sessionState` message on reconnect is the source of truth), so this only
+ * needs to avoid re-asking for consent. */
 export interface PersistedProgress {
   participantId: string;
   sessionId: string;
-  roomToneDone: boolean;
-  stepIndex: number;
 }
 
 const KEY = "breath-enroll-progress";

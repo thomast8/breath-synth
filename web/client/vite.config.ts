@@ -8,7 +8,9 @@ export default defineConfig({
   plugins: [react()],
   server: {
     proxy: {
-      "/api": "http://127.0.0.1:8080",
+      // `ws: true` is required for the live-capture WebSocket (/api/sessions/:id/live) to proxy —
+      // the plain string shorthand only forwards HTTP, not the upgrade handshake.
+      "/api": { target: "http://127.0.0.1:8080", ws: true },
       "/healthz": "http://127.0.0.1:8080",
     },
   },
