@@ -103,7 +103,8 @@ public enum EnrollmentScript {
         EnrollmentStep(
             title: "Calm breathing",
             prompt: "Breathe slow and relaxed: a smooth inhale, pause a beat, then a smooth exhale. "
-                + "Repeat naturally — each phase about 8–12 s. The app splits inhale from exhale at the pause.",
+                + "Repeat naturally — each phase needs at least 4 s; around 8 s like the demo is ideal. "
+                + "The app splits inhale from exhale at the pause.",
             // 3: any one take already meets the within-take grain-anomaly floor; the 3rd is one-take
             // wholesale-loss tolerance on top of that (calm is the most-rendered style).
             demoReference: "calm_inhale.aifc", takes: 3, renderMode: .textured, detection: .cycle,
