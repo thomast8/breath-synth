@@ -61,6 +61,9 @@ public actor EnrollmentEngine {
 
     /// slug → captured filenames (in order).
     public private(set) var captured: [String: [String]] = [:]
+    /// Step titles the participant explicitly declined via `skipCurrentStep()` — written into
+    /// `captures.json` so an empty step reads as a deliberate skip, not a capture failure.
+    public private(set) var skippedSteps: [String] = []
     /// Inter-event gaps (frames) accumulated across the current step's takes so far — reset per step in
     /// `startStepCapture()`. Used only by `checkPackingCoreIsolation` right now.
     private var currentStepIntervalsFrames: [Int] = []
@@ -282,6 +285,18 @@ public actor EnrollmentEngine {
     /// Manual override: discard the take in progress and re-listen for it.
     public func redoCurrentTake() async { await engine.cancelTake() }
 
+    /// Manual override: the participant doesn't know this technique. Abandons whatever's in progress
+    /// for the current step (no partial takes are kept — same `abort()` `finishEarly()` uses) and
+    /// advances exactly as a normal completion would, so the corpus simply has zero files for this
+    /// step's lanes, with the step's title recorded (`skippedSteps`) so that reads in `captures.json`
+    /// as a deliberate decision rather than a stalled or broken capture.
+    public func skipCurrentStep() async {
+        guard case let .technique(step) = stage, steps.indices.contains(step) else { return }
+        await engine.abort()
+        skippedSteps.append(steps[step].title)
+        await advance(fromStep: step)
+    }
+
     /// Finish the session now with whatever's been captured so far (aborting any in-progress take),
     /// writing `captures.json` so a partial enrollment is still usable by the builder.
     public func finishEarly() async {
@@ -345,7 +360,9 @@ public actor EnrollmentEngine {
                 )
             }
         }
-        let session = CaptureSession(roomTone: roomToneFile, steps: sessionSteps)
+        let session = CaptureSession(
+            roomTone: roomToneFile, steps: sessionSteps,
+            skippedSteps: skippedSteps.isEmpty ? nil : skippedSteps)
         do {
             try session.write(to: outputDir.appendingPathComponent("captures.json"))
         } catch {

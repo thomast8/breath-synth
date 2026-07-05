@@ -40,10 +40,16 @@ public struct CaptureSession: Codable, Sendable {
 
     public var roomTone: String?
     public var steps: [Step]
+    /// Step titles the participant explicitly declined ("I don't know this technique") rather than
+    /// attempted — so a step with zero `files` reads as a deliberate skip, not a capture failure the
+    /// builder should investigate. Optional so older `captures.json` files without this field still
+    /// decode (absence means "nothing was ever skipped," same as an empty array).
+    public var skippedSteps: [String]?
 
-    public init(roomTone: String?, steps: [Step]) {
+    public init(roomTone: String?, steps: [Step], skippedSteps: [String]? = nil) {
         self.roomTone = roomTone
         self.steps = steps
+        self.skippedSteps = skippedSteps
     }
 
     public func write(to url: URL) throws {

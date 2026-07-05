@@ -191,6 +191,50 @@ struct EnrollmentEngineTests {
         #expect(events[5] == .sessionFinished)
     }
 
+    // MARK: Skipping a step
+
+    @Test func skippingAStepRecordsItAndAdvancesWithoutCapturingATake() async throws {
+        let dirs = try makeDirs()
+        let steps = [singleStep(title: "Packing", slug: "packing_cadence"), singleStep(title: "Step B", slug: "stepB")]
+        let enrollment = EnrollmentEngine(outputDir: dirs.output, assetsDir: dirs.assets, sampleRate: sr, steps: steps)
+        await enrollment.start()
+        await enrollment.startStepCapture()
+
+        // Skip before ever feeding any audio — the common case (declined before attempting).
+        await enrollment.skipCurrentStep()
+
+        #expect(await enrollment.stage == .technique(step: 1))
+        #expect(await enrollment.skippedSteps == ["Packing"])
+        #expect(await enrollment.captured["packing_cadence"] == nil)
+        #expect(await enrollment.totalFilesCaptured == 0)
+
+        await enrollment.startStepCapture()
+        await feed(enrollment, silence(1.7) + tone(1.0) + silence(1.0))
+        await waitUntil { await enrollment.stage == .finished }
+
+        #expect(await enrollment.stage == .finished)
+        #expect(await enrollment.captured["stepB"]?.count == 1)
+
+        let manifest = try CaptureSession.load(from: dirs.output.appendingPathComponent("captures.json"))
+        #expect(manifest.skippedSteps == ["Packing"])
+    }
+
+    @Test func skippingMidTakeDiscardsWhateverWasCapturedSoFar() async throws {
+        let dirs = try makeDirs()
+        let step = singleStep(title: "Packing", slug: "packing_cadence")
+        let enrollment = EnrollmentEngine(outputDir: dirs.output, assetsDir: dirs.assets, sampleRate: sr, steps: [step])
+        await enrollment.start()
+        await enrollment.startStepCapture()
+
+        // Feed only the armed pre-onset silence — no completed take yet — then skip mid-flight.
+        await feed(enrollment, silence(1.7))
+        await enrollment.skipCurrentStep()
+
+        #expect(await enrollment.stage == .finished, "skipping the only step must finish the session")
+        #expect(await enrollment.skippedSteps == ["Packing"])
+        #expect(await enrollment.totalFilesCaptured == 0)
+    }
+
     // MARK: Packing core-isolation fallback insertion
 
     @Test func tightPackingCadenceInsertsSeparatedFallbackStep() async throws {

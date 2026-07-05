@@ -175,7 +175,10 @@ public enum EnrollmentScript {
             // (3-4 events/render), and a one-take wholesale loss still leaves a working 3-core pool.
             // targetEvents: 3 is a hard floor, not tunable down — it's what `Grader.anomalyScore`'s
             // within-take core comparison needs to exist at all; below 3 the gate silently goes inert.
-            demoReference: nil, takes: 2, renderMode: .counted, detection: .cleanEvents,
+            // `recovery.aifc` is a real recorded hook-breath sample (also the `.hook` spectral gate's
+            // calibration clip, see `CaptureDetection.swift`) — good as a participant-facing demo even
+            // though it's deliberately not used as a grading `reference` (see transcode-gold-refs.sh).
+            demoReference: "recovery.aifc", takes: 2, renderMode: .counted, detection: .cleanEvents,
             minSeconds: 3, maxSeconds: 15, targetEvents: 3,
             lanes: [CaptureLane(label: .whole, slug: "recovery_separated", style: "recovery", type: .inhale,
                                 role: "cores", reference: nil)]
@@ -188,7 +191,7 @@ public enum EnrollmentScript {
             // 2: one accepted cadence take is the functional floor (graded wholesale per take); the
             // 2nd adds loss tolerance and gap variety. This is the tightest-paced hook breathing —
             // most dizzying step alongside RV — so kept minimal.
-            demoReference: nil, takes: 2, renderMode: .counted, detection: .naturalRhythm,
+            demoReference: "recovery.aifc", takes: 2, renderMode: .counted, detection: .naturalRhythm,
             minSeconds: 3, maxSeconds: 20, targetEvents: nil,
             lanes: [CaptureLane(label: .whole, slug: "recovery_cadence", style: "recovery", type: .inhale,
                                 role: "gaps", reference: nil)]
