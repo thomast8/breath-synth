@@ -42,9 +42,7 @@ final class AppTests: XCTestCase {
 
     func testParticipantRejectsMissingInviteCode() async throws {
         let app = try await makeTestApp()
-        let body = ParticipantCreateRequest(
-            inviteCode: nil, pseudonym: "diver1", experienceLevel: .intermediate,
-            consentVersion: "v1")
+        let body = ParticipantCreateRequest(inviteCode: nil, pseudonym: "diver1", consentVersion: "v1")
         try await app.test(.POST, "api/participants", beforeRequest: { req async throws in
             try req.content.encode(body)
         }, afterResponse: { res async throws in
@@ -55,9 +53,7 @@ final class AppTests: XCTestCase {
 
     func testParticipantAcceptsValidInviteCode() async throws {
         let app = try await makeTestApp()
-        let body = ParticipantCreateRequest(
-            inviteCode: "letmein", pseudonym: "diver1", experienceLevel: .intermediate,
-            consentVersion: "v1")
+        let body = ParticipantCreateRequest(inviteCode: "letmein", pseudonym: "diver1", consentVersion: "v1")
         try await app.test(.POST, "api/participants", beforeRequest: { req async throws in
             try req.content.encode(body)
         }, afterResponse: { res async throws in
@@ -78,7 +74,7 @@ final class AppTests: XCTestCase {
         var participantID: UUID!
         try await app.test(.POST, "api/participants", beforeRequest: { req async throws in
             try req.content.encode(ParticipantCreateRequest(
-                inviteCode: "letmein", pseudonym: nil, experienceLevel: .novice, consentVersion: "v1"))
+                inviteCode: "letmein", pseudonym: nil, consentVersion: "v1"))
         }, afterResponse: { res async throws in
             XCTAssertEqual(res.status, .ok)
             participantID = try res.content.decode(Participant.self).id
@@ -128,6 +124,62 @@ final class AppTests: XCTestCase {
                     "exported archive should contain a ZIP end-of-central-directory record")
             })
 
+        try await shutdown(app)
+    }
+
+    /// Self-serve deletion: the participant's ID is the only thing anyone needs to invoke it, so
+    /// this proves the cascade is actually complete — a stray row or a leftover file would be a
+    /// real data-protection gap, not just an untidy test failure.
+    func testDeleteParticipantCascadesSessionsTakesAndStorage() async throws {
+        let app = try await makeTestApp()
+
+        var participantID: UUID!
+        try await app.test(.POST, "api/participants", beforeRequest: { req async throws in
+            try req.content.encode(ParticipantCreateRequest(inviteCode: "letmein", pseudonym: "diver1", consentVersion: "v1"))
+        }, afterResponse: { res async throws in
+            participantID = try res.content.decode(Participant.self).id
+        })
+
+        var sessionID: UUID!
+        try await app.test(.POST, "api/sessions", beforeRequest: { req async throws in
+            try req.content.encode(SessionCreateRequest(
+                participantID: participantID, scriptVersion: "v1", sampleRate: 44_100,
+                userAgent: nil, micConstraintsActual: nil))
+        }, afterResponse: { res async throws in
+            sessionID = try res.content.decode(EnrollSession.self).id
+        })
+
+        let objectKey = "sessions/\(sessionID!)/raw/calm_inhale_1.wav"
+        try await app.storageDriver.put(Data([1, 2, 3]), key: objectKey)
+        let take = Take(
+            sessionID: sessionID, stepSlug: "Calm breathing", laneSlug: "calm_inhale", style: "calm",
+            breathType: "inhale", renderMode: "textured", role: "texture", takeIndex: 0, reference: nil,
+            objectKey: objectKey, durationSec: 5, sampleRate: 44_100, peak: nil, rms: nil,
+            verdictAccept: true, verdictReason: nil, verdictAdvisory: [], fragmentsAccepted: nil,
+            fragmentsTotal: nil, status: .kept, clientMeta: nil)
+        try await take.save(on: app.db)
+
+        try await app.test(.DELETE, "api/participants/\(participantID!)", afterResponse: { res async throws in
+            XCTAssertEqual(res.status, .noContent)
+        })
+
+        let remainingParticipant = try await Participant.find(participantID, on: app.db)
+        let remainingSession = try await EnrollSession.find(sessionID, on: app.db)
+        let remainingTakes = try await Take.query(on: app.db).filter(\.$session.$id == sessionID).count()
+        XCTAssertNil(remainingParticipant)
+        XCTAssertNil(remainingSession)
+        XCTAssertEqual(remainingTakes, 0)
+        let storageStillExists = try await app.storageDriver.exists(key: objectKey)
+        XCTAssertFalse(storageStillExists)
+
+        try await shutdown(app)
+    }
+
+    func testDeleteParticipantRejectsUnknownID() async throws {
+        let app = try await makeTestApp()
+        try await app.test(.DELETE, "api/participants/\(UUID())", afterResponse: { res async throws in
+            XCTAssertEqual(res.status, .notFound)
+        })
         try await shutdown(app)
     }
 

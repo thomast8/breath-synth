@@ -1,13 +1,6 @@
 import Fluent
 import Vapor
 
-public enum ExperienceLevel: String, Codable, CaseIterable, Sendable {
-    case novice
-    case intermediate
-    case advanced
-    case instructor
-}
-
 public final class Participant: Model, Content, @unchecked Sendable {
     public static let schema = "participants"
 
@@ -16,9 +9,6 @@ public final class Participant: Model, Content, @unchecked Sendable {
 
     @OptionalField(key: "pseudonym")
     public var pseudonym: String?
-
-    @Enum(key: "experience_level")
-    public var experienceLevel: ExperienceLevel
 
     @Field(key: "consent_version")
     public var consentVersion: String
@@ -32,12 +22,10 @@ public final class Participant: Model, Content, @unchecked Sendable {
     public init() {}
 
     public init(
-        id: UUID? = nil, pseudonym: String?, experienceLevel: ExperienceLevel,
-        consentVersion: String, consentedAt: Date
+        id: UUID? = nil, pseudonym: String?, consentVersion: String, consentedAt: Date
     ) {
         self.id = id
         self.pseudonym = pseudonym
-        self.experienceLevel = experienceLevel
         self.consentVersion = consentVersion
         self.consentedAt = consentedAt
     }

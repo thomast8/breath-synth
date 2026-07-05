@@ -60,6 +60,12 @@ public struct LocalDiskStorage: StorageDriver {
         FileManager.default.fileExists(atPath: try url(for: key).path)
     }
 
+    public func delete(prefix: String) async throws {
+        let dir = try url(for: prefix)
+        guard FileManager.default.fileExists(atPath: dir.path) else { return }
+        try FileManager.default.removeItem(at: dir)
+    }
+
     public func localURL(forKey key: String) async throws -> URL {
         try url(for: key)
     }

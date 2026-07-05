@@ -13,6 +13,9 @@ public protocol StorageDriver: Sendable {
     func list(prefix: String) async throws -> [String]
     /// Whether something is stored at `key`.
     func exists(key: String) async throws -> Bool
+    /// Remove everything stored under `prefix` (e.g. `"sessions/<id>/"`), recursively. A no-op if
+    /// nothing exists there.
+    func delete(prefix: String) async throws
     /// A real on-disk file URL for `key`'s contents — the engine's decode functions
     /// (`AudioIO`/`LiveTakeGrader`) read from `URL`, not `Data`. `LocalDiskStorage` returns the
     /// actual stored file directly; a future remote driver would materialize one into a temp file.

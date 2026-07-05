@@ -3,7 +3,6 @@ import Vapor
 struct ParticipantCreateRequest: Content {
     var inviteCode: String?
     var pseudonym: String?
-    var experienceLevel: ExperienceLevel
     var consentVersion: String
 }
 
