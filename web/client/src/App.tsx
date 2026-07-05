@@ -4,11 +4,11 @@ import { ResumeChoiceScreen } from "./screens/ResumeChoiceScreen";
 import { MicCheckScreen } from "./screens/MicCheckScreen";
 import { TechniqueStepScreen } from "./screens/TechniqueStepScreen";
 import { DoneScreen } from "./screens/DoneScreen";
-import { StreamingCapture, type CaptureLevel } from "./audio/StreamingCapture";
+import { StreamingCapture, type CaptureLevel, type WavePeak } from "./audio/StreamingCapture";
 import { EnrollmentSocket } from "./ws/EnrollmentSocket";
 import { clearProgress, loadProgress, saveProgress } from "./state/persistence";
 import { completeSession, createParticipant, createSession, deleteParticipant, ApiError } from "./api/client";
-import type { DetectionState, ServerMessage, StepSnapshot, TakeVerdict } from "./ws/protocol";
+import type { DetectionState, ServerMessage, StepSnapshot, TakeRetake, TakeVerdict } from "./ws/protocol";
 
 type Stage = "consent" | "resume-choice" | "mic-init" | "technique" | "done";
 
@@ -34,9 +34,11 @@ export default function App() {
   const [detection, setDetection] = useState<DetectionState | null>(null);
   const [ambientHold, setAmbientHold] = useState(false);
   const [lastVerdict, setLastVerdict] = useState<TakeVerdict | null>(null);
+  const [lastRetake, setLastRetake] = useState<TakeRetake | null>(null);
   const [stepNotice, setStepNotice] = useState<string | null>(null);
   const [roomToneReady, setRoomToneReady] = useState(false);
   const [confirmingStartOver, setConfirmingStartOver] = useState(false);
+  const [waveformPeaks, setWaveformPeaks] = useState<WavePeak[]>([]);
 
   const capture = useRef(new StreamingCapture()).current;
   const socketRef = useRef<EnrollmentSocket | null>(null);
@@ -73,7 +75,7 @@ export default function App() {
 
   async function initMic() {
     try {
-      await capture.initialize(setLevel);
+      await capture.initialize(setLevel, setWaveformPeaks);
       setMicReady(true);
     } catch (e) {
       setMicError(e instanceof Error ? e.message : String(e));
@@ -105,10 +107,12 @@ export default function App() {
     setDetection(null);
     setAmbientHold(false);
     setLastVerdict(null);
+    setLastRetake(null);
     setStepNotice(null);
     setRoomToneReady(false);
     setError(null);
     setConfirmingStartOver(false);
+    setWaveformPeaks([]);
     setStage("consent");
     if (abandonedParticipantId) {
       try {
@@ -176,12 +180,14 @@ export default function App() {
           setDetection({
             phase: msg.phase,
             livePhase: msg.livePhase,
+            phaseElapsed: msg.phaseElapsed,
             blackoutRemaining: msg.blackoutRemaining,
             level: msg.level,
             activityThreshold: msg.activityThreshold,
             eventCount: msg.eventCount,
             takeIndex: msg.takeIndex,
             gapTooClose: msg.gapTooClose,
+            roomTooNoisy: msg.roomTooNoisy,
           });
           // `armed` is otherwise only ever set locally (on `onStartStep`) — on a page reload or a
           // reconnect after a drop, the server may already be mid-capture for this step with no
@@ -192,7 +198,18 @@ export default function App() {
         case "ambientHold":
           setAmbientHold(msg.active);
           break;
+        case "takeRetake":
+          // The server has already discarded this take and re-armed at the same index — clear the
+          // waveform so the display doesn't keep showing the rejected take's audio.
+          capture.clearWaveform();
+          setWaveformPeaks([]);
+          setLastRetake({ takeIndex: msg.takeIndex, issue: msg.issue, ratio: msg.ratio, retries: msg.retries });
+          break;
         case "takeVerdict":
+          // A verdict means this take was actually written (it passed the structural check), so any
+          // earlier structural-retake toast for this step no longer applies — without this, the
+          // "redoing automatically" message would linger across every later take in the step.
+          setLastRetake(null);
           setLastVerdict({ outcome: msg.outcome, takeIndex: msg.takeIndex, reason: msg.reason });
           break;
         case "stepComplete":
@@ -200,6 +217,7 @@ export default function App() {
           setStepNotice(msg.insertedFallbackNotice);
           setArmed(false);
           setLastVerdict(null);
+          setLastRetake(null);
           setDetection(null);
           break;
         case "roomToneReady":
@@ -287,14 +305,24 @@ export default function App() {
   }
 
   function onStartStep() {
+    capture.clearWaveform();
+    setWaveformPeaks([]);
     socketRef.current?.sendControl({ type: "startStep", stepIndex: currentStepIndex });
     setArmed(true);
     setLastVerdict(null);
+    setLastRetake(null);
     setStepNotice(null);
   }
 
   function onStopTake() {
     socketRef.current?.sendControl({ type: "stopTake" });
+  }
+
+  function onRedoTake() {
+    capture.clearWaveform();
+    setWaveformPeaks([]);
+    setLastRetake(null);
+    socketRef.current?.sendControl({ type: "redoTake" });
   }
 
   function onOverrideAmbientGate() {
@@ -384,11 +412,14 @@ export default function App() {
         detection={detection}
         ambientHold={ambientHold}
         lastVerdict={lastVerdict}
+        lastRetake={lastRetake}
         stepNotice={stepNotice}
         roomToneReady={roomToneReady}
         clientLevel={level}
+        waveformPeaks={waveformPeaks}
         onStartStep={onStartStep}
         onStopTake={onStopTake}
+        onRedoTake={onRedoTake}
         onOverrideAmbientGate={onOverrideAmbientGate}
         onSkipStep={onSkipStep}
         onRequestStartOver={() => setConfirmingStartOver(true)}
