@@ -38,6 +38,22 @@ final class EnrollmentSocketHandlerTests: XCTestCase {
         )
     }
 
+    /// A `.cycle` step whose fixture (see `testTakeRetakeFiresOnAStructuralRedo`) never produces a real
+    /// exhale — every attempt is structurally invalid. Mirrors `EnrollmentEngineTests`' own fixture for
+    /// the same event (`eventStreamEmitsTakeRetakeOnAStructuralRedo`): `maxSeconds: 0` makes
+    /// `EnrollmentDetection.detection(for:)`'s derived `maxCycleSec` (`maxSeconds * 2 + 6`) its 6.0s
+    /// floor, so the take only ends `.incomplete` once that absolute cap is hit with no second phase.
+    private func cycleStep() -> EnrollmentStep {
+        EnrollmentStep(
+            title: "Calm breathing", prompt: "", demoReference: nil, takes: 1, renderMode: .textured,
+            detection: .cycle, minSeconds: 0.4, maxSeconds: 0, targetEvents: nil,
+            lanes: [
+                CaptureLane(label: .inhale, slug: "calm_inhale", style: "calm", type: .inhale, role: "texture", reference: nil),
+                CaptureLane(label: .exhale, slug: "calm_exhale", style: "calm", type: .exhale, role: "texture", reference: nil),
+            ]
+        )
+    }
+
     private func makeOutputDir() throws -> URL {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -211,6 +227,14 @@ final class EnrollmentSocketHandlerTests: XCTestCase {
         XCTAssertEqual(stepIndexAfterSkip, 1, "skipping must advance to the next step")
         XCTAssertEqual(skippedSteps, ["Test step"])
 
+        // `stepComplete` is delivered via the engine's event stream, consumed by a separate unstructured
+        // Task (`eventTask`) — `skipCurrentStep()` returning is no guarantee that Task has already drained
+        // it, so this must poll rather than assume the message has landed yet (every other event-stream
+        // assertion in this file already does the same via `waitUntil`).
+        try await waitUntil { await recorder.messages.contains {
+            if case .stepComplete = $0 { return true }; return false
+        } }
+
         let messages = await recorder.messages
         guard case let .stepComplete(payload)? = messages.last(where: {
             if case .stepComplete = $0 { return true }; return false
@@ -220,6 +244,108 @@ final class EnrollmentSocketHandlerTests: XCTestCase {
         XCTAssertEqual(payload.nextStepIndex, 1)
         XCTAssertFalse(messages.contains { if case .takeVerdict = $0 { return true }; return false },
                         "a skipped step must never produce a takeVerdict — no take was ever captured")
+    }
+
+    // MARK: phaseElapsed on the wire
+
+    func testPhaseElapsedClimbsOnTheWireDuringACapturingPhase() async throws {
+        let dir = try makeOutputDir()
+        let recorder = MessageRecorder()
+        let handler = EnrollmentSocketHandler(
+            sessionID: UUID(), outputDir: dir, assetsDir: dir, steps: [singleStep(slug: "a")],
+            send: { message in await recorder.record(message) }
+        )
+        await handler.handle(.hello(sampleRate: sr, micSettings: nil))
+        await handler.handle(.startStep(stepIndex: 0))
+
+        // Clear the post-arm blackout, then feed the onset-triggering tone in small chunks (not one big
+        // call) so real wall-clock time actually advances across several `handle(binary:)` calls,
+        // giving the 100ms throttle repeated chances to clear rather than racing a single check.
+        await handler.handle(binary: silenceBytes(1.7))
+        for _ in 0..<80 {
+            await handler.handle(binary: toneBytes(0.01))
+        }
+
+        let elapsedValues = await recorder.messages.compactMap { message -> Double? in
+            if case let .detectionState(payload) = message { return payload.phaseElapsed }
+            return nil
+        }
+        XCTAssertTrue(
+            elapsedValues.contains { $0 > 0.2 },
+            "phaseElapsed must reach the wire and climb once capturing begins, got \(elapsedValues)"
+        )
+    }
+
+    // MARK: roomTooNoisy on the wire
+
+    func testRoomTooNoisyReflectsALoudNoiseFloor() async throws {
+        let dir = try makeOutputDir()
+        let recorder = MessageRecorder()
+        let handler = EnrollmentSocketHandler(
+            sessionID: UUID(), outputDir: dir, assetsDir: dir, steps: [singleStep(slug: "a")],
+            send: { message in await recorder.record(message) }
+        )
+        await handler.handle(.hello(sampleRate: sr, micSettings: nil))
+
+        // Seed a loud rolling floor directly on the nested capture engine, bypassing the calibration
+        // bootstrapping problem: a brand-new engine's uncalibrated `activityThreshold` sits at ~0.004
+        // (`CaptureAnalyzer.absActivityFloor`), well below `noisyRoomFloorRMS` (0.015) — so any synthetic
+        // tone loud enough to read as "too noisy" also confirms onset almost instantly, long before the
+        // ~1.5s of pre-onset samples a real `preOnsetFloorRMS` reading needs. Seeding `start(noiseFloorRMS:)`
+        // directly reaches the same `currentNoiseFloorRMS` state a completed take's ambient blend would
+        // eventually produce, without fighting that bootstrapping order.
+        guard let enrollmentEngine = await handler.engine else { return XCTFail("expected an engine after hello") }
+        let captureEngine = await enrollmentEngine.engine
+        await captureEngine.start(
+            sampleRate: sr, takes: 1, detection: .single(minActiveSec: 0.1, maxTakeSec: 5, trailingSilenceSec: 0.3),
+            noiseFloorRMS: 0.05,
+            fileURL: { _, _ in dir.appendingPathComponent("unused.wav") },
+            onSegment: { _, _, _, _, _ in }, onFinished: {}
+        )
+
+        await handler.handle(binary: silenceBytes(0.05))
+
+        let roomTooNoisyValues = await recorder.messages.compactMap { message -> Bool? in
+            if case let .detectionState(payload) = message { return payload.roomTooNoisy }
+            return nil
+        }
+        XCTAssertEqual(roomTooNoisyValues, [true], "detectionState must carry roomTooNoisy=true once the floor is loud")
+    }
+
+    // MARK: takeRetake on a structural redo
+
+    func testTakeRetakeFiresOnAStructuralRedo() async throws {
+        let dir = try makeOutputDir()
+        let recorder = MessageRecorder()
+        let handler = EnrollmentSocketHandler(
+            sessionID: UUID(), outputDir: dir, assetsDir: dir, steps: [cycleStep()],
+            send: { message in await recorder.record(message) }
+        )
+        await handler.handle(.hello(sampleRate: sr, micSettings: nil))
+        await handler.handle(.startStep(stepIndex: 0))
+
+        // Pre-onset silence past the 1.5s blackout, an inhale, then a long trailing silence that never
+        // produces a second (exhale) phase — one retry (retries 0 < maxRetries 3), a silent structural
+        // redo, not the force-accepted 4th attempt.
+        for chunk in [silenceBytes(1.8), toneBytes(1.5), silenceBytes(4.0)] {
+            await handler.handle(binary: chunk)
+        }
+        try await waitUntil { await recorder.messages.contains {
+            if case .takeRetake = $0 { return true }; return false
+        } }
+
+        let messages = await recorder.messages
+        guard let payload = messages.compactMap({ message -> TakeRetakeMessage? in
+            if case let .takeRetake(payload) = message { return payload }
+            return nil
+        }).first else {
+            return XCTFail("expected a takeRetake message, got \(messages)")
+        }
+        XCTAssertEqual(payload.takeIndex, 0)
+        XCTAssertEqual(payload.issue, "no_pause")
+        XCTAssertEqual(payload.retries, 1)
+        XCTAssertFalse(messages.contains { if case .takeVerdict = $0 { return true }; return false },
+                        "a structural redo must never produce a takeVerdict — no take was ever written")
     }
 
     private func waitUntil(timeout: TimeInterval = 5.0, _ condition: @escaping () async -> Bool) async throws {

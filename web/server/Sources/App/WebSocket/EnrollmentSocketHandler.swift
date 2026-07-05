@@ -148,6 +148,8 @@ actor EnrollmentSocketHandler {
             await onRoomTone(filename)
         case let .segmentWritten(takeIndex, laneSlug, filename):
             await onSegment(takeIndex, laneSlug, filename)
+        case let .takeRetake(takeIndex, issue, retries):
+            await send(.takeRetake(TakeRetakeMessage(takeIndex: takeIndex, issue: issue, retries: retries)))
         case let .takeVerdict(takeIndex, check):
             await send(.takeVerdict(TakeVerdictMessage(takeIndex: takeIndex, check: check)))
         case let .stepComplete(nextStepIndex, notice):
@@ -165,11 +167,14 @@ actor EnrollmentSocketHandler {
         guard now.timeIntervalSince(lastDetectionSendAt) >= Self.detectionThrottleSec else { return }
         lastDetectionSendAt = now
 
+        let roomTooNoisy = await engine?.roomTooNoisy() ?? false
         await send(.detectionState(DetectionStateMessage(
             phase: Self.phaseString(await capture.phase), livePhase: Self.livePhaseString(await capture.livePhase),
+            phaseElapsed: await capture.phaseElapsed,
             blackoutRemaining: await capture.blackoutRemaining, level: await capture.level,
             activityThreshold: await capture.activityThreshold, eventCount: await capture.eventCount,
-            takeIndex: await capture.takeIndex, gapTooClose: await capture.gapTooClose
+            takeIndex: await capture.takeIndex, gapTooClose: await capture.gapTooClose,
+            roomTooNoisy: roomTooNoisy
         )))
         await send(.ambientHold(AmbientHoldMessage(active: await capture.ambientHold)))
     }

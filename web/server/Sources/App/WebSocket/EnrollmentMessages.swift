@@ -61,6 +61,7 @@ enum ServerMessage: Encodable {
     case sessionState(SessionStateMessage)
     case detectionState(DetectionStateMessage)
     case ambientHold(AmbientHoldMessage)
+    case takeRetake(TakeRetakeMessage)
     case takeVerdict(TakeVerdictMessage)
     case stepComplete(StepCompleteMessage)
     case roomToneReady(RoomToneReadyMessage)
@@ -72,6 +73,7 @@ enum ServerMessage: Encodable {
         case let .sessionState(payload): try payload.encode(to: encoder)
         case let .detectionState(payload): try payload.encode(to: encoder)
         case let .ambientHold(payload): try payload.encode(to: encoder)
+        case let .takeRetake(payload): try payload.encode(to: encoder)
         case let .takeVerdict(payload): try payload.encode(to: encoder)
         case let .stepComplete(payload): try payload.encode(to: encoder)
         case let .roomToneReady(payload): try payload.encode(to: encoder)
@@ -98,6 +100,14 @@ struct StepSnapshot: Encodable {
     let minSeconds: Double
     let maxSeconds: Double
     let targetEvents: Int?
+    /// One of `"cycle"`, `"single"`, `"finalPhase"`, `"cleanEvents"`, `"naturalRhythm"` — the client needs
+    /// this (and `isPairedRecovery` below) to reproduce native `BreathEnrollApp`'s per-kind phase-label
+    /// wording (e.g. bare "Inhale…" for event-counted kinds vs. "Inhaling… Xs" for `cycle`).
+    let detection: String
+    /// Recovery's hook-breath lanes render like `cycle`'s "Ready — inhale when you are" even though
+    /// their own `detection` kind is `cleanEvents`/`naturalRhythm` — mirrors native `phaseLabel(_:)`'s
+    /// `isPairedRecovery` branch.
+    let isPairedRecovery: Bool
 
     init(_ step: EnrollmentStep) {
         title = step.title
@@ -107,6 +117,14 @@ struct StepSnapshot: Encodable {
         minSeconds = step.minSeconds
         maxSeconds = step.maxSeconds
         targetEvents = step.targetEvents
+        switch step.detection {
+        case .cycle: detection = "cycle"
+        case .single: detection = "single"
+        case .finalPhase: detection = "finalPhase"
+        case .cleanEvents: detection = "cleanEvents"
+        case .naturalRhythm: detection = "naturalRhythm"
+        }
+        isPairedRecovery = step.lanes.first?.style == "recovery"
     }
 }
 
@@ -116,17 +134,60 @@ struct DetectionStateMessage: Encodable {
     let type = "detectionState"
     let phase: String
     let livePhase: String
+    let phaseElapsed: Double
     let blackoutRemaining: Double
     let level: Float
     let activityThreshold: Float
     let eventCount: Int
     let takeIndex: Int
     let gapTooClose: Bool
+    /// Mirrors native `EnrollModel.roomTooNoisy` — a non-blocking "this room reads loud" caption,
+    /// distinct from `ambientHold` (which actually blocks onset detection until overridden).
+    let roomTooNoisy: Bool
 }
 
 struct AmbientHoldMessage: Encodable {
     let type = "ambientHold"
     let active: Bool
+}
+
+/// A silent structural redo (bad cycle balance, missing pause, too-short phase, etc) — distinct from
+/// `TakeVerdictMessage`, which only ever reports the async grader's ruling on a take that got written.
+/// Mirrors native `retakeReason(_:)` (`EnrollContentView.swift`), driven by `CaptureAnalyzer.TakeIssue`.
+struct TakeRetakeMessage: Encodable {
+    let type = "takeRetake"
+    let takeIndex: Int
+    /// One of `"no_pause"`, `"inhale_too_short"`, `"exhale_too_short"`, `"phases_imbalanced"`,
+    /// `"no_segment"`, `"no_pause_before_release"`.
+    let issue: String
+    /// Only set for `"phases_imbalanced"` — the inhale:exhale duration ratio that tripped the guard.
+    let ratio: Double?
+    let retries: Int
+
+    init(takeIndex: Int, issue: CaptureAnalyzer.TakeIssue, retries: Int) {
+        self.takeIndex = takeIndex
+        self.retries = retries
+        switch issue {
+        case .noPauseDetected:
+            self.issue = "no_pause"
+            ratio = nil
+        case .inhaleTooShort:
+            self.issue = "inhale_too_short"
+            ratio = nil
+        case .exhaleTooShort:
+            self.issue = "exhale_too_short"
+            ratio = nil
+        case let .phasesImbalanced(r):
+            self.issue = "phases_imbalanced"
+            ratio = r
+        case .noSegment:
+            self.issue = "no_segment"
+            ratio = nil
+        case .noPauseBeforeRelease:
+            self.issue = "no_pause_before_release"
+            ratio = nil
+        }
+    }
 }
 
 struct TakeVerdictMessage: Encodable {
