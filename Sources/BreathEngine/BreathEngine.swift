@@ -179,14 +179,23 @@ public final class BreathEngine {
     /// Each cycle is re-seeded so the run doesn't sound like one identical loop repeated,
     /// while staying fully reproducible (seed the pattern to pin the whole sequence).
     public func renderSequenceSamples(_ plan: SequencePlan) throws -> [Float] {
-        let pattern = plan.pattern
         var samples: [Float] = []
         for cycleIndex in 0..<plan.cycles {
-            samples += try renderSamples(breathSpec(for: pattern, type: .inhale, cycleIndex: cycleIndex))
-            samples += silence(seconds: pattern.holdInSec)
-            samples += try renderSamples(breathSpec(for: pattern, type: .exhale, cycleIndex: cycleIndex))
-            samples += silence(seconds: pattern.holdOutSec)
+            samples += try sequenceCycleSamples(plan.pattern, cycleIndex: cycleIndex)
         }
+        return samples
+    }
+
+    /// One cycle of a sequence: inhale, hold, exhale, hold.
+    ///
+    /// Split out so the whole-buffer render above and the streaming playback below are the same
+    /// code rather than two copies that could drift — the seeded per-cycle decorrelation means a
+    /// streamed sequence has to be sample-for-sample what `renderSequenceSamples` would produce.
+    public func sequenceCycleSamples(_ pattern: BreathPattern, cycleIndex: Int) throws -> [Float] {
+        var samples = try renderSamples(breathSpec(for: pattern, type: .inhale, cycleIndex: cycleIndex))
+        samples += silence(seconds: pattern.holdInSec)
+        samples += try renderSamples(breathSpec(for: pattern, type: .exhale, cycleIndex: cycleIndex))
+        samples += silence(seconds: pattern.holdOutSec)
         return samples
     }
 
@@ -318,7 +327,9 @@ public final class BreathEngine {
             let block = try makeBuffer(renderCyclesSamples(cycle, count: Self.loopBlockCycles))
             try playerInstance().loopForever(block)
         } else {
-            try await playerInstance().playOnce(renderCycle(cycle))
+            try await streamCycles(count: max(1, cycle.cycles)) { index in
+                try self.renderCycleSamples(cycle, cycleIndex: index)
+            }
         }
     }
 
@@ -326,14 +337,54 @@ public final class BreathEngine {
     /// single breath. Eight breaths is well past the point the repeat is perceptible under holds.
     private static let loopBlockCycles = 8
 
-    /// Play a planned sequence as one buffer. Loops the whole sequence forever
+    /// Play a planned sequence, rendering it as it plays. Loops the whole sequence forever
     /// (non-blocking) when `loop`, otherwise plays it once and returns when done.
+    ///
+    /// The non-looping path renders one cycle at a time and keeps a couple queued ahead of the
+    /// playhead, so time-to-first-sound and resident audio are both a function of the cycle
+    /// length rather than of the whole sequence. That matters at the lengths this is actually
+    /// used for: a 5:00 breathe-up rendered up front is a single ~53 MB buffer, and every
+    /// additional minute is another ~10 MB and another render before anything is audible.
+    ///
+    /// `loop` still renders up front — looping needs one contiguous buffer to hand the player,
+    /// so there is nothing to stream into.
     public func playSequence(_ plan: SequencePlan, loop: Bool = false) async throws {
-        let buffer = try renderSequence(plan)
-        if loop {
-            try playerInstance().loopForever(buffer)
-        } else {
-            try await playerInstance().playOnce(buffer)
+        guard !loop else {
+            try playerInstance().loopForever(try renderSequence(plan))
+            return
+        }
+        try await streamCycles(count: plan.cycles) { index in
+            try self.sequenceCycleSamples(plan.pattern, cycleIndex: index)
+        }
+    }
+
+    /// Render and play `count` cycles, keeping at most `lookahead` of them in flight.
+    ///
+    /// Rendering a cycle costs a small fraction of the time that cycle takes to play, so one
+    /// buffer queued ahead of the playhead is already ample; two is margin. The queue is what
+    /// keeps the seams gapless — `enqueue` appends sample-accurately, so the next cycle is
+    /// already scheduled long before the current one drains.
+    private func streamCycles(
+        count: Int,
+        lookahead: Int = 2,
+        render: (Int) throws -> [Float]
+    ) async throws {
+        guard count > 0 else { return }
+        let player = try playerInstance()
+        var inFlight: [@Sendable () async -> Void] = []
+
+        for index in 0..<count {
+            if Task.isCancelled { return }
+            inFlight.append(try player.enqueue(makeBuffer(render(index))))
+            // Wait for the oldest to drain before rendering another, so peak memory is
+            // `lookahead` cycles rather than the whole sequence.
+            if inFlight.count > lookahead {
+                await inFlight.removeFirst()()
+            }
+        }
+        for wait in inFlight {
+            if Task.isCancelled { return }
+            await wait()
         }
     }
 
