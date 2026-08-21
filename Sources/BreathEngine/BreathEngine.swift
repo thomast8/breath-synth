@@ -99,6 +99,27 @@ public final class BreathEngine {
 
     /// Render the breath to mono samples (no caching).
     public func renderSamples(_ spec: BreathSpec) throws -> [Float] {
+        RenderJob.run(try job(for: spec))
+    }
+
+    /// The same render, with the expensive half moved off this actor.
+    ///
+    /// `BreathEngine` is `@MainActor`, so every caller's render ran on the main thread and froze
+    /// the app for as long as it took. That is about 0.9s for a five-minute sequence in a release
+    /// build, and — because the DSP is `-Onone` there — roughly 75 SECONDS in a debug one, which
+    /// reads as a hang rather than a hitch: no timer, no touches, no accessibility.
+    ///
+    /// Only the asset loading genuinely needs the actor, and it is cached and quick. Everything
+    /// after it is arithmetic over `Sendable` values, so it is gathered into a ``RenderJob`` here
+    /// and assembled somewhere else.
+    public func renderSamplesOffActor(_ spec: BreathSpec) async throws -> [Float] {
+        let job = try job(for: spec)
+        return await Task.detached(priority: .userInitiated) { RenderJob.run(job) }.value
+    }
+
+    /// Gathers everything the assembler needs. This is the part that touches the library, and the
+    /// only part that has to happen here.
+    private func job(for spec: BreathSpec) throws -> RenderJob {
         let mode = config.manifest.styles[spec.style]?.effectiveRender ?? .textured
         // Counted styles have no duration; `BreathSpec` can't express a count, so fail loudly
         // rather than silently degrading to one one-shot copy (via render/cycle/sequence).
@@ -117,7 +138,7 @@ public final class BreathEngine {
         let grainPool = mode == .textured
             ? library.grainPool(style: spec.style, type: spec.type, expectedSig: bankSig)
             : nil
-        var samples = BreathAssembler.assemble(
+        return RenderJob(
             type: spec.type,
             durationSec: spec.clampedDurationSec,
             clips: clips,
@@ -127,10 +148,49 @@ public final class BreathEngine {
             mode: mode,
             style: spec.style,
             noiseProfile: noiseProfile,
-            grainPool: grainPool
+            grainPool: grainPool,
+            gain: config.masterGain * spec.gain * Variation.dbToGain(config.headroomDb)
         )
-        applyMasterGainAndClamp(&samples, extraGain: spec.gain)
-        return samples
+    }
+
+    /// One render, reduced to values. Nothing here reaches back into the engine, the library or
+    /// any actor, which is what lets it run off the main thread.
+    struct RenderJob: Sendable {
+        let type: BreathType
+        let durationSec: Double
+        let clips: BreathSourceClips
+        let settings: AssemblerSettings
+        let deltas: VariationDeltas
+        let seed: UInt64
+        let mode: RenderMode
+        let style: BreathStyle
+        let noiseProfile: [Float]?
+        let grainPool: [[Float]]?
+        /// Master gain, the caller's extra gain and the headroom, pre-multiplied — so the clamp
+        /// can happen here rather than needing the engine's config afterwards.
+        let gain: Double
+
+        static func run(_ job: RenderJob) -> [Float] {
+            var samples = BreathAssembler.assemble(
+                type: job.type,
+                durationSec: job.durationSec,
+                clips: job.clips,
+                settings: job.settings,
+                deltas: job.deltas,
+                seed: job.seed,
+                mode: job.mode,
+                style: job.style,
+                noiseProfile: job.noiseProfile,
+                grainPool: job.grainPool
+            )
+            let gain = Float(job.gain)
+            for i in samples.indices {
+                var v = samples[i] * gain
+                if v > 1 { v = 1 } else if v < -1 { v = -1 }
+                samples[i] = v
+            }
+            return samples
+        }
     }
 
     /// Render the breath to a cached AVAudioPCMBuffer ready for playback.
@@ -179,15 +239,56 @@ public final class BreathEngine {
     /// Each cycle is re-seeded so the run doesn't sound like one identical loop repeated,
     /// while staying fully reproducible (seed the pattern to pin the whole sequence).
     public func renderSequenceSamples(_ plan: SequencePlan) throws -> [Float] {
+        Self.assemble(try sequenceJobs(plan))
+    }
+
+    /// The sequence render, off this actor — see ``renderSamplesOffActor(_:)``.
+    ///
+    /// This is the one that mattered: a breathe-up is a whole sequence, and it is rendered at the
+    /// moment the step begins, which is the moment the diver is looking at the screen.
+    public func renderSequenceSamplesOffActor(_ plan: SequencePlan) async throws -> [Float] {
+        let jobs = try sequenceJobs(plan)
+        return await Task.detached(priority: .userInitiated) { Self.assemble(jobs) }.value
+    }
+
+    /// A whole sequence reduced to values, gathered on this actor.
+    private func sequenceJobs(_ plan: SequencePlan) throws -> [SequenceEntry] {
         let pattern = plan.pattern
-        var samples: [Float] = []
+        var entries: [SequenceEntry] = []
         for cycleIndex in 0..<plan.cycles {
-            samples += try renderSamples(breathSpec(for: pattern, type: .inhale, cycleIndex: cycleIndex))
-            samples += silence(seconds: pattern.holdInSec)
-            samples += try renderSamples(breathSpec(for: pattern, type: .exhale, cycleIndex: cycleIndex))
-            samples += silence(seconds: pattern.holdOutSec)
+            entries.append(.breath(try job(for: breathSpec(for: pattern, type: .inhale, cycleIndex: cycleIndex))))
+            entries.append(.silence(frames(pattern.holdInSec)))
+            entries.append(.breath(try job(for: breathSpec(for: pattern, type: .exhale, cycleIndex: cycleIndex))))
+            entries.append(.silence(frames(pattern.holdOutSec)))
+        }
+        return entries
+    }
+
+    /// Exposed for the test that pins the assembly's independence from any actor.
+    func sequenceJobsForTesting(_ plan: SequencePlan) throws -> [SequenceEntry] {
+        try sequenceJobs(plan)
+    }
+
+    enum SequenceEntry: Sendable {
+        case breath(RenderJob)
+        case silence(Int)
+    }
+
+    /// Pure, so it can run wherever it is called from — including off the main actor, which is
+    /// the whole point of the split.
+    nonisolated static func assemble(_ entries: [SequenceEntry]) -> [Float] {
+        var samples: [Float] = []
+        for entry in entries {
+            switch entry {
+            case .breath(let job): samples += RenderJob.run(job)
+            case .silence(let count): samples += [Float](repeating: 0, count: count)
+            }
         }
         return samples
+    }
+
+    private func frames(_ seconds: Double) -> Int {
+        Segments.frames(seconds: max(0, seconds), sampleRate: config.sampleRate)
     }
 
     /// Render a planned sequence into a single buffer.
@@ -211,12 +312,22 @@ public final class BreathEngine {
         count: Int?,
         seed: UInt64? = nil
     ) throws -> [Float] {
+        CountedJob.run(try countedJob(style: style, type: type, count: count, seed: seed))
+    }
+
+    /// Gathers what a counted render needs. Only the library reads happen here; every branch
+    /// hands the raw samples on and lets the DSP happen wherever the caller wants it.
+    private func countedJob(
+        style: BreathStyle,
+        type: BreathType,
+        count: Int?,
+        seed: UInt64?
+    ) throws -> CountedJob {
         let resolvedSeed = seed ?? countedStableSeed(style: style, type: type, count: count)
         guard let palette = config.manifest.palette(style: style, type: type), !palette.oneShot.isEmpty else {
             throw BreathError.emptyRole(style, type, .oneShot)
         }
-        let sr = config.sampleRate
-        var body: [Float]
+        let gain = config.masterGain * Variation.dbToGain(config.headroomDb)
 
         if let cores = library.gulpCorePool(style: style, type: type, expectedSig: bankSig),
            let gaps = library.rhythmGapPool(style: style, type: type, expectedSig: bankSig) {
@@ -228,25 +339,74 @@ public final class BreathEngine {
             let n = count
                 ?? library.defaultCountedEvents(style: style, type: type, expectedSig: bankSig)
                 ?? (gaps.count + 1)
-            body = BreathAssembler.assembleHybrid(cores: cores, gaps: gaps, count: n, settings: config.settings, seed: resolvedSeed)
+            return CountedJob(shape: .pooledHybrid(cores: cores, gaps: gaps, count: n),
+                              settings: config.settings, noiseProfile: noiseProfile,
+                              sampleRate: config.sampleRate, seed: resolvedSeed, gain: gain)
         } else if palette.oneShot.count >= 2 {
             // Hybrid: cores from take 0 (separated packs), rhythm from take 1 (natural cadence).
-            let coreSrc = BreathAssembler.prepareSource(
-                try library.samples(for: palette.oneShot[0].file), settings: config.settings, noiseProfile: noiseProfile)
-            let rhythmSrc = BreathAssembler.prepareSource(
-                try library.samples(for: palette.oneShot[1].file), settings: config.settings, noiseProfile: noiseProfile)
-            let cores = UnitExtractor.gulpCores(from: coreSrc, sampleRate: sr)
-            let gaps = UnitExtractor.rhythmGaps(from: rhythmSrc, sampleRate: sr)
-            let n = count ?? (gaps.count + 1)
-            body = BreathAssembler.assembleHybrid(cores: cores, gaps: gaps, count: n, settings: config.settings, seed: resolvedSeed)
+            return CountedJob(
+                shape: .takeHybrid(coreRaw: try library.samples(for: palette.oneShot[0].file),
+                                        rhythmRaw: try library.samples(for: palette.oneShot[1].file),
+                                        count: count),
+                settings: config.settings, noiseProfile: noiseProfile,
+                sampleRate: config.sampleRate, seed: resolvedSeed, gain: gain)
         } else {
-            let prepared = BreathAssembler.prepareSource(
-                try library.samples(for: palette.oneShot[0].file), settings: config.settings, noiseProfile: noiseProfile)
-            let (units, detected) = UnitExtractor.extract(from: prepared, sampleRate: sr)
-            body = BreathAssembler.assembleCounted(units: units, count: count ?? detected, settings: config.settings)
+            return CountedJob(
+                shape: .singleTake(raw: try library.samples(for: palette.oneShot[0].file), count: count),
+                settings: config.settings, noiseProfile: noiseProfile,
+                sampleRate: config.sampleRate, seed: resolvedSeed, gain: gain)
         }
-        applyMasterGainAndClamp(&body, extraGain: 1.0)
-        return body
+    }
+
+    /// One counted render, reduced to values — see ``RenderJob``.
+    struct CountedJob: Sendable {
+        enum Shape: Sendable {
+            case pooledHybrid(cores: [[Float]], gaps: [Int], count: Int)
+            case takeHybrid(coreRaw: [Float], rhythmRaw: [Float], count: Int?)
+            case singleTake(raw: [Float], count: Int?)
+        }
+
+        let shape: Shape
+        let settings: AssemblerSettings
+        let noiseProfile: [Float]?
+        let sampleRate: Double
+        let seed: UInt64
+        let gain: Double
+
+        static func run(_ job: CountedJob) -> [Float] {
+            var body: [Float]
+            switch job.shape {
+            case .pooledHybrid(let cores, let gaps, let count):
+                body = BreathAssembler.assembleHybrid(
+                    cores: cores, gaps: gaps, count: count, settings: job.settings, seed: job.seed)
+
+            case .takeHybrid(let coreRaw, let rhythmRaw, let count):
+                let coreSrc = BreathAssembler.prepareSource(
+                    coreRaw, settings: job.settings, noiseProfile: job.noiseProfile)
+                let rhythmSrc = BreathAssembler.prepareSource(
+                    rhythmRaw, settings: job.settings, noiseProfile: job.noiseProfile)
+                let cores = UnitExtractor.gulpCores(from: coreSrc, sampleRate: job.sampleRate)
+                let gaps = UnitExtractor.rhythmGaps(from: rhythmSrc, sampleRate: job.sampleRate)
+                body = BreathAssembler.assembleHybrid(
+                    cores: cores, gaps: gaps, count: count ?? (gaps.count + 1),
+                    settings: job.settings, seed: job.seed)
+
+            case .singleTake(let raw, let count):
+                let prepared = BreathAssembler.prepareSource(
+                    raw, settings: job.settings, noiseProfile: job.noiseProfile)
+                let (units, detected) = UnitExtractor.extract(from: prepared, sampleRate: job.sampleRate)
+                body = BreathAssembler.assembleCounted(
+                    units: units, count: count ?? detected, settings: job.settings)
+            }
+
+            let gain = Float(job.gain)
+            for i in body.indices {
+                var v = body[i] * gain
+                if v > 1 { v = 1 } else if v < -1 { v = -1 }
+                body[i] = v
+            }
+            return body
+        }
     }
 
     /// Render a counted breath into a single buffer.
@@ -277,7 +437,24 @@ public final class BreathEngine {
         count: Int?,
         seed: UInt64? = nil
     ) async throws {
-        try await playerInstance().playOnce(renderCounted(style: style, type: type, count: count, seed: seed))
+        let samples = try await renderCountedSamplesOffActor(
+            style: style, type: type, count: count, seed: seed
+        )
+        try await playerInstance().playOnce(makeBuffer(samples))
+    }
+
+    /// The counted render, off this actor — see ``renderSamplesOffActor(_:)``.
+    ///
+    /// The costly part here is `prepareSource`, which denoises a whole source take; it is the
+    /// same spectral work that made the sequence render freeze the caller, on the same thread.
+    public func renderCountedSamplesOffActor(
+        style: BreathStyle,
+        type: BreathType,
+        count: Int?,
+        seed: UInt64? = nil
+    ) async throws -> [Float] {
+        let job = try countedJob(style: style, type: type, count: count, seed: seed)
+        return await Task.detached(priority: .userInitiated) { CountedJob.run(job) }.value
     }
 
     // MARK: - Manifest accessors
@@ -303,7 +480,17 @@ public final class BreathEngine {
     // MARK: - Playback
 
     public func play(_ spec: BreathSpec) async throws {
-        try await playerInstance().playOnce(render(spec))
+        try await playerInstance().playOnce(try await renderOffActor(spec))
+    }
+
+    /// ``render(_:)`` with the assembly off this actor. The cache is still consulted and filled
+    /// here, so a repeated cue costs nothing either way.
+    public func renderOffActor(_ spec: BreathSpec) async throws -> AVAudioPCMBuffer {
+        let key = cacheKey(spec)
+        if let cached = cache[key] { return cached }
+        let buffer = try makeBuffer(await renderSamplesOffActor(spec))
+        store(buffer, for: key)
+        return buffer
     }
 
     public func play(_ buffer: AVAudioPCMBuffer) async throws {
@@ -329,7 +516,8 @@ public final class BreathEngine {
     /// Play a planned sequence as one buffer. Loops the whole sequence forever
     /// (non-blocking) when `loop`, otherwise plays it once and returns when done.
     public func playSequence(_ plan: SequencePlan, loop: Bool = false) async throws {
-        let buffer = try renderSequence(plan)
+        // Off-actor: rendering here is what froze callers for the length of the render.
+        let buffer = try makeBuffer(await renderSequenceSamplesOffActor(plan))
         if loop {
             try playerInstance().loopForever(buffer)
         } else {
