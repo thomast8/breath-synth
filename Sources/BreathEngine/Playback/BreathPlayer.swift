@@ -49,6 +49,26 @@ public final class BreathPlayer {
         }
     }
 
+    /// Queue `buffer` behind whatever is already scheduled and return as soon as it is queued,
+    /// handing back a wait that resolves when *this* buffer has finished playing.
+    ///
+    /// `playOnce` cannot express a queue: it resolves on the buffer it scheduled, so a caller
+    /// feeding a long sequence has to have every sample rendered before the first one sounds.
+    /// With this a caller can keep a fixed number of buffers in flight and render the rest as
+    /// they are consumed. `scheduleBuffer` queues sample-accurately, so buffers appended this
+    /// way play gaplessly — the seam is not audible.
+    ///
+    /// The wait also resolves when the player is stopped, so a caller parked on it unblocks
+    /// rather than hanging when playback is cancelled.
+    public func enqueue(_ buffer: AVAudioPCMBuffer) throws -> @Sendable () async -> Void {
+        try ensureRunning()
+        let (stream, continuation) = AsyncStream<Void>.makeStream()
+        player.scheduleBuffer(buffer, at: nil, options: [], completionCallbackType: .dataPlayedBack) { _ in
+            continuation.finish()
+        }
+        return { for await _ in stream {} }
+    }
+
     /// Schedule a buffer to loop forever (sample-accurate, gapless). Returns immediately.
     public func loopForever(_ buffer: AVAudioPCMBuffer) throws {
         try ensureRunning()
