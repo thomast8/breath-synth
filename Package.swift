@@ -6,6 +6,7 @@ let package = Package(
     platforms: [
         .macOS("26.0"),
         .iOS("26.0"),
+        .watchOS("26.0"),
     ],
     products: [
         .library(name: "BreathEngine", targets: ["BreathEngine"]),
