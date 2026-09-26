@@ -11,7 +11,7 @@ required to run the examples below.
 
 ## Requirements
 
-- macOS 13+
+- macOS 26+, iOS 26+, or watchOS 26+ for the BreathEngine library (playback only on watchOS)
 - Swift 6.3 toolchain
 - Xcode if you want to run the test suite on macOS
 

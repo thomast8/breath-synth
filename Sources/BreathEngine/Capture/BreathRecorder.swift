@@ -1,3 +1,4 @@
+#if !os(watchOS)
 import AVFoundation
 import Foundation
 import Observation
@@ -655,3 +656,4 @@ private extension CaptureDetection {
         }
     }
 }
+#endif
