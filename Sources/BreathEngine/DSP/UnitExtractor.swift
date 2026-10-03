@@ -104,6 +104,103 @@ public enum UnitExtractor {
         return gaps
     }
 
+    // MARK: - Hook parts
+
+    /// One recorded hook breath, split into its two sounds: the quick `inSip` and the louder
+    /// `outRelease` about half a second later. Both are declicked so either can be placed alone.
+    public struct HookPart: Sendable, Equatable {
+        public let inSip: [Float]
+        public let outRelease: [Float]
+    }
+
+    /// The source-frame ranges `hookParts` slices (before declicking), one pair per `extract` unit.
+    public struct HookPartRange: Sendable, Equatable {
+        /// From the unit's start to the quietest point between the two sounds. Empty when the unit
+        /// has no distinct sip before its release.
+        public let inSip: Range<Int>
+        /// From just before the release's onset to where it has decayed into the room tone.
+        public let outRelease: Range<Int>
+    }
+
+    /// Split every hook in a recovery take (the prepared source, as `extract` sees it) into its
+    /// in-sip and out-release. Same units as `extract` — `hookMinDistSec` peak-picking merges each
+    /// sip/release pair into one event, and that event's peak *is* the release, the louder half —
+    /// so `hookParts(...)[i]` is the two halves of `extract(...).units[i]`.
+    public static func hookParts(from source: [Float], sampleRate: Double) -> [HookPart] {
+        hookPartRanges(from: source, sampleRate: sampleRate).map { range in
+            HookPart(
+                inSip: range.inSip.count > 4 ? declicked(Array(source[range.inSip]), sampleRate: sampleRate) : [],
+                outRelease: declicked(Array(source[range.outRelease]), sampleRate: sampleRate)
+            )
+        }
+    }
+
+    /// See `hookParts`. Each range is clipped to its own unit, so pairs never overlap.
+    public static func hookPartRanges(from source: [Float], sampleRate: Double) -> [HookPartRange] {
+        let peaks = detectPeaks(source, sampleRate: sampleRate, minDistSec: hookMinDistSec)
+        guard !peaks.isEmpty else { return [] }
+        // Unit bounds exactly as `extract` cuts them; a single event is its own whole-source unit.
+        var bounds: [Int]
+        if peaks.count >= 2 {
+            var gaps: [Int] = []
+            for i in 1..<peaks.count { gaps.append(peaks[i] - peaks[i - 1]) }
+            let medianGap = max(1, median(gaps))
+            bounds = peaks.map { max(0, $0 - medianGap * 55 / 100) }
+            bounds.append(min(source.count, peaks[peaks.count - 1] + medianGap * 45 / 100))
+        } else {
+            bounds = [0, source.count]
+        }
+
+        let (env, window, hop) = energyEnvelope(source, sampleRate: sampleRate)
+        guard let globalPeak = env.max(), globalPeak > 0 else { return [] }
+        let half = window / 2
+        func hopIndex(_ frame: Int) -> Int { min(env.count - 1, max(0, (frame - half) / hop)) }
+        func frame(_ hopIndex: Int) -> Int { min(source.count, max(0, hopIndex * hop + half)) }
+        // The sip leads the release by ~0.5 s in the reference take; anything closer than this to
+        // the release peak is the release's own attack, not a sip.
+        let minSipLeadHops = max(1, Int(0.15 * sampleRate) / hop)
+        let preRoll = Int(0.03 * sampleRate)
+        let tailPad = Int(0.03 * sampleRate)
+
+        var ranges: [HookPartRange] = []
+        for i in 0..<peaks.count {
+            let lo = bounds[i], hi = bounds[i + 1]
+            guard hi - lo > 4 else { continue }
+            let loHop = hopIndex(lo), hiHop = hopIndex(hi - 1)
+            let releaseHop = hopIndex(peaks[i])
+            let releaseLevel = env[releaseHop]
+            guard releaseLevel > 0 else { continue }
+
+            // The sip: the loudest point well before the release, if it is a real event (above the
+            // same 12%-of-peak floor peak-picking uses).
+            var split = lo
+            let sipEnd = releaseHop - minSipLeadHops
+            if sipEnd > loHop {
+                var sipHop = loHop
+                for k in loHop...sipEnd where env[k] > env[sipHop] { sipHop = k }
+                if env[sipHop] >= globalPeak * 0.12 {
+                    // Split at the quietest point between the two: the held, silent instant of the hook.
+                    var quiet = sipHop
+                    for k in sipHop...releaseHop where env[k] < env[quiet] { quiet = k }
+                    split = min(max(lo, frame(quiet)), hi)
+                }
+            }
+
+            // The release: back from its peak to its onset, forward to where it has decayed into
+            // the room tone (5% of its own peak, as `trimToMainBody` gates a one-shot's body).
+            let gate = releaseLevel * 0.05
+            var onset = releaseHop
+            while onset > max(loHop, hopIndex(split)), env[onset - 1] >= gate { onset -= 1 }
+            var tail = releaseHop
+            while tail < hiHop, env[tail + 1] >= gate { tail += 1 }
+            let start = min(max(split, onset * hop - preRoll), hi)
+            let end = min(hi, tail * hop + window + tailPad)
+            guard end - start > 4 else { continue }
+            ranges.append(HookPartRange(inSip: lo..<split, outRelease: start..<end))
+        }
+        return ranges
+    }
+
     // MARK: - Detection
 
     /// Detect each event as a prominent local energy maximum (peak-picking), returning peak sample
@@ -112,22 +209,7 @@ public enum UnitExtractor {
     /// secondary attack (a hook's release sip, a gulp's double click) into one peak.
     private static func detectPeaks(_ source: [Float], sampleRate: Double, minDistSec: Double) -> [Int] {
         guard source.count > 1 else { return [] }
-        let window = max(1, Int(0.020 * sampleRate))
-        let hop = max(1, Int(0.010 * sampleRate))
-        var env: [Float] = []
-        var s = 0
-        while s < source.count {
-            let end = min(source.count, s + window)
-            var sum = 0.0
-            for i in s..<end { let v = Double(source[i]); sum += v * v }
-            env.append(Float(sqrt(sum / Double(end - s))))
-            s += hop
-        }
-        if env.count > 2 {
-            var sm = env
-            for i in 1..<(env.count - 1) { sm[i] = (env[i - 1] + env[i] + env[i + 1]) / 3 }
-            env = sm
-        }
+        let (env, window, hop) = energyEnvelope(source, sampleRate: sampleRate)
         guard let peak = env.max(), peak > 0, env.count >= 3 else { return [] }
 
         let floor = peak * 0.12
@@ -144,6 +226,28 @@ public enum UnitExtractor {
         chosen.sort()
         let half = window / 2
         return chosen.map { min(source.count - 1, $0 * hop + half) }
+    }
+
+    /// The 20 ms-window / 10 ms-hop RMS envelope peak-picking runs on, lightly smoothed (3-point).
+    /// Hop `k` covers source frames `k * hop ..< k * hop + window`.
+    private static func energyEnvelope(_ source: [Float], sampleRate: Double) -> (env: [Float], window: Int, hop: Int) {
+        let window = max(1, Int(0.020 * sampleRate))
+        let hop = max(1, Int(0.010 * sampleRate))
+        var env: [Float] = []
+        var s = 0
+        while s < source.count {
+            let end = min(source.count, s + window)
+            var sum = 0.0
+            for i in s..<end { let v = Double(source[i]); sum += v * v }
+            env.append(Float(sqrt(sum / Double(end - s))))
+            s += hop
+        }
+        if env.count > 2 {
+            var sm = env
+            for i in 1..<(env.count - 1) { sm[i] = (env[i - 1] + env[i] + env[i + 1]) / 3 }
+            env = sm
+        }
+        return (env, window, hop)
     }
 
     /// Short fade-in/out + zeroed endpoints so a standalone core is click-free when placed in silence.
