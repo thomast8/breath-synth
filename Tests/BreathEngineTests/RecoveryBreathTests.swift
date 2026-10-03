@@ -209,4 +209,15 @@ struct RecoveryBreathTests {
         #expect(unseeded == hooks[0])
         #expect(two.count > hooks[0].count)
     }
+
+    @Test func aRecoveryAfterAHoldIsTheReleaseThenEveryBreathAndItsLoudnessKnobsScale() throws {
+        let engine = try BreathEngine.load(assetsDirectory: shippedAssets)
+        let buffer = try engine.renderRecovery(breaths: 5)
+        #expect(Int(buffer.frameLength) == Int((22.5 * sr).rounded()), "2.5 s release + 5 × 4 s")
+
+        let release = try engine.renderRecoveryReleaseSamples()
+        let quieter = try engine.renderRecoveryReleaseSamples(cadence: RecoveryCadence(releaseLevel: 0.5))
+        let peak = release.map { abs($0) }.max() ?? 0
+        #expect(abs((quieter.map { abs($0) }.max() ?? 0) - peak / 2) < 1e-4)
+    }
 }

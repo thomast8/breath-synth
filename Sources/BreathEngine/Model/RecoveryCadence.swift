@@ -21,19 +21,32 @@ public struct RecoveryCadence: Sendable, Hashable {
     public var exhale: Double
     public var pause: Double
     public var release: Double
+    /// Peak of each hook's recorded out-release. By-ear tunable.
+    public var hookPeak: Float
+    /// The calm exhale after a hook's release, as a fraction of the release's attack RMS. A release
+    /// is a short burst and the exhale after it is passive airflow, so the tail sits below it.
+    public var tailLevel: Float
+    /// Gain on the post-hold release, relative to a normally rendered calm exhale.
+    public var releaseLevel: Float
 
     public init(
         inhale: Double = 1.0,
         hook: Double = 1.0,
         exhale: Double = 1.5,
         pause: Double = 0.5,
-        release: Double = 2.5
+        release: Double = 2.5,
+        hookPeak: Float = 0.45,
+        tailLevel: Float = 0.5,
+        releaseLevel: Float = 1.0
     ) {
         self.inhale = inhale
         self.hook = hook
         self.exhale = exhale
         self.pause = pause
         self.release = release
+        self.hookPeak = hookPeak
+        self.tailLevel = tailLevel
+        self.releaseLevel = releaseLevel
     }
 
     /// One in, one hook, one out, one pause: four seconds a breath.
@@ -42,6 +55,6 @@ public struct RecoveryCadence: Sendable, Hashable {
     /// The length of one hook breath (everything but `release`).
     public var breathSec: Double { max(0, inhale) + max(0, hook) + max(0, exhale) + max(0, pause) }
 
-    /// Stable text for seeding, so an unseeded render of a given cadence is reproducible.
+    /// Stable text for seeding (timing only, so a loudness change keeps the same breaths), so an unseeded render of a given cadence is reproducible.
     var canonicalString: String { "\(inhale)|\(hook)|\(exhale)|\(pause)|\(release)" }
 }

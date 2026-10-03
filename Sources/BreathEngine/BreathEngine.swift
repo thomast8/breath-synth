@@ -538,7 +538,7 @@ public final class BreathEngine {
         Self.exactLength(
             try recoveryReleaseJob(cadence: cadence, seed: seed).map(RenderJob.run) ?? [],
             frames(cadence.release)
-        )
+        ).map { min(1, max(-1, $0 * cadence.releaseLevel)) }
     }
 
     /// ``renderRecoveryReleaseSamples(cadence:seed:)`` with the DSP off this actor.
@@ -547,10 +547,36 @@ public final class BreathEngine {
         seed: UInt64? = nil
     ) async throws -> [Float] {
         let job = try recoveryReleaseJob(cadence: cadence, seed: seed)
-        let count = frames(cadence.release)
+        let count = frames(cadence.release), level = cadence.releaseLevel
         return await Task.detached(priority: .userInitiated) {
-            Self.exactLength(job.map(RenderJob.run) ?? [], count)
+            Self.exactLength(job.map(RenderJob.run) ?? [], count).map { min(1, max(-1, $0 * level)) }
         }.value
+    }
+
+    /// `breaths` recovery breaths on `cadence`, preceded by the post-hold release when `afterHold`,
+    /// as one buffer: what a trainer plays after a full or packed hold. For listening and tuning.
+    public func renderRecovery(
+        breaths: Int,
+        afterHold: Bool = true,
+        cadence: RecoveryCadence = .standard,
+        seed: UInt64? = nil
+    ) throws -> AVAudioPCMBuffer {
+        var samples = afterHold ? try renderRecoveryReleaseSamples(cadence: cadence, seed: seed) : []
+        for index in 0..<max(0, breaths) {
+            samples += try renderRecoveryBreathSamples(index: index, cadence: cadence, seed: seed.map { $0 &+ UInt64(index) })
+        }
+        return try makeBuffer(samples)
+    }
+
+    /// ``renderRecovery(breaths:afterHold:cadence:seed:)`` written to a 32-bit float WAV file.
+    public func renderRecoveryToWAV(
+        breaths: Int,
+        afterHold: Bool = true,
+        cadence: RecoveryCadence = .standard,
+        seed: UInt64? = nil,
+        url: URL
+    ) throws {
+        try write(renderRecovery(breaths: breaths, afterHold: afterHold, cadence: cadence, seed: seed), to: url)
     }
 
     private func recoveryBreathJob(index: Int, cadence: RecoveryCadence, seed: UInt64?) throws -> RecoveryBreathJob {
@@ -632,7 +658,7 @@ public final class BreathEngine {
                     // Every release at the same peak, the level every render normalises to, so the
                     // hooks are even from breath to breath; their shape still varies as recorded.
                     if let peak = release.map({ abs($0) }).max(), peak > 0 {
-                        let g = 0.45 / peak * Float(job.gain)
+                        let g = job.cadence.hookPeak / peak * Float(job.gain)
                         for i in release.indices { release[i] = min(1, max(-1, release[i] * g)) }
                     }
                 }

@@ -173,7 +173,7 @@ public enum BreathAssembler {
     ///   level. A release longer than the exhale is cut short under the crossfade.
     /// - `exhaleTail` is a calm exhale at least as long as the exhale; its *last* frames are used,
     ///   so the release hands over to airflow already under way and the breath ends on that
-    ///   exhale's own natural fade. It is levelled to `recoveryExhaleTailLevel` of the release.
+    ///   exhale's own natural fade. It is levelled to `cadence.tailLevel` of the release.
     public static func assembleRecoveryBreath(
         inhale: [Float],
         release: [Float],
@@ -215,7 +215,7 @@ public enum BreathAssembler {
                 let releaseRMS = rms(release.prefix(max(1, releaseFrames - crossfade)))
                 let tailRMS = rms(tail[...])
                 if releaseRMS > 0, tailRMS > 0 {
-                    let g = recoveryExhaleTailLevel * releaseRMS / tailRMS
+                    let g = cadence.tailLevel * releaseRMS / tailRMS
                     for i in tail.indices { tail[i] *= g }
                 }
                 Crossfade.place(into: &exhale, segment: tail, at: tailStart, headCrossfade: crossfade)
@@ -232,11 +232,6 @@ public enum BreathAssembler {
         out[total - 1] = 0
         return out
     }
-
-    /// The calm exhale after a recovery hook's release, as a fraction of the loudness (RMS) of the
-    /// release's attack. A release is a short burst and the exhale after it is passive airflow, so
-    /// the tail sits below it. By-ear tunable.
-    public static let recoveryExhaleTailLevel: Float = 0.5
 
     private static func rms(_ samples: ArraySlice<Float>) -> Float {
         guard !samples.isEmpty else { return 0 }

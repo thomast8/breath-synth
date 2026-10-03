@@ -111,6 +111,13 @@ final class DebugModel {
     var countedType: BreathType = .inhale
     var countedCountText = ""
     var countedSeedText = ""
+    // Recovery breaths on a fixed cadence (`renderRecovery`), with its by-ear loudness knobs.
+    var recoveryCadence = false
+    var recoveryBreaths = 5
+    var recoveryAfterHold = true
+    var recoveryHookPeak: Double = 0.45
+    var recoveryTailLevel: Double = 0.5
+    var recoveryReleaseLevel: Double = 1.0
 
     // Cycle
     var cycleInhaleStyle = "calm"
@@ -434,6 +441,12 @@ final class DebugModel {
             let spec = singleSpec()
             buffer = try engine.render(spec)
             detail = "\(spec.style) \(spec.type.rawValue) \(fmt(spec.clampedDurationSec))s · seed \(effectiveSeed(spec)) · variation \(singleVariationEnabled ? "on" : "off")"
+        case .counted where recoveryCadence:
+            let cadence = recoveryCadenceValue()
+            buffer = try engine.renderRecovery(breaths: recoveryBreaths, afterHold: recoveryAfterHold,
+                                               cadence: cadence, seed: parseSeed(countedSeedText))
+            bounds = recoveryBoundaries(cadence)
+            detail = "recovery cadence · \(recoveryAfterHold ? "release + " : "")\(recoveryBreaths) breaths · hook \(fmt(recoveryHookPeak)) tail \(fmt(recoveryTailLevel)) release \(fmt(recoveryReleaseLevel))"
         case .counted:
             let count = parseCount(countedCountText)
             let seed = parseSeed(countedSeedText)
@@ -485,6 +498,9 @@ final class DebugModel {
         switch task {
         case .single:
             try engine.renderToWAV(singleSpec(), url: url)
+        case .counted where recoveryCadence:
+            try engine.renderRecoveryToWAV(breaths: recoveryBreaths, afterHold: recoveryAfterHold,
+                                           cadence: recoveryCadenceValue(), seed: parseSeed(countedSeedText), url: url)
         case .counted:
             try engine.renderCountedToWAV(style: countedStyle, type: countedType, count: parseCount(countedCountText), seed: parseSeed(countedSeedText), url: url)
         case .cycle:
@@ -599,6 +615,27 @@ final class DebugModel {
             if cycle < count - 1 { marks.append((base + cycleLen) / total) } // cycle seam
         }
         return marks
+    }
+
+    private func recoveryCadenceValue() -> RecoveryCadence {
+        RecoveryCadence(hookPeak: Float(recoveryHookPeak), tailLevel: Float(recoveryTailLevel),
+                        releaseLevel: Float(recoveryReleaseLevel))
+    }
+
+    /// Every part of every breath (in, hook, out, pause), after the release when there is one.
+    private func recoveryBoundaries(_ c: RecoveryCadence) -> [Double] {
+        let lead = recoveryAfterHold ? c.release : 0
+        let total = lead + c.breathSec * Double(recoveryBreaths)
+        guard total > 0 else { return [] }
+        var marks: [Double] = lead > 0 ? [lead] : []
+        for b in 0..<recoveryBreaths {
+            var t = lead + Double(b) * c.breathSec
+            for part in [c.inhale, c.hook, c.exhale, c.pause] {
+                t += part
+                marks.append(t)
+            }
+        }
+        return marks.filter { $0 < total }.map { $0 / total }
     }
 
     private func sequenceBoundaries(_ plan: SequencePlan) -> [Double] {

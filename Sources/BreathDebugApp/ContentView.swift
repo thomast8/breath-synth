@@ -146,6 +146,20 @@ struct ContentView: View {
                     Text("blank = auto").font(.caption2).foregroundStyle(.tertiary)
                 }
                 seedField("Seed", text: $model.countedSeedText)
+                Divider()
+                Toggle("Recovery cadence (1 in · 1 hook · 1.5 out · 0.5 pause)", isOn: $model.recoveryCadence)
+                    .toggleStyle(.switch)
+                if model.recoveryCadence {
+                    Toggle("Release first (after a full or packed hold)", isOn: $model.recoveryAfterHold)
+                        .toggleStyle(.switch)
+                    HStack {
+                        Text("Breaths").frame(width: 90, alignment: .leading)
+                        Stepper("\(model.recoveryBreaths)", value: $model.recoveryBreaths, in: 1...12)
+                    }
+                    sliderRow("Hook peak", $model.recoveryHookPeak, 0.1...1.0, step: 0.05, unit: "")
+                    sliderRow("Tail level", $model.recoveryTailLevel, 0.1...1.5, step: 0.05, unit: "×")
+                    sliderRow("Release", $model.recoveryReleaseLevel, 0.25...2.0, step: 0.05, unit: "×")
+                }
             }
         }
     }
