@@ -35,9 +35,9 @@ public struct RecoveryCadence: Sendable, Hashable {
         exhale: Double = 1.5,
         pause: Double = 0.5,
         release: Double = 2.5,
-        hookPeak: Float = 0.45,
-        tailLevel: Float = 0.5,
-        releaseLevel: Float = 1.0
+        hookPeak: Float = 0.6,
+        tailLevel: Float = 0.85,
+        releaseLevel: Float = 1.3
     ) {
         self.inhale = inhale
         self.hook = hook

@@ -215,7 +215,7 @@ struct RecoveryBreathTests {
         let buffer = try engine.renderRecovery(breaths: 5)
         #expect(Int(buffer.frameLength) == Int((22.5 * sr).rounded()), "2.5 s release + 5 × 4 s")
 
-        let release = try engine.renderRecoveryReleaseSamples()
+        let release = try engine.renderRecoveryReleaseSamples(cadence: RecoveryCadence(releaseLevel: 1))
         let quieter = try engine.renderRecoveryReleaseSamples(cadence: RecoveryCadence(releaseLevel: 0.5))
         let peak = release.map { abs($0) }.max() ?? 0
         #expect(abs((quieter.map { abs($0) }.max() ?? 0) - peak / 2) < 1e-4)

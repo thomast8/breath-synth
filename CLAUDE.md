@@ -62,7 +62,7 @@ and `BreathEngine.renderSamples`/`renderCountedSamples` branch on it:
   packing). Counted styles **throw `styleRequiresCount`** from duration-based render/cycle/sequence.
   A one-take `count: 1` render with a `seed` plays unit `seed % units` (unseeded: unit 0).
 - **recovery breath** (`renderRecoveryBreathSamples(index:cadence:seed:)`) — one hook breath laid out on a
-  `RecoveryCadence` (`.standard` = inhale 1.0 / hook 1.0 / exhale 1.5 / pause 0.5 s), exactly
+  `RecoveryCadence` (`.standard` = inhale 1.0 / hook 1.0 / exhale 1.5 / pause 0.5 s; loudness hook peak 0.6, tail 0.85×, release 1.3×, tuned by ear in BreathDebug), exactly
   `round(breathSec × rate)` frames: a 1 s `hyperventilation` textured inhale, silence for the hook, the
   recorded out-release of hook `index % 6` (`UnitExtractor.hookParts`) crossfaded into the tail of a calm
   textured exhale (`BreathAssembler.assembleRecoveryBreath`), silence for the pause. A caller that draws a

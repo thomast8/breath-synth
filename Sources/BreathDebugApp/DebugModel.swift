@@ -115,9 +115,9 @@ final class DebugModel {
     var recoveryCadence = false
     var recoveryBreaths = 5
     var recoveryAfterHold = true
-    var recoveryHookPeak: Double = 0.45
-    var recoveryTailLevel: Double = 0.5
-    var recoveryReleaseLevel: Double = 1.0
+    var recoveryHookPeak = Double(RecoveryCadence.standard.hookPeak)
+    var recoveryTailLevel = Double(RecoveryCadence.standard.tailLevel)
+    var recoveryReleaseLevel = Double(RecoveryCadence.standard.releaseLevel)
     /// The cadence renders recovery hooks only; another counted style (packing) keeps its own path.
     var usesRecoveryCadence: Bool { recoveryCadence && countedStyle == BreathEngine.recoveryHookStyle }
 
