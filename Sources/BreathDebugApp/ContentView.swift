@@ -149,7 +149,8 @@ struct ContentView: View {
                 Divider()
                 Toggle("Recovery cadence (1 in · 1 hook · 1.5 out · 0.5 pause)", isOn: $model.recoveryCadence)
                     .toggleStyle(.switch)
-                if model.recoveryCadence {
+                    .disabled(model.countedStyle != BreathEngine.recoveryHookStyle)
+                if model.usesRecoveryCadence {
                     Toggle("Release first (after a full or packed hold)", isOn: $model.recoveryAfterHold)
                         .toggleStyle(.switch)
                     HStack {

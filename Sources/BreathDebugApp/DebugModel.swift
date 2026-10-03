@@ -118,6 +118,8 @@ final class DebugModel {
     var recoveryHookPeak: Double = 0.45
     var recoveryTailLevel: Double = 0.5
     var recoveryReleaseLevel: Double = 1.0
+    /// The cadence renders recovery hooks only; another counted style (packing) keeps its own path.
+    var usesRecoveryCadence: Bool { recoveryCadence && countedStyle == BreathEngine.recoveryHookStyle }
 
     // Cycle
     var cycleInhaleStyle = "calm"
@@ -441,7 +443,7 @@ final class DebugModel {
             let spec = singleSpec()
             buffer = try engine.render(spec)
             detail = "\(spec.style) \(spec.type.rawValue) \(fmt(spec.clampedDurationSec))s · seed \(effectiveSeed(spec)) · variation \(singleVariationEnabled ? "on" : "off")"
-        case .counted where recoveryCadence:
+        case .counted where usesRecoveryCadence:
             let cadence = recoveryCadenceValue()
             buffer = try engine.renderRecovery(breaths: recoveryBreaths, afterHold: recoveryAfterHold,
                                                cadence: cadence, seed: parseSeed(countedSeedText))
@@ -498,7 +500,7 @@ final class DebugModel {
         switch task {
         case .single:
             try engine.renderToWAV(singleSpec(), url: url)
-        case .counted where recoveryCadence:
+        case .counted where usesRecoveryCadence:
             try engine.renderRecoveryToWAV(breaths: recoveryBreaths, afterHold: recoveryAfterHold,
                                            cadence: recoveryCadenceValue(), seed: parseSeed(countedSeedText), url: url)
         case .counted:
