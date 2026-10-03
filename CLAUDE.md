@@ -60,6 +60,14 @@ and `BreathEngine.renderSamples`/`renderCountedSamples` branch on it:
   `UnitExtractor.extract` + `assembleCounted` (a verbatim contiguous slice of the recording). Two takes
   → `gulpCores` + `rhythmGaps` + `assembleHybrid` (clean cores at another take's rhythm; used by
   packing). Counted styles **throw `styleRequiresCount`** from duration-based render/cycle/sequence.
+  A one-take `count: 1` render with a `seed` plays unit `seed % units` (unseeded: unit 0).
+- **recovery breath** (`renderRecoveryBreathSamples(index:cadence:seed:)`) — one hook breath laid out on a
+  `RecoveryCadence` (`.standard` = inhale 1.0 / hook 1.0 / exhale 1.5 / pause 0.5 s), exactly
+  `round(breathSec × rate)` frames: a 1 s `hyperventilation` textured inhale, silence for the hook, the
+  recorded out-release of hook `index % 6` (`UnitExtractor.hookParts`) crossfaded into the tail of a calm
+  textured exhale (`BreathAssembler.assembleRecoveryBreath`), silence for the pause. A caller that draws a
+  guide from the same cadence is in step with the audio by construction. `renderRecoveryReleaseSamples`
+  is the audible post-hold release (calm exhale, `cadence.release`, default 2.5 s).
 
 Renders are **deterministic**: `seed` → `SeededRNG`; when nil a stable seed is derived from the spec
 (`Variation.stableSeed`), and `render(spec)` is cached by a canonical key. Denoise is **on by default**
@@ -73,7 +81,7 @@ Renders are **deterministic**: `seed` → `SeededRNG`; when nil a stable seed is
 | full | textured | inhale | full-lung inhale |
 | frc | oneShot | exhale | passive exhale to FRC |
 | rv | oneShot | exhale | forced exhale to RV |
-| recovery | counted | inhale | post-hold hook breaths (double-sip) |
+| recovery | counted | inhale | post-hold hook breaths: 6 hooks, each an in-sip then an out-release ~0.5 s later. Nadir plays them through `renderRecoveryBreathSamples` (cadence above), which uses only the out-releases |
 | packing | counted | inhale | glossopharyngeal packing (hybrid, 2 takes) |
 | hyperventilation | textured | inhale, exhale | fast/forceful |
 
@@ -83,7 +91,9 @@ gate its pickers.
 
 ## Public render/playback API (`BreathEngine`)
 
-`renderSamples`/`render` (single), `renderCycle`, `renderSequence(plan)`, `renderCounted(style:type:count:seed:)`;
+`renderSamples`/`render` (single), `renderCycle`, `renderSequence(plan)`, `renderCounted(style:type:count:seed:)`,
+`renderRecoveryBreathSamples(index:cadence:seed:)` / `renderRecoveryReleaseSamples(cadence:seed:)` (each with an
+`…OffActor` variant);
 `*ToWAV` variants; `play`/`playCycle`/`playSequence`/`playCounted`; `play(_ buffer)` and
 `play(_ buffer, fromFrame:)` (seek); `pause`/`resume`; `currentSampleTime` (playhead); `stop`.
 
@@ -105,5 +115,8 @@ you can drag to seek; Pause/Play/Stop/Save-WAV. Every action is fanned out to a 
   `#require`) under `Tests/BreathEngineTests/` and `Tests/BreathBankTests/`.
 - Editing a recording in `Assets/breaths/` changes the render verbatim for counted/oneShot styles
   (no synthesis hides it). Update the manifest's `durationSec` if length changes; keep a backup.
-- `recovery` is a verbatim slice — its "glottal stop" artifacts are in the recording, not a join bug
-  (adjacent extracted units are contiguous; there is no concatenation step).
+- `recovery` through `renderCounted` is a verbatim slice — its "glottal stop" artifacts are in the
+  recording, not a join bug (adjacent extracted units are contiguous; there is no concatenation step).
+  Played as recorded a hook is ~1 s, too fast to follow; use the recovery-breath API for paced breaths.
+- The `full` style has no exhale recordings: a `full` exhale render is silence. The recovery release is
+  rendered from `calm` for that reason.

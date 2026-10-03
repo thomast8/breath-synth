@@ -119,7 +119,9 @@ public final class BreathEngine {
 
     /// Gathers everything the assembler needs. This is the part that touches the library, and the
     /// only part that has to happen here.
-    private func job(for spec: BreathSpec) throws -> RenderJob {
+    /// `durationSec` overrides the spec's clamped duration with an exact one, for the parts of a
+    /// recovery breath, which are shorter than a free-standing breath is allowed to be.
+    private func job(for spec: BreathSpec, durationSec: Double? = nil) throws -> RenderJob {
         let mode = config.manifest.styles[spec.style]?.effectiveRender ?? .textured
         // Counted styles have no duration; `BreathSpec` can't express a count, so fail loudly
         // rather than silently degrading to one one-shot copy (via render/cycle/sequence).
@@ -140,7 +142,7 @@ public final class BreathEngine {
             : nil
         return RenderJob(
             type: spec.type,
-            durationSec: spec.clampedDurationSec,
+            durationSec: durationSec ?? spec.clampedDurationSec,
             clips: clips,
             settings: config.settings,
             deltas: deltas,
@@ -376,8 +378,12 @@ public final class BreathEngine {
                 settings: config.settings, noiseProfile: noiseProfile,
                 sampleRate: config.sampleRate, seed: resolvedSeed, gain: gain)
         } else {
+            // A one-event render picks its unit by the caller's seed, so callers that render hooks
+            // one at a time (`count: 1, seed: event`) get distinct recorded hooks, not unit 0 every
+            // time. No seed keeps the old first-unit render.
             return CountedJob(
-                shape: .singleTake(raw: try library.samples(for: palette.oneShot[0].file), count: count),
+                shape: .singleTake(raw: try library.samples(for: palette.oneShot[0].file), count: count,
+                                   unitSeed: count == 1 ? seed : nil),
                 settings: config.settings, noiseProfile: noiseProfile,
                 sampleRate: config.sampleRate, seed: resolvedSeed, gain: gain)
         }
@@ -388,7 +394,7 @@ public final class BreathEngine {
         enum Shape: Sendable {
             case pooledHybrid(cores: [[Float]], gaps: [Int], count: Int)
             case takeHybrid(coreRaw: [Float], rhythmRaw: [Float], count: Int?)
-            case singleTake(raw: [Float], count: Int?)
+            case singleTake(raw: [Float], count: Int?, unitSeed: UInt64?)
         }
 
         let shape: Shape
@@ -416,10 +422,14 @@ public final class BreathEngine {
                     cores: cores, gaps: gaps, count: count ?? (gaps.count + 1),
                     settings: job.settings, seed: job.seed)
 
-            case .singleTake(let raw, let count):
+            case .singleTake(let raw, let count, let unitSeed):
                 let prepared = BreathAssembler.prepareSource(
                     raw, settings: job.settings, noiseProfile: job.noiseProfile)
-                let (units, detected) = UnitExtractor.extract(from: prepared, sampleRate: job.sampleRate)
+                let (extracted, detected) = UnitExtractor.extract(from: prepared, sampleRate: job.sampleRate)
+                var units = extracted
+                if let unitSeed, !units.isEmpty {
+                    units = [units[Int(unitSeed % UInt64(units.count))]]
+                }
                 body = BreathAssembler.assembleCounted(
                     units: units, count: count ?? detected, settings: job.settings)
             }
@@ -480,6 +490,157 @@ public final class BreathEngine {
     ) async throws -> [Float] {
         let job = try countedJob(style: style, type: type, count: count, seed: seed)
         return await Task.detached(priority: .userInitiated) { CountedJob.run(job) }.value
+    }
+
+    // MARK: - Recovery breaths
+
+    /// The recorded hooks a recovery breath's exhale is cut from.
+    public static let recoveryHookStyle: BreathStyle = "recovery"
+    /// The inhale of a recovery breath: a quick, deep mouth inhale. `hyperventilation` is recorded
+    /// at a fast breathing pace and its contour is designed for short, forceful breaths (quick
+    /// attack, held level); `full` is a slow maximal draw whose contour swells late, which at one
+    /// second reads as a soft sip. The others are fallbacks for palettes without it.
+    public static let recoveryInhaleStyles: [BreathStyle] = ["hyperventilation", "full", "calm"]
+    /// The passive exhale a hook's release hands over to, and the post-hold release.
+    public static let recoveryExhaleStyle: BreathStyle = "calm"
+
+    /// Render recovery hook breath number `index` on `cadence`: exactly
+    /// `round(cadence.breathSec * sampleRate)` frames — inhale, silent hook, the recorded release of
+    /// hook `index % hooks` handing over to a calm exhale, silent pause. See `RecoveryCadence`.
+    ///
+    /// `seed` varies the synthesized inhale and exhale; when nil a stable seed is derived from
+    /// `index` and `cadence`, so a given breath always sounds the same. A palette without a part's
+    /// style renders that part as silence rather than failing, so the length is always exact.
+    public func renderRecoveryBreathSamples(
+        index: Int,
+        cadence: RecoveryCadence = .standard,
+        seed: UInt64? = nil
+    ) throws -> [Float] {
+        RecoveryBreathJob.run(try recoveryBreathJob(index: index, cadence: cadence, seed: seed))
+    }
+
+    /// ``renderRecoveryBreathSamples(index:cadence:seed:)`` with the DSP off this actor.
+    public func renderRecoveryBreathSamplesOffActor(
+        index: Int,
+        cadence: RecoveryCadence = .standard,
+        seed: UInt64? = nil
+    ) async throws -> [Float] {
+        let job = try recoveryBreathJob(index: index, cadence: cadence, seed: seed)
+        return await Task.detached(priority: .userInitiated) { RecoveryBreathJob.run(job) }.value
+    }
+
+    /// Render the audible release that empties full lungs before the first recovery breath: a calm
+    /// textured exhale of exactly `round(cadence.release * sampleRate)` frames.
+    public func renderRecoveryReleaseSamples(
+        cadence: RecoveryCadence = .standard,
+        seed: UInt64? = nil
+    ) throws -> [Float] {
+        Self.exactLength(
+            try recoveryReleaseJob(cadence: cadence, seed: seed).map(RenderJob.run) ?? [],
+            frames(cadence.release)
+        )
+    }
+
+    /// ``renderRecoveryReleaseSamples(cadence:seed:)`` with the DSP off this actor.
+    public func renderRecoveryReleaseSamplesOffActor(
+        cadence: RecoveryCadence = .standard,
+        seed: UInt64? = nil
+    ) async throws -> [Float] {
+        let job = try recoveryReleaseJob(cadence: cadence, seed: seed)
+        let count = frames(cadence.release)
+        return await Task.detached(priority: .userInitiated) {
+            Self.exactLength(job.map(RenderJob.run) ?? [], count)
+        }.value
+    }
+
+    private func recoveryBreathJob(index: Int, cadence: RecoveryCadence, seed: UInt64?) throws -> RecoveryBreathJob {
+        let resolved = seed ?? Variation.fnv1a("recovery-breath|\(index)|\(cadence.canonicalString)")
+        var inhale: RenderJob?
+        if cadence.inhale > 0, let style = Self.recoveryInhaleStyles.first(where: { hasClips(style: $0, type: .inhale) }) {
+            inhale = try job(
+                for: BreathSpec(type: .inhale, durationSec: cadence.inhale, style: style, seed: resolved),
+                durationSec: cadence.inhale
+            )
+        }
+        // The tail is cut from the end of a calm exhale the length of the whole exhale, so it
+        // carries that exhale's natural fade; the release covers its opening.
+        var tail: RenderJob?
+        if cadence.exhale > 0, hasClips(style: Self.recoveryExhaleStyle, type: .exhale) {
+            tail = try job(
+                for: BreathSpec(type: .exhale, durationSec: cadence.exhale, style: Self.recoveryExhaleStyle,
+                                seed: resolved &+ 0x9E37_79B9_7F4A_7C15),
+                durationSec: cadence.exhale
+            )
+        }
+        let hooks = config.manifest.palette(style: Self.recoveryHookStyle, type: .inhale)?.oneShot.first
+        return RecoveryBreathJob(
+            hookRaw: try hooks.map { try library.samples(for: $0.file) },
+            index: index,
+            inhale: inhale,
+            exhaleTail: tail,
+            cadence: cadence,
+            settings: config.settings,
+            noiseProfile: noiseProfile,
+            gain: config.masterGain * Variation.dbToGain(config.headroomDb)
+        )
+    }
+
+    private func recoveryReleaseJob(cadence: RecoveryCadence, seed: UInt64?) throws -> RenderJob? {
+        guard cadence.release > 0, hasClips(style: Self.recoveryExhaleStyle, type: .exhale) else { return nil }
+        let resolved = seed ?? Variation.fnv1a("recovery-release|\(cadence.canonicalString)")
+        return try job(
+            for: BreathSpec(type: .exhale, durationSec: cadence.release, style: Self.recoveryExhaleStyle, seed: resolved),
+            durationSec: cadence.release
+        )
+    }
+
+    private func hasClips(style: BreathStyle, type: BreathType) -> Bool {
+        !(config.manifest.palette(style: style, type: type)?.oneShot.isEmpty ?? true)
+    }
+
+    /// Pad with silence or cut to exactly `count` frames. Renders already come out at their exact
+    /// length; this only guards a missing part (silence) and a one-frame zero-duration render.
+    nonisolated static func exactLength(_ samples: [Float], _ count: Int) -> [Float] {
+        if samples.count == count { return samples }
+        if samples.count > count { return Array(samples.prefix(count)) }
+        return samples + [Float](repeating: 0, count: count - samples.count)
+    }
+
+    /// One recovery breath reduced to values — see ``RenderJob``. The hook take is prepared and
+    /// split here, off the actor, because that is the same denoise that makes a counted render costly.
+    struct RecoveryBreathJob: Sendable {
+        let hookRaw: [Float]?
+        let index: Int
+        let inhale: RenderJob?
+        let exhaleTail: RenderJob?
+        let cadence: RecoveryCadence
+        let settings: AssemblerSettings
+        let noiseProfile: [Float]?
+        /// Master gain and headroom for the recorded release, as `CountedJob` applies them.
+        let gain: Double
+
+        static func run(_ job: RecoveryBreathJob) -> [Float] {
+            let sr = job.settings.sampleRate
+            let inhale = job.inhale.map(RenderJob.run) ?? []
+            let tail = job.exhaleTail.map(RenderJob.run) ?? []
+            var release: [Float] = []
+            if let raw = job.hookRaw {
+                let prepared = BreathAssembler.prepareSource(raw, settings: job.settings, noiseProfile: job.noiseProfile)
+                let parts = UnitExtractor.hookParts(from: prepared, sampleRate: sr)
+                if !parts.isEmpty {
+                    release = parts[((job.index % parts.count) + parts.count) % parts.count].outRelease
+                    // Every release at the same peak, the level every render normalises to, so the
+                    // hooks are even from breath to breath; their shape still varies as recorded.
+                    if let peak = release.map({ abs($0) }).max(), peak > 0 {
+                        let g = 0.45 / peak * Float(job.gain)
+                        for i in release.indices { release[i] = min(1, max(-1, release[i] * g)) }
+                    }
+                }
+            }
+            return BreathAssembler.assembleRecoveryBreath(
+                inhale: inhale, release: release, exhaleTail: tail, cadence: job.cadence, sampleRate: sr
+            )
+        }
     }
 
     // MARK: - Manifest accessors

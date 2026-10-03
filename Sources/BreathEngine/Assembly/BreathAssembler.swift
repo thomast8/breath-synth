@@ -162,6 +162,89 @@ public enum BreathAssembler {
         return normalizePeak(applyEdgeFades(out, sampleRate: settings.sampleRate))
     }
 
+    /// Lay one recovery hook breath out on `cadence`: `inhale` over the inhale, silence over the
+    /// hook, the recorded `release` crossfaded into the tail of `exhaleTail` over the exhale, and
+    /// silence over the pause. Returns exactly `round(cadence.breathSec * sampleRate)` frames, with
+    /// each part starting at its own rounded boundary, so a guide drawn from the same cadence is in
+    /// step with the sound by construction.
+    ///
+    /// - `inhale` is trimmed or zero-padded to the inhale; render it at that length.
+    /// - `release` is the recording's out-release (`UnitExtractor.hookParts`), already at its final
+    ///   level. A release longer than the exhale is cut short under the crossfade.
+    /// - `exhaleTail` is a calm exhale at least as long as the exhale; its *last* frames are used,
+    ///   so the release hands over to airflow already under way and the breath ends on that
+    ///   exhale's own natural fade. It is levelled to `recoveryExhaleTailLevel` of the release.
+    public static func assembleRecoveryBreath(
+        inhale: [Float],
+        release: [Float],
+        exhaleTail: [Float],
+        cadence: RecoveryCadence,
+        sampleRate: Double
+    ) -> [Float] {
+        func at(_ seconds: Double) -> Int { Segments.frames(seconds: seconds, sampleRate: sampleRate) }
+        let inhaleSec = max(0, cadence.inhale), hookSec = max(0, cadence.hook)
+        let exhaleSec = max(0, cadence.exhale), pauseSec = max(0, cadence.pause)
+        // Cumulative boundaries, each rounded once: the parts always sum to the whole.
+        let inhaleEnd = at(inhaleSec)
+        let exhaleStart = at(inhaleSec + hookSec)
+        let exhaleEnd = at(inhaleSec + hookSec + exhaleSec)
+        let total = at(inhaleSec + hookSec + exhaleSec + pauseSec)
+        var out = [Float](repeating: 0, count: total)
+        guard total > 0 else { return out }
+
+        for i in 0..<min(inhaleEnd, inhale.count) { out[i] = inhale[i] }
+
+        let exhaleFrames = exhaleEnd - exhaleStart
+        if exhaleFrames > 0 {
+            var exhale = [Float](repeating: 0, count: exhaleFrames)
+            let releaseFrames = min(release.count, exhaleFrames)
+            for i in 0..<releaseFrames { exhale[i] = release[i] }
+            // The handover spans the release's second half, where it is already decaying, so the
+            // burst fades into the airflow rather than dropping out before it; its first half — the
+            // attack — is always heard as recorded.
+            let crossfade = min(Segments.frames(seconds: 0.3, sampleRate: sampleRate), releaseFrames / 2)
+            let tailStart = max(0, releaseFrames - crossfade)
+            let tailFrames = exhaleFrames - tailStart
+            if tailFrames > 0, !exhaleTail.isEmpty {
+                var tail = Array(exhaleTail.suffix(tailFrames))
+                if tail.count < tailFrames {
+                    tail = [Float](repeating: 0, count: tailFrames - tail.count) + tail
+                }
+                // Levelled by loudness, not peak: a release is a burst whose peak sits far above
+                // its body, and peak-matching left the steady tail louder than the release it follows.
+                let releaseRMS = rms(release.prefix(max(1, releaseFrames - crossfade)))
+                let tailRMS = rms(tail[...])
+                if releaseRMS > 0, tailRMS > 0 {
+                    let g = recoveryExhaleTailLevel * releaseRMS / tailRMS
+                    for i in tail.indices { tail[i] *= g }
+                }
+                Crossfade.place(into: &exhale, segment: tail, at: tailStart, headCrossfade: crossfade)
+            } else if releaseFrames < release.count, releaseFrames > 1 {
+                // No tail to hand over to: a release cut short still has to end on silence.
+                let fade = min(Segments.frames(seconds: 0.02, sampleRate: sampleRate), releaseFrames)
+                let curve = Crossfade.fadeOut(fade)
+                for k in 0..<fade { exhale[releaseFrames - fade + k] *= curve[k] }
+            }
+            exhale[exhale.count - 1] = 0
+            for i in 0..<exhaleFrames { out[exhaleStart + i] = exhale[i] }
+        }
+        out[0] = 0
+        out[total - 1] = 0
+        return out
+    }
+
+    /// The calm exhale after a recovery hook's release, as a fraction of the loudness (RMS) of the
+    /// release's attack. A release is a short burst and the exhale after it is passive airflow, so
+    /// the tail sits below it. By-ear tunable.
+    public static let recoveryExhaleTailLevel: Float = 0.5
+
+    private static func rms(_ samples: ArraySlice<Float>) -> Float {
+        guard !samples.isEmpty else { return 0 }
+        var sum = 0.0
+        for v in samples { sum += Double(v) * Double(v) }
+        return Float((sum / Double(samples.count)).squareRoot())
+    }
+
     // MARK: - Render path
 
     /// Single unified render path. Timbre comes from a flattened slice of the
