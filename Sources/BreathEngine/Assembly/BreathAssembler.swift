@@ -171,9 +171,10 @@ public enum BreathAssembler {
     /// - `inhale` is trimmed or zero-padded to the inhale; render it at that length.
     /// - `release` is the recording's out-release (`UnitExtractor.hookParts`), already at its final
     ///   level. A release longer than the exhale is cut short under the crossfade.
-    /// - `exhaleTail` is a calm exhale at least as long as the exhale; its *last* frames are used,
+    /// - `exhaleTail` is a calm exhale longer than the exhale; its *last* frames are used,
     ///   so the release hands over to airflow already under way and the breath ends on that
-    ///   exhale's own natural fade. It is levelled to `cadence.tailLevel` of the release.
+    ///   exhale's own natural fade. It opens at `cadence.tailLevel` of the release's level where
+    ///   the release hands over, so the exhale only winds down from there.
     public static func assembleRecoveryBreath(
         inhale: [Float],
         release: [Float],
@@ -210,10 +211,14 @@ public enum BreathAssembler {
                 if tail.count < tailFrames {
                     tail = [Float](repeating: 0, count: tailFrames - tail.count) + tail
                 }
-                // Levelled by loudness, not peak: a release is a burst whose peak sits far above
-                // its body, and peak-matching left the steady tail louder than the release it follows.
-                let releaseRMS = rms(release.prefix(max(1, releaseFrames - crossfade)))
-                let tailRMS = rms(tail[...])
+                // Levelled by loudness where the two meet: the release's decaying second half
+                // against the tail's opening. A release is a burst that falls away fast, and a tail
+                // levelled against its whole body came back up after it, swelling like an inhale
+                // (Nadir #382); a tail levelled by peak was louder still.
+                let releaseRMS = crossfade > 0
+                    ? rms(release[tailStart..<releaseFrames])
+                    : rms(release.prefix(max(1, releaseFrames)))
+                let tailRMS = rms(tail.prefix(max(1, crossfade)))
                 if releaseRMS > 0, tailRMS > 0 {
                     let g = cadence.tailLevel * releaseRMS / tailRMS
                     for i in tail.indices { tail[i] *= g }
