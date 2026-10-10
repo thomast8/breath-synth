@@ -23,8 +23,9 @@ public struct RecoveryCadence: Sendable, Hashable {
     public var release: Double
     /// Peak of each hook's recorded out-release. By-ear tunable.
     public var hookPeak: Float
-    /// The calm exhale after a hook's release, as a fraction of the release's attack RMS. A release
-    /// is a short burst and the exhale after it is passive airflow, so the tail sits below it.
+    /// The calm exhale after a hook's release, as a fraction of the release's RMS where it hands
+    /// over to it. A release is a short burst and the exhale after it is passive airflow, so the tail
+    /// carries on from the release's decay and sits below it.
     public var tailLevel: Float
     /// Gain on the post-hold release, relative to a normally rendered calm exhale.
     public var releaseLevel: Float

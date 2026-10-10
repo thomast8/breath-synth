@@ -147,6 +147,27 @@ struct RecoveryBreathTests {
         #expect(longer.count == Segments.frames(seconds: custom.breathSec, sampleRate: sr))
     }
 
+    /// Nadir #382: the recovery exhale sounded like an inhale. After the recorded release the
+    /// airflow swelled back up to full loudness, because the tail was the end of a calm exhale only
+    /// as long as the exhale, which still held that exhale's own attack and peak. Once the release
+    /// has handed over, the exhale only ever winds down.
+    @Test func aShippedRecoveryExhaleNeverSwellsAfterItsRelease() throws {
+        let engine = try BreathEngine.load(assetsDirectory: shippedAssets)
+        let bin = Int(0.05 * sr)
+        let exhaleStart = 88_200, exhaleEnd = 154_350
+        for index in 0..<6 {
+            let breath = try engine.renderRecoveryBreathSamples(index: index)
+            // From the end of the 0.3 s crossfade, where only the tail is left.
+            let bins = stride(from: exhaleStart + Int(0.3 * sr), to: exhaleEnd - bin, by: bin).map {
+                rms(breath[$0..<($0 + bin)])
+            }
+            for k in 1..<bins.count {
+                let before = bins[0..<k].max() ?? 0
+                #expect(bins[k] <= before * 1.2, "breath \(index) swells at bin \(k): \(bins[k]) after \(before)")
+            }
+        }
+    }
+
     @Test func everyPartOfAShippedRecoveryBreathSoundsWhereTheCadenceSaysItDoes() throws {
         let engine = try BreathEngine.load(assetsDirectory: shippedAssets)
         let breath = try engine.renderRecoveryBreathSamples(index: 0)

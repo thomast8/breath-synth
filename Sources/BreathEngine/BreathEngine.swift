@@ -588,14 +588,16 @@ public final class BreathEngine {
                 durationSec: cadence.inhale
             )
         }
-        // The tail is cut from the end of a calm exhale the length of the whole exhale, so it
-        // carries that exhale's natural fade; the release covers its opening.
+        // The tail is cut from the end of a calm exhale twice the length of the exhale, so it is
+        // airflow already under way that ends on that exhale's natural fade. One only as long as
+        // the exhale still held its own attack and peak after the release, and the breath swelled
+        // back up like an inhale (Nadir #382).
         var tail: RenderJob?
         if cadence.exhale > 0, hasClips(style: Self.recoveryExhaleStyle, type: .exhale) {
             tail = try job(
-                for: BreathSpec(type: .exhale, durationSec: cadence.exhale, style: Self.recoveryExhaleStyle,
+                for: BreathSpec(type: .exhale, durationSec: 2 * cadence.exhale, style: Self.recoveryExhaleStyle,
                                 seed: resolved &+ 0x9E37_79B9_7F4A_7C15),
-                durationSec: cadence.exhale
+                durationSec: 2 * cadence.exhale
             )
         }
         let hooks = config.manifest.palette(style: Self.recoveryHookStyle, type: .inhale)?.oneShot.first
